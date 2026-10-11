@@ -328,6 +328,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, "Missing Sec-WebSocket-Key")
             return
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        # The handler answers in HTTP/1.0 by default. Chrome takes a 1.0
+        # upgrade, Firefox refuses it and never connects.
+        self.protocol_version = "HTTP/1.1"
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
