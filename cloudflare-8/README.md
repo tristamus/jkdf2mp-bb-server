@@ -1,7 +1,7 @@
 # cloudflare-8
 
 `cloudflare-7` with a new page and engine from OpenJKDF2 commit 5a6b3966 (PR tristamus/OpenJKDF2#13,
-merged into `web-mp`). Players can play with full mods, like Saber Battle X. After picking the game
+merged into `web-mp`), live as Cloudflare version e7098fc3. Players can play with full mods, like Saber Battle X. After picking the game
 folder, the page lists every mod it finds, all ticked: mod folders, GOBs in `Resource` and `mods`
 that aren't the game's own, and JK Patch Commander's active patches. Several ticked mods run
 together. A host's mods go to joiners who don't have them, directly or through the lobby, without
@@ -11,7 +11,8 @@ All three files in `public/` differ from `cloudflare-7`. The lobby (`src/lobby.j
 and the package files) is unchanged: the lobby entries already had room for the mod's short tail.
 The toolchain (Emscripten 6.0.12, SDL3 release-3.4.2) built the merged commit with the old version
 label byte for byte the same as the tested build, so the engine here differs from what was tested
-only by its version label. `SHA256SUMS` lists every file.
+only by its version label. Each file in `public/` was checked against the live site after the
+deploy. `SHA256SUMS` lists every file.
 
 Needs Node.js 22 or newer. In this folder:
 
