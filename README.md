@@ -12,6 +12,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-5/`: `cloudflare-4` with automatic map downloads for joiners.
 - `cloudflare-6/`: `cloudflare-5` with the landing page saying that custom maps you host are shared.
 - `cloudflare-7/`: `cloudflare-6` with View Cutscenes and Expansions & Mods hidden from the menu.
+- `cloudflare-8/`: `cloudflare-7` with full mods, several at a time, shared with joiners.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
