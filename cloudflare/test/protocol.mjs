@@ -8,9 +8,17 @@
 // they do. Run it while nobody else is hosting, or their games show up in
 // the lists.
 // Room ids are printed as <room1>, <room2>, ... so the transcript doesn't
-// depend on how many rooms the lobby opened before.
+// depend on how many rooms the lobby opened before. What arrives during one
+// step is listed by client (each client's lines in the order they came), since
+// messages to different clients can arrive in either order over the internet.
 const url = process.argv[2];
 const log = [];
+let pending = [];  // what clients received since the last step: [client, line]
+const flush = () => {
+  pending.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);  // stable: keeps each client's order
+  for (const [, line] of pending) log.push(line);
+  pending = [];
+};
 const rooms = new Map();
 const roomName = id => rooms.get(id) || id;
 const named = s => s.replace(/^(hosted|join) (\d+)/, (m, op, id) => {
@@ -34,11 +42,11 @@ function client(name) {
         const v = new DataView(ev.data);
         s = `bin from=${v.getUint32(0, true)} to=${v.getUint32(4, true)} body=${Buffer.from(ev.data.slice(8)).toString()}`;
       }
-      log.push(`${name} <- ${s}`);
+      pending.push([name, `${name} <- ${s}`]);
     };
     ws.onopen = () => resolve(ws);
     ws.onerror = e => reject(new Error(name + ' error'));
-    ws.onclose = ev => log.push(`${name} closed ${ev.code}`);
+    ws.onclose = ev => pending.push([name, `${name} closed ${ev.code}`]);
   });
 }
 function pkt(from, to, body) {
@@ -46,7 +54,7 @@ function pkt(from, to, body) {
   b.writeUInt32LE(from, 0); b.writeUInt32LE(to, 4); b.write(body, 8);
   return b;
 }
-const step = async (name, ws, data) => { log.push(`${name} -> ${typeof data === 'string' ? named(data) : 'bin'}`); ws.send(data); await sleep(150); };
+const step = async (name, ws, data) => { flush(); log.push(`${name} -> ${typeof data === 'string' ? named(data) : 'bin'}`); ws.send(data); await sleep(150); flush(); };
 const H = await client('H'); await sleep(200);
 await step('H', H, 'list');
 await step('H', H, 'host abcd');
@@ -83,12 +91,13 @@ await step('B', B, pkt(3, 1, 'no room'));
 const C = await client('C'); await sleep(200);
 await step('C', C, 'host 00');
 await step('A', A, 'join ' + C.room);
-log.push('C closes'); C.close(); await sleep(300);
+flush(); log.push('C closes'); C.close(); await sleep(300);
 await step('A', A, 'list');
-log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
+flush(); log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
 // One at a time: over the internet, two closes can finish in either order.
 H.close(); await sleep(300);
 B.close(); await sleep(300);
+flush();
 if (!process.argv[3]) {
   console.log(log.join('\n'));
   process.exit(0);

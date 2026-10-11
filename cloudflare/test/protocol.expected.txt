@@ -50,8 +50,8 @@ A -> bin
 A -> join <room1>
 H <- peer-joined 2
 H -> leave
-B <- host-left
 A <- host-left
+B <- host-left
 B -> list
 B <- list
 B -> bin
@@ -67,5 +67,5 @@ A -> list
 A <- list
 big message
 A closed 1009
-H closed 1000
 B closed 1000
+H closed 1000
