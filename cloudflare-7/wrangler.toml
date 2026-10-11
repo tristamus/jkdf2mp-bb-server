@@ -1,0 +1,25 @@
+# The always-on lobby on Cloudflare's free Workers plan. See README.md.
+name = "jkdf2mp"
+main = "src/lobby.js"
+compatibility_date = "2026-09-01"
+
+# index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches.
+# Only /relay runs the Worker; the files are served straight from Cloudflare.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = ["/relay"]
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+# The free plan only has Durable Objects that keep their storage in SQLite.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Lobby"]
+
+[vars]
+# Handed to every page for WebRTC (Cloudflare's own STUN server, from its
+# Realtime docs). Leave it empty to send every game packet through the relay.
+STUN = "stun:stun.cloudflare.com:3478"
