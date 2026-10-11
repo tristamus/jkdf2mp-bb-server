@@ -6,8 +6,9 @@
 #   sudo bash setup-server.sh <public-ip> [<build-dir> | <https-base-url>]
 #
 # The build is index.html, openjkdf2.js, openjkdf2.wasm and relay.py, plus a
-# SHA256SUMS file listing them; every file is checked against it. With no
-# build argument, the build already installed is kept.
+# SHA256SUMS file listing them; every file is checked against it, and
+# SHA256SUMS itself against JK_SUMS_SHA256 when that's set. With no build
+# argument, the build already installed is kept.
 #
 # The page ends up at https://<public-ip-with-dashes>.sslip.io/index.html
 # (sslip.io resolves those names to the IP in them, so no domain is needed and
@@ -53,6 +54,11 @@ elif [ -n "$SOURCE" ]; then
     usage
 fi
 if [ -n "$SOURCE" ]; then
+    if [ -n "${JK_SUMS_SHA256:-}" ]; then
+        echo "$JK_SUMS_SHA256  $stage/SHA256SUMS" | sha256sum -c - > /dev/null \
+            || { echo "setup-server.sh: SHA256SUMS doesn't match JK_SUMS_SHA256" >&2; exit 1; }
+        echo "SHA256SUMS: OK"
+    fi
     for f in $BUILD_FILES; do
         want=$(awk -v f="$f" '$2 == f || $2 == "*" f { print $1 }' "$stage/SHA256SUMS")
         have=$(sha256sum "$stage/$f" | cut -d' ' -f1)

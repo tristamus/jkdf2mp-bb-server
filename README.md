@@ -47,13 +47,14 @@ relays network traffic between players.
     Run it in OCI Cloud Shell (the `>_` button in the Oracle Cloud console), where `oci` is already
     signed in. It opens SSH, HTTP/HTTPS, STUN/TURN (3478) and the TURN relay ports (UDP
     49160-49200) in the network and on the server, then runs `setup-server.sh` over SSH.
+    Published builds live on the `builds` branch, one folder each, with the exact command to run.
   - `setup-server.sh` works on any fresh Ubuntu 22.04/24.04 server:
 
     ```
     sudo bash deploy/setup-server.sh <public-ip> <build-folder-or-release-url>
     ```
 
-    It installs the build (checked against `SHA256SUMS`), runs the relay as a systemd service behind
+    It installs the build (checked against `SHA256SUMS`, and that against `JK_SUMS_SHA256` if set), runs the relay as a systemd service behind
     Caddy, and sets up coturn with a TURN secret it generates and shares with the relay. The page
     ends up at `https://<public-ip-with-dashes>.sslip.io/index.html`; set `JK_HOSTNAME` to use
     your own domain. Run it again with a newer build to update.

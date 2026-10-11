@@ -3,9 +3,11 @@
 # from OCI Cloud Shell (the >_ button in the Oracle Cloud console), where the
 # oci command is already signed in. Safe to run again: it reuses what exists.
 #
-#   bash oci-create.sh [<release-url>]
+#   bash oci-create.sh <build-url> <sha256-of-its-SHA256SUMS>
 #
-# It makes a network that lets in SSH, HTTPS and TURN, starts an Ubuntu 24.04
+# <build-url> is a folder holding a build, SHA256SUMS and setup-server.sh;
+# everything is checked against SHA256SUMS, and SHA256SUMS against the hash
+# given here. It makes a network that lets in SSH, HTTPS and TURN, starts an Ubuntu 24.04
 # VM.Standard.E2.1.Micro in the account's home region (Always Free only
 # covers the home region), then installs the build from the release with
 # setup-server.sh over SSH. JK_SHAPE=VM.Standard.A1.Flex asks for an Arm VM
@@ -13,7 +15,10 @@
 
 set -euo pipefail
 
-RELEASE=${1:-https://github.com/tristamus/jkdf2mp-bb-server/releases/download/lobby-1}
+[ $# = 2 ] && [[ $1 == https://* ]] && [[ $2 =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "usage: bash $0 <build-url> <sha256-of-its-SHA256SUMS>" >&2; exit 2; }
+BUILD=${1%/}
+SUMS_SHA256=$2
 SHAPE=${JK_SHAPE:-VM.Standard.E2.1.Micro}
 NAME=jkdf2mp
 KEY=$HOME/.ssh/$NAME
@@ -108,11 +113,12 @@ SSH=(ssh -i "$KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "ubu
 for _ in $(seq 1 30); do "${SSH[@]}" true 2> /dev/null && break; sleep 10; done
 "${SSH[@]}" "set -e
     cd \$(mktemp -d)
-    curl -fsSL --retry 3 -O '$RELEASE/SHA256SUMS' -O '$RELEASE/setup-server.sh'
+    curl -fsSL --retry 3 -O '$BUILD/SHA256SUMS' -O '$BUILD/setup-server.sh'
+    echo '$SUMS_SHA256  SHA256SUMS' | sha256sum -c -
     grep '  setup-server.sh\$' SHA256SUMS | sha256sum -c -
-    sudo bash setup-server.sh '$IP' '$RELEASE'"
+    sudo JK_SUMS_SHA256='$SUMS_SHA256' bash setup-server.sh '$IP' '$BUILD'"
 
 HOST=${IP//./-}.sslip.io
 echo
 echo "The lobby is at https://$HOST/index.html"
-echo "To install a newer release later, run this again with that release's URL."
+echo "To install a newer build later, run this again with its URL and SHA256SUMS hash."
