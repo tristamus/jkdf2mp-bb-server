@@ -42,4 +42,21 @@ relays network traffic between players.
   scheme coturn checks with `use-auth-secret`. `--turn-user` and `--turn-pass` send one fixed login
   instead.
 
-Public hosting for the lobby and TURN server is still to come.
+- **`deploy/`**: puts the lobby, HTTPS and a TURN server on one always-on Linux server.
+  - `oci-create.sh` creates an Ubuntu server on Oracle Cloud's Always Free tier and sets it up.
+    Run it in OCI Cloud Shell (the `>_` button in the Oracle Cloud console), where `oci` is already
+    signed in. It opens SSH, HTTP/HTTPS, STUN/TURN (3478) and the TURN relay ports (UDP
+    49160-49200) in the network and on the server, then runs `setup-server.sh` over SSH.
+  - `setup-server.sh` works on any fresh Ubuntu 22.04/24.04 server:
+
+    ```
+    sudo bash deploy/setup-server.sh <public-ip> <build-folder-or-release-url>
+    ```
+
+    It installs the build (checked against `SHA256SUMS`), runs the relay as a systemd service behind
+    Caddy, and sets up coturn with a TURN secret it generates and shares with the relay. The page
+    ends up at `https://<public-ip-with-dashes>.sslip.io/index.html`; set `JK_HOSTNAME` to use
+    your own domain. Run it again with a newer build to update.
+
+  Oracle may stop an Always Free server that stays idle for a week (low CPU and network); restart it
+  from the console, or convert the account to Pay As You Go to avoid that.
