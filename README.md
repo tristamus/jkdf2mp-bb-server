@@ -22,16 +22,30 @@ relays network traffic between players.
 
 ## Status
 
-- **`relay/relay.py`** (Phase 1): a local WebSocket relay and web server in plain Python 3, no installs
-  needed. It serves the browser build and passes multiplayer traffic between the tabs or computers
-  that load it.
+- **`relay/relay.py`**: the lobby, WebRTC signaling server and fallback relay in one plain Python 3
+  script, no installs needed. It serves the browser build, lists the games hosted on it, sets up
+  WebRTC data channels between each host and its players, and relays game packets for anyone whose
+  direct link doesn't come up.
 
   ```
   python3 relay/relay.py --dir path/to/web-build
   ```
 
-  Then open http://127.0.0.1:8080/index.html in two tabs: host a game in one and join it from the
-  other. Add `--host 0.0.0.0` to let other computers on your network join, and `--port` to change
-  the port. The protocol is described at the top of the file.
+  Then open http://127.0.0.1:8080/index.html in two windows: host a game in one and join it from
+  the other. Add `--host 0.0.0.0` to let other computers on your network join, and `--port` to
+  change the port. The protocol is described at the top of the file.
 
-The signaling/lobby server and TURN setup for WebRTC (Phase 2) are still to come.
+  Players on different networks need a STUN server, and the ones behind strict NATs a TURN server
+  (such as [coturn](https://github.com/coturn/coturn)). The relay hands their addresses to every
+  page:
+
+  ```
+  JK_TURN_SECRET=<coturn static-auth-secret> python3 relay/relay.py --dir path/to/web-build \
+      --host 0.0.0.0 --stun stun:turn.example.org:3478 --turn turn:turn.example.org:3478
+  ```
+
+  With a secret, each page gets its own TURN login that expires after 12 hours (`--turn-ttl`), the
+  scheme coturn checks with `use-auth-secret`. `--turn-user` and `--turn-pass` send one fixed login
+  instead.
+
+Public hosting for the lobby and TURN server is still to come.

@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""Local WebSocket relay for OpenJKDF2's browser build (Phase 1).
+"""Lobby, WebRTC signaling and fallback relay for OpenJKDF2's browser build.
 
-Serves the web build (index.html, openjkdf2.js, openjkdf2.wasm) from --dir and
-relays multiplayer traffic between the browser tabs that load it, so two tabs
-can play one match. Python 3 standard library only.
+Serves the web build (index.html, openjkdf2.js, openjkdf2.wasm) from --dir,
+lists the games hosted on it, passes WebRTC signaling between a host and its
+clients, and relays game packets for players whose direct WebRTC link isn't up.
+Python 3 standard library only.
 
 The page's network backend (src/Platform/Networking/WSRelay in the OpenJKDF2
 fork) connects to ws://<this server>/relay. Text frames are control lines,
 binary frames are game packets:
 
   client -> relay   list | host <entry> | update <entry> | join <room>
-                    welcome <id> <entry> | leave
+                    welcome <id> <entry> | leave | signal <id> <data> | ping
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
-                    host-left | error <code>
+                    host-left | error <code> | signal <id> <data> | ice <data>
 
 <entry> is the host's hex-encoded session description, passed through as is.
+signal carries base64 SDP or ICE candidates between a host and one of its
+clients; the relay only checks the sender is in that room and swaps the target
+id for the sender's. ice is sent once on connect when --stun or --turn is set:
+base64 JSON for RTCPeerConnection's iceServers.
+
 Game packets start with a little-endian u32 idFrom and u32 idTo. The host is
 id 1 and clients get 2..64, as with OpenJKDF2's GNS backend. A packet goes to
 the player named in idTo (to the host when idTo is 0 or 1) and is dropped if
 that player isn't in the room, which is what the GNS host does when it
-forwards. The relay stamps idFrom with the sender's real id.
+forwards. The relay stamps idFrom with a client's real id. The host's idFrom is
+kept, because a host forwards packets for clients it reaches over WebRTC.
 
 This server never serves or stores game files: players pick their own install
 in the page, and it stays in their browser.
@@ -30,18 +37,24 @@ import argparse
 import base64
 import functools
 import hashlib
+import hmac
 import http.server
+import json
+import os
 import re
 import socket
 import struct
 import threading
+import time
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_MESSAGE = 64 * 1024
 MAX_ENTRY_HEX = 2048
+MAX_SIGNAL_B64 = 16384
 FIRST_PEER_ID = 2
 LAST_PEER_ID = 64
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
+B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
@@ -103,6 +116,8 @@ class Relay:
         if not parts:
             return
         op, args = parts[0], parts[1:]
+        if op == "ping":
+            return  # keepalive: pages send one every 25 s so proxies keep the socket open
         outbox = []
         with self.lock:
             if op == "list":
@@ -139,6 +154,16 @@ class Relay:
                     peer = room.peers.get(int(args[0]))
                     if peer:
                         outbox.append((peer, OP_TEXT, ("welcome %s %s" % (args[0], args[1])).encode()))
+            elif op == "signal" and len(args) == 2 and args[0].isdigit() and valid_signal(args[1]):
+                # Signaling only runs between a host and its own clients.
+                room, to = conn.room, int(args[0])
+                if room:
+                    if room.host is conn:
+                        target = room.peers.get(to)
+                    else:
+                        target = room.host if to == 1 else None
+                    if target:
+                        outbox.append((target, OP_TEXT, ("signal %d %s" % (conn.id, args[1])).encode()))
             elif op == "leave":
                 self._leave(conn, outbox)
             else:
@@ -157,7 +182,8 @@ class Relay:
                 target = room.peers.get(id_to)
             else:
                 target = room.host
-            data = struct.pack("<I", conn.id) + data[4:]
+            if room.host is not conn:
+                data = struct.pack("<I", conn.id) + data[4:]
         if target and target is not conn:
             target.send_frame(OP_BINARY, data)
 
@@ -186,6 +212,51 @@ class Relay:
 
 def valid_entry(text):
     return len(text) <= MAX_ENTRY_HEX and HEX_RE.match(text) is not None
+
+
+def valid_signal(text):
+    return len(text) <= MAX_SIGNAL_B64 and B64_RE.match(text) is not None
+
+
+class IceConfig:
+    """The iceServers list each page gets on connect.
+
+    TURN with --turn-secret uses the time-limited credentials coturn checks with
+    use-auth-secret: username "<expiry>:jk", password base64(HMAC-SHA1(secret,
+    username)). Without a secret, --turn-user and --turn-pass are sent as is.
+    """
+
+    def __init__(self, stun, turn, turn_secret, turn_user, turn_pass, ttl):
+        self.stun = stun
+        self.turn = turn
+        self.turn_secret = turn_secret
+        self.turn_user = turn_user
+        self.turn_pass = turn_pass
+        self.ttl = ttl
+
+    def enabled(self):
+        return bool(self.stun or self.turn)
+
+    def servers(self):
+        servers = []
+        if self.stun:
+            servers.append({"urls": self.stun})
+        if self.turn:
+            if self.turn_secret:
+                user = "%d:jk" % (int(time.time()) + self.ttl)
+                digest = hmac.new(self.turn_secret.encode(), user.encode(), hashlib.sha1).digest()
+                password = base64.b64encode(digest).decode()
+            else:
+                user, password = self.turn_user, self.turn_pass
+            entry = {"urls": self.turn}
+            if user:
+                entry["username"] = user
+                entry["credential"] = password or ""
+            servers.append(entry)
+        return servers
+
+    def message(self):
+        return "ice " + base64.b64encode(json.dumps(self.servers()).encode()).decode()
 
 
 def log(text):
@@ -233,11 +304,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     extensions_map = dict(http.server.SimpleHTTPRequestHandler.extensions_map,
                           **{".wasm": "application/wasm", ".js": "text/javascript"})
     relay = None
+    ice = None
 
     def end_headers(self):
         # Always serve the newest build, no Ctrl+Shift+R needed.
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def list_directory(self, path):
+        # Once it's public (a tunnel, a VM), the page is all anyone should see.
+        self.send_error(404, "Not found")
+        return None
 
     def do_GET(self):
         if self.path.split("?")[0] == "/relay" and self.headers.get("Upgrade", "").lower() == "websocket":
@@ -251,6 +328,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, "Missing Sec-WebSocket-Key")
             return
         accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+        # The handler answers in HTTP/1.0 by default. Chrome takes a 1.0
+        # upgrade, Firefox refuses it and never connects.
+        self.protocol_version = "HTTP/1.1"
         self.send_response(101, "Switching Protocols")
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -262,6 +342,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn = Conn(sock, self.client_address)
+        if self.ice and self.ice.enabled():
+            conn.send_text(self.ice.message())
         try:
             self.websocket_loop(conn)
         finally:
@@ -307,9 +389,20 @@ def main():
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--host", default="127.0.0.1",
                         help="address to listen on; 0.0.0.0 lets other computers on your network join")
+    parser.add_argument("--stun", action="append", default=[], metavar="URL",
+                        help="STUN server for WebRTC, e.g. stun:stun.example.org:3478 (repeatable)")
+    parser.add_argument("--turn", action="append", default=[], metavar="URL",
+                        help="TURN server for WebRTC, e.g. turn:turn.example.org:3478 (repeatable)")
+    parser.add_argument("--turn-secret", default=os.environ.get("JK_TURN_SECRET"),
+                        help="coturn static-auth-secret, to hand out time-limited TURN logins "
+                             "(or set JK_TURN_SECRET, which keeps it out of the process list)")
+    parser.add_argument("--turn-user", help="fixed TURN username (when there's no --turn-secret)")
+    parser.add_argument("--turn-pass", help="fixed TURN password (when there's no --turn-secret)")
+    parser.add_argument("--turn-ttl", type=int, default=12 * 3600, help="TURN login lifetime in seconds")
     args = parser.parse_args()
 
     Handler.relay = Relay()
+    Handler.ice = IceConfig(args.stun, args.turn, args.turn_secret, args.turn_user, args.turn_pass, args.turn_ttl)
     server = http.server.ThreadingHTTPServer((args.host, args.port), functools.partial(Handler, directory=args.dir))
     server.daemon_threads = True
     log("serving %s at http://%s:%d/index.html, relay at ws://%s:%d/relay"
