@@ -11,7 +11,7 @@ fork) connects to ws://<this server>/relay. Text frames are control lines,
 binary frames are game packets:
 
   client -> relay   list | host <entry> | update <entry> | join <room>
-                    welcome <id> <entry> | leave | signal <id> <data>
+                    welcome <id> <entry> | leave | signal <id> <data> | ping
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
                     host-left | error <code> | signal <id> <data> | ice <data>
@@ -116,6 +116,8 @@ class Relay:
         if not parts:
             return
         op, args = parts[0], parts[1:]
+        if op == "ping":
+            return  # keepalive: pages send one every 25 s so proxies keep the socket open
         outbox = []
         with self.lock:
             if op == "list":
