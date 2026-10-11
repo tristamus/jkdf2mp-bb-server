@@ -86,8 +86,9 @@ await step('A', A, 'join ' + C.room);
 log.push('C closes'); C.close(); await sleep(300);
 await step('A', A, 'list');
 log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
-for (const ws of [H, B]) ws.close();
-await sleep(300);
+// One at a time: over the internet, two closes can finish in either order.
+H.close(); await sleep(300);
+B.close(); await sleep(300);
 if (!process.argv[3]) {
   console.log(log.join('\n'));
   process.exit(0);
