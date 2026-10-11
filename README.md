@@ -10,6 +10,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-3/`: `cloudflare-2` with the redesigned landing page.
 - `cloudflare-4/`: `cloudflare-3` with the MotS texture fix and Single Player hidden from the menu.
 - `cloudflare-5/`: `cloudflare-4` with automatic map downloads for joiners.
+- `cloudflare-6/`: `cloudflare-5` with the landing page saying that custom maps you host are shared.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
