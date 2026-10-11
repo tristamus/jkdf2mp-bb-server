@@ -311,6 +311,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def list_directory(self, path):
+        # Once it's public (a tunnel, a VM), the page is all anyone should see.
+        self.send_error(404, "Not found")
+        return None
+
     def do_GET(self):
         if self.path.split("?")[0] == "/relay" and self.headers.get("Upgrade", "").lower() == "websocket":
             self.handle_websocket()
