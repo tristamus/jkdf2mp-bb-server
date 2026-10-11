@@ -42,4 +42,5 @@ relays network traffic between players.
   scheme coturn checks with `use-auth-secret`. `--turn-user` and `--turn-pass` send one fixed login
   instead.
 
-Public hosting for the lobby and TURN server is still to come.
+- **`cloudflare/`**: the same lobby on Cloudflare Workers, so it can run all the time on Cloudflare's
+  free plan with nothing running at home. See [cloudflare/README.md](cloudflare/README.md).
