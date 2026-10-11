@@ -1,7 +1,9 @@
 #!/bin/bash
 # Creates the always-on lobby on Oracle Cloud's Always Free tier and sets it up,
 # from OCI Cloud Shell (the >_ button in the Oracle Cloud console), where the
-# oci command is already signed in. Safe to run again: it reuses what exists.
+# oci command is already signed in. It also runs in Git Bash on Windows after
+# `oci session authenticate` (set OCI_CLI_AUTH=security_token and
+# OCI_CLI_PROFILE to that profile). Safe to run again: it reuses what exists.
 #
 #   bash oci-create.sh <build-url> <sha256-of-its-SHA256SUMS>
 #
@@ -29,8 +31,14 @@ say() { echo "== $*"; }
 die() { echo "oci-create.sh: $*" >&2; exit 1; }
 
 command -v oci > /dev/null || die "the oci command is missing; run this in OCI Cloud Shell"
+# On Windows, oci prints CRLF line endings; a stray \r would end up in every id.
+oci() { command oci "$@" | tr -d '\r'; }
 
-TENANCY=${OCI_TENANCY:-$(sed -n 's/^tenancy *= *//p' "${OCI_CLI_CONFIG_FILE:-/etc/oci/config}" 2> /dev/null | head -n 1)}
+TENANCY=${OCI_TENANCY:-}
+for f in "${OCI_CLI_CONFIG_FILE:-}" /etc/oci/config "$HOME/.oci/config"; do
+    [ -z "$TENANCY" ] && [ -f "$f" ] || continue
+    TENANCY=$(sed -n 's/^tenancy *= *//p' "$f" | tr -d '\r' | head -n 1)
+done
 [ -n "$TENANCY" ] || die "couldn't find the tenancy OCID; set OCI_TENANCY and run again"
 HOME_REGION=$(oci iam region-subscription list --tenancy-id "$TENANCY" \
     --query 'data[?"is-home-region"]|[0]."region-name"' --raw-output)
