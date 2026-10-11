@@ -8,6 +8,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-1/`: the same browser build with the lobby for Cloudflare's free Workers plan.
 - `cloudflare-2/`: `cloudflare-1` with a browser build that keeps characters and controls.
 - `cloudflare-3/`: `cloudflare-2` with the redesigned landing page.
+- `cloudflare-4/`: `cloudflare-3` with the MotS texture fix and Single Player hidden from the menu.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
