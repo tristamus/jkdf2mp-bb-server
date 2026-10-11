@@ -1,0 +1,71 @@
+H <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+H -> list
+H <- list
+H -> host abcd
+H <- hosted <room1>
+H -> update ab12
+H -> host zz
+H <- error bad-request
+H -> bogus
+H <- error bad-request
+A <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+A -> list
+A <- list <room1> 1 ab12
+A -> join 999999
+A <- error no-room
+A -> join <room1>
+H <- peer-joined 2
+H -> welcome 2 ab12
+A <- welcome 2 ab12
+B <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+B -> join <room1>
+H <- peer-joined 3
+H -> welcome 3 ab12
+B <- welcome 3 ab12
+A -> signal 1 c2RwYQ==
+H <- signal 2 c2RwYQ==
+A -> signal 3 c2RwYQ==
+H -> signal 3 c2RwSA==
+B <- signal 1 c2RwSA==
+H -> signal 2 bad!
+H <- error bad-request
+A -> bin
+H <- bin from=2 to=1 body=A to host
+A -> bin
+H <- bin from=2 to=0 body=A to host via 0
+A -> bin
+B <- bin from=2 to=3 body=A to B
+A -> bin
+H -> bin
+A <- bin from=3 to=2 body=host fwd from B to A
+H -> bin
+B -> bin
+A -> ping
+A <- pong
+A -> list
+A <- list <room1> 3 ab12
+A -> leave
+H <- peer-left 2
+A -> bin
+A -> join <room1>
+H <- peer-joined 2
+H -> leave
+A <- host-left
+B <- host-left
+B -> list
+B <- list
+B -> bin
+C <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+C -> host 00
+C <- hosted <room2>
+A -> join <room2>
+C <- peer-joined 2
+C closes
+A <- host-left
+C closed 1000
+A -> list
+A <- list
+big message
+A closed 1009
+B closed 1000
+H closed 1000
