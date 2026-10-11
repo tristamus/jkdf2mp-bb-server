@@ -33,3 +33,7 @@ npx wrangler deploy
 ```
 
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/index.html instead.
+
+To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
+while nobody is hosting. It plays out hosting, joining, signaling, packet routing and leaving with
+plain WebSocket clients and compares the transcript with the one `wrangler dev` gives.
