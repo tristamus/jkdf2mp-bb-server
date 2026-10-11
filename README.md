@@ -16,4 +16,16 @@ relays network traffic between players.
 
 ## Status
 
-Nothing has been implemented yet; server code is still to come.
+- **`relay/relay.py`** (Phase 1): a local WebSocket relay and web server in plain Python 3, no installs
+  needed. It serves the browser build and passes multiplayer traffic between the tabs or computers
+  that load it.
+
+  ```
+  python3 relay/relay.py --dir path/to/web-build
+  ```
+
+  Then open http://127.0.0.1:8080/index.html in two tabs: host a game in one and join it from the
+  other. Add `--host 0.0.0.0` to let other computers on your network join, and `--port` to change
+  the port. The protocol is described at the top of the file.
+
+The signaling/lobby server and TURN setup for WebRTC (Phase 2) are still to come.
