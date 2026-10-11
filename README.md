@@ -7,6 +7,12 @@ Server-side pieces for playing **Jedi Knight: Dark Forces II** multiplayer in th
 - **WebSocket relay**: a fallback transport when a direct peer-to-peer connection isn't possible
 - **TURN configuration**: NAT traversal settings for WebRTC
 
+**What is this?** The overview of the whole project, with the link to play and what it adds to OpenJKDF2,
+is at the top of the [OpenJKDF2 fork's README](https://github.com/tristamus/OpenJKDF2#jkdf2mp-jedi-knight-multiplayer-in-your-browser).
+The lobby code is in this repository's open pull requests and isn't merged into `main` yet. The live
+lobby is built from them, and each deployed build is kept on the
+[`builds`](https://github.com/tristamus/jkdf2mp-bb-server/tree/builds) branch.
+
 ## No game assets, ever
 
 This repository never stores, bundles, serves or proxies any original game assets (GOB/GOO archives,
