@@ -16,6 +16,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-9/`: `cloudflare-8` with each mod its own checkbox, including zipped mods.
 - `cloudflare-10/`: `cloudflare-9` with display settings that stay between visits and MotS's Personalities option on the host screen.
 - `cloudflare-11/`: `cloudflare-10` with the MotS Remastered fan pack loaded like the game's own files instead of listed as mods.
+- `cloudflare-12/`: `cloudflare-11` with characters whose `.plr` can't be read starting over instead of giving "Cannot set player".
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
