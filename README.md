@@ -18,6 +18,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-11/`: `cloudflare-10` with the MotS Remastered fan pack loaded like the game's own files instead of listed as mods.
 - `cloudflare-12/`: `cloudflare-11` with characters whose `.plr` can't be read starting over instead of giving "Cannot set player".
 - `cloudflare-13/`: `cloudflare-12` with screenshots saved in the browser and listed on the landing page.
+- `cloudflare-14/`: `cloudflare-13` with each lit saber lighting the area around it in its blade's color.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
