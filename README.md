@@ -15,6 +15,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-8/`: `cloudflare-7` with full mods, several at a time, shared with joiners.
 - `cloudflare-9/`: `cloudflare-8` with each mod its own checkbox, including zipped mods.
 - `cloudflare-10/`: `cloudflare-9` with display settings that stay between visits and MotS's Personalities option on the host screen.
+- `cloudflare-11/`: `cloudflare-10` with screenshots saved in the browser and listed on the landing page.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
