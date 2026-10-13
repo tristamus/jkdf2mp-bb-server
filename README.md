@@ -20,6 +20,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-13/`: `cloudflare-12` with screenshots saved in the browser and listed on the landing page.
 - `cloudflare-14/`: `cloudflare-13` with each lit saber lighting the area around it in its blade's color.
 - `cloudflare-15/`: `cloudflare-14` with a Features section on the landing page.
+- `cloudflare-16/`: `cloudflare-15` with the MotS multiplayer fixes (personalities, Carbonite, saber training) and a colored saber glow that no longer dims the area.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
