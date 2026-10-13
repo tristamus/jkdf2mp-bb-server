@@ -22,6 +22,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-15/`: `cloudflare-14` with a Features section on the landing page.
 - `cloudflare-16/`: `cloudflare-15` with the MotS multiplayer fixes (personalities, Carbonite, saber training) and a colored saber glow that no longer dims the area.
 - `cloudflare-17/`: `cloudflare-16` with Select all for mods and a mod list that remembers each browser's picks.
+- `cloudflare-18/`: `cloudflare-17` with every MotS player running the Remastered pack the way the host does.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
