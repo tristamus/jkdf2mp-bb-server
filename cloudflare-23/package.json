@@ -1,0 +1,12 @@
+{
+  "name": "jkdf2mp-lobby",
+  "private": true,
+  "description": "The Jedi Knight browser multiplayer lobby on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.139.0"
+  }
+}
