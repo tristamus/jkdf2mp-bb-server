@@ -10,11 +10,13 @@
 // Room ids are printed as <room1>, <room2>, ... so the transcript doesn't
 // depend on how many rooms the lobby opened before. The watching page (W)
 // only prints the test's own players and games (named t_...), so players
-// online during a run don't show, plus "ok" when the counts add up and no
-// password got out. What arrives during one
+// online during a run don't show, plus "ok" when the counts add up, in all
+// and by game, and no password got out. What arrives during one
 // step is listed by client (each client's lines in the order they came), since
 // messages to different clients can arrive in either order over the internet.
+// Each step waits STEP_MS (400 by default) for what it sets off.
 const url = process.argv[2];
+const STEP_MS = Number(process.env.STEP_MS) || 400;
 const log = [];
 let pending = [];  // what clients received since the last step: [client, line]
 const flush = () => {
@@ -56,12 +58,18 @@ let lastStatus = null;
 function status(b64data) {
   const json = Buffer.from(b64data, 'base64').toString('utf8');
   const s = JSON.parse(json);
-  const ok = s.online === s.lobby.length + s.games.reduce((n, g) => n + g.players, 0) && !json.includes(SECRET);
+  const playing = k => s.games.reduce((n, g) => n + (!k || g.game === k ? g.players : 0), 0);
+  const kinds = Object.keys(s.byGame || {});
+  const ok = s.online === s.lobby.length + playing() && !json.includes(SECRET) &&
+    kinds.join() === 'jk1,mots' && kinds.every(k => s.byGame[k].online === s.byGame[k].lobby.length + playing(k)) &&
+    s.online === kinds.reduce((n, k) => n + s.byGame[k].online, 0) &&
+    JSON.stringify(kinds.flatMap(k => s.byGame[k].lobby).sort()) === JSON.stringify(s.lobby.slice().sort());
   const ours = n => n.startsWith('t_');
   const games = s.games.filter(g => ours(g.name)).map(g => `<room ${g.id}> ${JSON.stringify(g.name)} ` +
     `${g.game} ${g.map} ${g.episode} mod=${JSON.stringify(g.mod)} ${g.locked ? 'locked' : 'open'} ` +
     `${g.players}/${g.max} ${JSON.stringify(g.names)}`);
-  const line = `status ${ok ? 'ok' : 'WRONG'} lobby=${JSON.stringify(s.lobby.filter(ours))} games=[${games.join(', ')}]`;
+  const lobby = kinds.map(k => `${k}=${JSON.stringify(s.byGame[k].lobby.filter(ours))}`).join(' ');
+  const line = `status ${ok ? 'ok' : 'WRONG'} lobby ${lobby} games=[${games.join(', ')}]`;
   if (line === lastStatus) return null;
   return lastStatus = line;
 }
@@ -94,7 +102,7 @@ function pkt(from, to, body) {
   return b;
 }
 const step = async (name, ws, data, shown) => {
-  flush(); log.push(`${name} -> ${shown || (typeof data === 'string' ? named(data) : 'bin')}`); ws.send(data); await sleep(150); flush();
+  flush(); log.push(`${name} -> ${shown || (typeof data === 'string' ? named(data) : 'bin')}`); ws.send(data); await sleep(STEP_MS); flush();
 };
 const H = await client('H'); await sleep(200);
 await step('H', H, 'list');
@@ -135,7 +143,8 @@ await step('A', A, 'join ' + C.room);
 flush(); log.push('C closes'); C.close(); await sleep(300);
 await step('A', A, 'list');
 // Live counts.
-const duel = { name: 't_Duel', episode: 'JK1MP.gob', map: '01narshadda.jkl', max: 4 };
+// Episode names have no extension.
+const duel = { name: 't_Duel', episode: 'JK1MP', map: '01narshadda.jkl', max: 4 };
 const W = await client('W'); await sleep(200);
 await step('W', W, 'watch');
 await step('H', H, 'hello jk1 ' + b64('t_Host'), 'hello jk1 t_Host');
@@ -152,8 +161,16 @@ await step('B', B, 'join ' + H.room);
 await step('B', B, 'hello jk1 ' + b64('t_Bee'), 'hello jk1 t_Bee');
 await step('A', A, 'leave');
 const D = await client('D'); await sleep(200);
-await step('D', D, 'host ' + entry({ name: 't_Sith', episode: 'JKM_MP.goo', map: 'm2.jkl', max: 99 }) + modTail(null, true),
-           'host <t_Sith entry on JKM_MP.goo with the Remastered pack, no hello>');
+await step('D', D, 'host ' + entry({ name: 't_Sith', episode: 'JKM_MP', map: 'm2.jkl', max: 99 }) + modTail(null, true),
+           'host <t_Sith entry on JKM_MP with the Remastered pack, no hello>');
+// Each game lists the games it can join: a host that hasn't said which game
+// it runs shows in both.
+await step('B', B, 'list jk1');
+await step('B', B, 'list mots');
+await step('D', D, 'hello mots ' + b64('t_D'), 'hello mots t_D');
+await step('B', B, 'list jk1');
+await step('B', B, 'list mots');
+await step('B', B, 'list xx');
 await step('H', H, 'leave');
 flush(); log.push('D closes'); D.close(); await sleep(300);
 flush(); log.push('W closes'); W.close(); await sleep(300);
