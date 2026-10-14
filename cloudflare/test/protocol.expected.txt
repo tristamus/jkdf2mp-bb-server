@@ -65,6 +65,48 @@ A <- host-left
 C closed 1000
 A -> list
 A <- list
+W <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+W -> watch
+W <- status ok lobby=[] games=[]
+H -> hello jk1 t_Host
+W <- status ok lobby=["t_Host"] games=[]
+A -> hello mots t_Ä<RLO><BEL>ccent long name
+W <- status ok lobby=["t_Äccent long n","t_Host"] games=[]
+B -> hello jk1 t_B
+W <- status ok lobby=["t_Äccent long n","t_B","t_Host"] games=[]
+B -> hello jk1 t_B (again)
+B -> hello xx t_B
+B <- error bad-request
+B -> hello jk1 !!
+B <- error bad-request
+H -> host <t_Duel entry>
+H <- hosted <room3>
+W <- status ok lobby=["t_Äccent long n","t_B"] games=[<room3> "t_Duel" jk1 01narshadda.jkl JK1MP.gob mod="" open 1/4 ["t_Host"]]
+A -> join <room3>
+H <- peer-joined 2
+W <- status ok lobby=["t_B"] games=[<room3> "t_Duel" jk1 01narshadda.jkl JK1MP.gob mod="" open 2/4 ["t_Host","t_Äccent long n"]]
+H -> update <t_Duel entry on 03katarn.jkl with a password and the t_Sabers mod>
+W <- status ok lobby=["t_B"] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP.gob mod="t_Sabers" locked 2/4 ["t_Host","t_Äccent long n"]]
+B -> join <room3>
+H <- peer-joined 3
+W <- status ok lobby=[] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP.gob mod="t_Sabers" locked 3/4 ["t_Host","t_Äccent long n","t_B"]]
+B -> hello jk1 t_Bee
+W <- status ok lobby=[] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP.gob mod="t_Sabers" locked 3/4 ["t_Host","t_Äccent long n","t_Bee"]]
+A -> leave
+H <- peer-left 2
+W <- status ok lobby=["t_Äccent long n"] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP.gob mod="t_Sabers" locked 2/4 ["t_Host","t_Bee"]]
+D <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+D -> host <t_Sith entry on JKM_MP.goo with the Remastered pack, no hello>
+D <- hosted <room4>
+W <- status ok lobby=["t_Äccent long n"] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP.gob mod="t_Sabers" locked 2/4 ["t_Host","t_Bee"], <room4> "t_Sith" mots m2.jkl JKM_MP.goo mod="Remastered pack" open 1/0 [""]]
+H -> leave
+B <- host-left
+W <- status ok lobby=["t_Äccent long n","t_Bee","t_Host"] games=[<room4> "t_Sith" mots m2.jkl JKM_MP.goo mod="Remastered pack" open 1/0 [""]]
+D closes
+D closed 1000
+W <- status ok lobby=["t_Äccent long n","t_Bee","t_Host"] games=[]
+W closes
+W closed 1000
 big message
 A closed 1009
 B closed 1000
