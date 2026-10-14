@@ -10,6 +10,11 @@ running at home. It speaks the same protocol, so the same browser build works wi
 - The lobby itself is a Durable Object, so every player reaches the same one. It uses WebSocket
   hibernation, so it isn't kept in memory while people sit in the lobby, and Cloudflare answers the
   pages' keepalive pings without waking it.
+- The game and the page ping the lobby every 25 s, whatever the player is doing. A connection that
+  sends nothing for 2 minutes, not even that, is gone without having closed (a killed tab, a computer
+  that went to sleep), so the lobby ends it: its player comes off the counts, and its game too if it
+  was the host. An alarm looks for these once a minute while anyone is connected, which is up to
+  1,440 alarm runs a day, and those count as requests.
 - The landing page's live counts come from the lobby too: each running game sends its player's name
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.

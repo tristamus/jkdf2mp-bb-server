@@ -38,6 +38,14 @@ const HIDDEN_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u
 // How often to log message counts, to see a match against the free plan's
 // daily request limit (incoming WebSocket messages count 20 to a request).
 const STATS_MS = 60 * 1000;
+// The game and the page send "ping" every 25 s. A connection that has sent
+// nothing for this long is gone without having closed (a tab or browser that
+// was killed, a computer that went to sleep, a network that dropped), and its
+// player and game come off the lists. Background tabs may only ping once a
+// minute.
+const QUIET_MS = 2 * 60 * 1000;
+// How often to look for them while anyone is connected.
+const SWEEP_MS = 60 * 1000;
 
 export default {
     async fetch(request, env) {
@@ -164,10 +172,12 @@ export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         this.rooms = new Map();   // room id -> {id, host, entry, peers: Map(id -> ws)}
-        // ws -> {room, id, name, game, watch}: the room id and player id, the
-        // player's name and game from hello (name null until then), and
-        // whether it's a page watching the counts.
+        // ws -> {room, id, name, game, watch, since}: the room id and player
+        // id, the player's name and game from hello (name null until then),
+        // whether it's a page watching the counts, and when it connected.
         this.conns = new Map();
+        this.heard = new Map();   // ws -> when its last message came (not its pings)
+        this.alarmAt = null;      // when the next sweep for quiet connections runs
         this.nextRoom = 1;
         this.lastStatus = null;   // the status the watchers have
         this.stats = { since: Date.now(), text: 0, packets: 0, bytes: 0 };
@@ -179,6 +189,7 @@ export class Lobby extends DurableObject {
 
     async restore() {
         this.nextRoom = (await this.ctx.storage.get("nextRoom")) || 1;
+        this.alarmAt = await this.ctx.storage.getAlarm();
         const entries = await this.ctx.storage.list({ prefix: "room:" });
         for (const ws of this.ctx.getWebSockets()) {
             const att = ws.deserializeAttachment() || { room: 0, id: 0 };
@@ -210,13 +221,16 @@ export class Lobby extends DurableObject {
             if (!this.rooms.has(Number(key.slice(5))))
                 this.ctx.storage.delete(key);
         }
+        if (this.conns.size)
+            this.sweepLater();
     }
 
     async fetch(request) {
         const pair = new WebSocketPair();
         const [client, server] = Object.values(pair);
         this.ctx.acceptWebSocket(server);
-        this.saveConn(server, { room: 0, id: 0, name: null, game: "", watch: false });
+        this.saveConn(server, { room: 0, id: 0, name: null, game: "", watch: false, since: Date.now() });
+        this.sweepLater();
         const ice = iceMessage(this.env);
         if (ice)
             this.send(server, ice);
@@ -224,6 +238,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketMessage(ws, message) {
+        this.heard.set(ws, Date.now());
         const size = typeof message === "string" ? message.length : message.byteLength;
         if (size > MAX_MESSAGE) {
             ws.close(1009, "message too big");
@@ -241,6 +256,7 @@ export class Lobby extends DurableObject {
     async webSocketClose(ws, code, reason, wasClean) {
         this.leave(ws);
         this.conns.delete(ws);
+        this.heard.delete(ws);
         this.statusChanged();
         try { ws.close(1000, "bye"); } catch (e) {}
     }
@@ -248,7 +264,47 @@ export class Lobby extends DurableObject {
     async webSocketError(ws, error) {
         this.leave(ws);
         this.conns.delete(ws);
+        this.heard.delete(ws);
         this.statusChanged();
+    }
+
+    async alarm() {
+        this.alarmAt = null;
+        this.sweep();
+        if (this.conns.size)
+            this.sweepLater();
+    }
+
+    // Looks for quiet connections in SWEEP_MS, unless that's already set.
+    sweepLater() {
+        if (this.alarmAt)
+            return;
+        this.alarmAt = Date.now() + SWEEP_MS;
+        this.ctx.storage.setAlarm(this.alarmAt);
+    }
+
+    // Ends the connections that have sent nothing, not even a ping, for
+    // QUIET_MS: as if they had closed, so a game whose host is gone ends.
+    sweep() {
+        const now = Date.now();
+        let quiet = 0;
+        for (const [ws, c] of [...this.conns]) {
+            const ping = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+            const last = Math.max(c.since || 0, ping ? ping.getTime() : 0, this.heard.get(ws) || 0);
+            if (now - last < QUIET_MS)
+                continue;
+            this.leave(ws);
+            // Counted nowhere if the object wakes up before the socket is gone.
+            this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
+            this.conns.delete(ws);
+            this.heard.delete(ws);
+            try { ws.close(4000, "quiet"); } catch (e) {}
+            quiet++;
+        }
+        if (quiet) {
+            console.log(`relay: ended ${quiet} quiet connection(s)`);
+            this.statusChanged();
+        }
     }
 
     conn(ws) {

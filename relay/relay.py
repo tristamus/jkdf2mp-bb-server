@@ -78,6 +78,12 @@ MAX_NAME_B64 = 128
 MAX_NAME = 15  # the game sends 15 characters of a player's name to the others
 MAX_STATUS_GAMES = 64
 MAX_STATUS_NAMES = 64
+# The game and the page send "ping" every 25 s. A connection that has sent
+# nothing for this long is gone without having closed (a tab or browser that
+# was killed, a computer that went to sleep, a network that dropped), and its
+# player and game come off the lists. Background tabs may only ping once a
+# minute. Same as QUIET_MS in cloudflare/src/lobby.js.
+QUIET_S = 120
 # Control and invisible characters (bidi overrides among them) never reach a page.
 HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 
@@ -498,6 +504,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.settimeout(QUIET_S)
         conn = Conn(sock, self.client_address)
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
@@ -511,7 +518,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def websocket_loop(self, conn):
         msg_op, parts, size = None, [], 0
         while True:
-            frame = read_frame(self.rfile)
+            try:
+                frame = read_frame(self.rfile)
+            except OSError:  # quiet for QUIET_S, or reset
+                return
             if frame is None:
                 return
             fin, opcode, payload = frame
