@@ -26,6 +26,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-19/`: `cloudflare-18` reading MotS characters saved by the original game, with their own personality and force powers.
 - `cloudflare-20/`: `cloudflare-19` with no screen flicker when Bloom and SSAO are on.
 - `cloudflare-21/`: `cloudflare-20` with live player and game counts on Nar Shaddaa, and a room window listing the games and who's in them.
+- `cloudflare-22/`: `cloudflare-21` with Nar Shaddaa for Jedi Knight and Sith: Asteroid for MotS, each with its own live counts and room window, and a Join screen that lists only games you can join.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
