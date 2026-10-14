@@ -25,6 +25,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-18/`: `cloudflare-17` with every MotS player running the Remastered pack the way the host does.
 - `cloudflare-19/`: `cloudflare-18` reading MotS characters saved by the original game, with their own personality and force powers.
 - `cloudflare-20/`: `cloudflare-19` with no screen flicker when Bloom and SSAO are on.
+- `cloudflare-21/`: `cloudflare-20` with live player and game counts on Nar Shaddaa, and a room window listing the games and who's in them.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
