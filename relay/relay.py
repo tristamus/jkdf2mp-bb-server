@@ -12,15 +12,27 @@ binary frames are game packets:
 
   client -> relay   list | host <entry> | update <entry> | join <room>
                     welcome <id> <entry> | leave | signal <id> <data> | ping
+                    hello <game> <name> | watch
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
                     host-left | error <code> | signal <id> <data> | ice <data>
+                    status <data>
 
 <entry> is the host's hex-encoded session description, passed through as is.
 signal carries base64 SDP or ICE candidates between a host and one of its
 clients; the relay only checks the sender is in that room and swaps the target
 id for the sender's. ice is sent once on connect when --stun or --turn is set:
 base64 JSON for RTCPeerConnection's iceServers.
+
+The landing page's live counts: each running game sends hello with its game
+(jk1 or mots) and its player's name in base64 UTF-8, again when it changes. A
+page that sends watch gets status, base64 UTF-8 JSON, then again whenever it
+changes: {"online": n, "lobby": [names], "games": [{"id", "name", "game",
+"map", "episode", "mod", "locked", "players", "max", "names"}]}, the host's
+name first and "" for a player whose game didn't say hello. The relay reads a
+game's details from its entry (a jkMultiEntry, then the mod tail from mods.js),
+and never sends its password, only whether it has one. A player is a
+connection that said hello or is in a room; watching pages don't count.
 
 Game packets start with a little-endian u32 idFrom and u32 idTo. The host is
 id 1 and clients get 2..64, as with OpenJKDF2's GNS backend. A packet goes to
@@ -46,6 +58,7 @@ import socket
 import struct
 import threading
 import time
+import unicodedata
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_MESSAGE = 64 * 1024
@@ -55,6 +68,14 @@ FIRST_PEER_ID = 2
 LAST_PEER_ID = 64
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 B64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+ENTRY_HEX = 240 * 2
+GAMES = ("jk1", "mots")
+MAX_NAME_B64 = 128
+MAX_NAME = 15  # the game sends 15 characters of a player's name to the others
+MAX_STATUS_GAMES = 64
+MAX_STATUS_NAMES = 64
+# Control and invisible characters (bidi overrides among them) never reach a page.
+HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
@@ -66,6 +87,9 @@ class Conn:
         self.send_lock = threading.Lock()
         self.room = None
         self.id = 0
+        self.name = None  # from hello
+        self.game = ""
+        self.watch = False
         self.closed = False
 
     def send_frame(self, opcode, payload):
@@ -87,7 +111,7 @@ class Conn:
     def send_text(self, text):
         self.send_frame(OP_TEXT, text.encode("utf-8"))
 
-    def name(self):
+    def addr_name(self):
         return "%s:%d" % (self.addr[0], self.addr[1])
 
 
@@ -104,6 +128,8 @@ class Relay:
         self.lock = threading.Lock()
         self.rooms = {}
         self.next_room = 1
+        self.conns = set()
+        self.last_status = None
 
     # Every handler decides who gets what while holding the lock, then sends
     # after releasing it, so one slow socket can't stall everyone else.
@@ -130,10 +156,12 @@ class Relay:
                 self.rooms[room.id] = room
                 conn.room, conn.id = room, 1
                 outbox.append((conn, OP_TEXT, b"hosted %d" % room.id))
-                log("room %d opened by %s" % (room.id, conn.name()))
+                log("room %d opened by %s" % (room.id, conn.addr_name()))
+                self._status_changed(outbox)
             elif op == "update" and len(args) == 1 and valid_entry(args[0]):
-                if conn.room and conn.room.host is conn:
+                if conn.room and conn.room.host is conn and conn.room.entry != args[0]:
                     conn.room.entry = args[0]
+                    self._status_changed(outbox)
             elif op == "join" and len(args) == 1 and args[0].isdigit():
                 self._leave(conn, outbox)
                 room = self.rooms.get(int(args[0]))
@@ -147,7 +175,8 @@ class Relay:
                         room.peers[peer_id] = conn
                         conn.room, conn.id = room, peer_id
                         outbox.append((room.host, OP_TEXT, b"peer-joined %d" % peer_id))
-                        log("room %d: %s joined as id %d" % (room.id, conn.name(), peer_id))
+                        log("room %d: %s joined as id %d" % (room.id, conn.addr_name(), peer_id))
+                self._status_changed(outbox)
             elif op == "welcome" and len(args) == 2 and args[0].isdigit() and valid_entry(args[1]):
                 room = conn.room
                 if room and room.host is conn:
@@ -166,6 +195,13 @@ class Relay:
                         outbox.append((target, OP_TEXT, ("signal %d %s" % (conn.id, args[1])).encode()))
             elif op == "leave":
                 self._leave(conn, outbox)
+                self._status_changed(outbox)
+            elif op == "hello" and len(args) == 2 and args[0] in GAMES and player_name(args[1]) is not None:
+                conn.name, conn.game = player_name(args[1]), args[0]
+                self._status_changed(outbox)
+            elif op == "watch" and not args:
+                conn.watch = True
+                self._watch(conn, outbox)
             else:
                 outbox.append((conn, OP_TEXT, b"error bad-request"))
         self.deliver(outbox)
@@ -187,11 +223,57 @@ class Relay:
         if target and target is not conn:
             target.send_frame(OP_BINARY, data)
 
-    def leave(self, conn):
+    def connect(self, conn):
+        with self.lock:
+            self.conns.add(conn)
+
+    def disconnect(self, conn):
         outbox = []
         with self.lock:
             self._leave(conn, outbox)
+            self.conns.discard(conn)
+            self._status_changed(outbox)
         self.deliver(outbox)
+
+    # The landing page's live counts. Same as status() in cloudflare/src/lobby.js.
+    def _status(self):
+        lobby = sorted((c.name for c in self.conns if not c.room and c.name is not None), key=sort_key)
+        games = []
+        online = len(lobby)
+        for room in sorted(self.rooms.values(), key=lambda r: r.id):
+            info = read_entry(room.entry)
+            if not info:
+                continue
+            names = [room.host.name or ""] + [room.peers[i].name or "" for i in sorted(room.peers)]
+            online += len(names)
+            game = room.host.game or ("mots" if info["episode"].lower().endswith(".goo") else "jk1")
+            games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
+                              mod=info["mod"], locked=info["locked"], players=len(names), max=info["max"],
+                              names=names[:MAX_STATUS_NAMES]))
+        data = json.dumps(dict(online=online, lobby=lobby[:MAX_STATUS_NAMES], games=games[:MAX_STATUS_GAMES]),
+                          ensure_ascii=False, separators=(",", ":"))
+        return b"status " + base64.b64encode(data.encode("utf-8"))
+
+    # After anything that can change the counts: tells the watching pages,
+    # unless they already have this status.
+    def _status_changed(self, outbox):
+        watchers = [c for c in self.conns if c.watch]
+        if not watchers:
+            self.last_status = None
+            return
+        status = self._status()
+        if status == self.last_status:
+            return
+        self.last_status = status
+        outbox.extend((c, OP_TEXT, status) for c in watchers)
+
+    def _watch(self, conn, outbox):
+        status = self._status()
+        if status == self.last_status:
+            outbox.append((conn, OP_TEXT, status))
+        else:
+            self.last_status = status
+            outbox.extend((c, OP_TEXT, status) for c in self.conns if c.watch)
 
     def _leave(self, conn, outbox):
         room = conn.room
@@ -216,6 +298,60 @@ def valid_entry(text):
 
 def valid_signal(text):
     return len(text) <= MAX_SIGNAL_B64 and B64_RE.match(text) is not None
+
+
+def clean_text(text, limit):
+    return HIDDEN_RE.sub("", text).strip()[:limit].strip()
+
+
+def c_string(data):
+    """A C string, printable ASCII only."""
+    data = data.split(b"\0", 1)[0]
+    return "".join(chr(b) if 0x20 <= b < 0x7F else "?" for b in data)
+
+
+def mod_name(tail):
+    """The mod in a host's tail, as packaging/wasm/mods.js writes it: "JKMD", version 2, flags (1 a mod,
+    2 the MotS Remastered pack), the name's length, the mod's 32-byte and the pack's 16-byte
+    fingerprints when there, then the name."""
+    b = bytes.fromhex(tail[:len(tail) // 2 * 2])
+    if len(b) < 7 or b[:5] != b"JKMD\x02":
+        return ""
+    flags = b[5]
+    at = 7 + 32 + (16 if flags & 2 else 0)
+    name = c_string(b[at:at + b[6]]) if flags & 1 else ""
+    if flags & 2:
+        return name + ", Remastered pack" if name else "Remastered pack"
+    return name
+
+
+def read_entry(entry):
+    """What the page shows of a hosted game: never its password, only whether it has one. None for an
+    entry that isn't a game's (a jkMultiEntry, types.h in the OpenJKDF2 fork)."""
+    if len(entry) < ENTRY_HEX:
+        return None
+    b = bytes.fromhex(entry[:ENTRY_HEX])
+    max_players = struct.unpack_from("<i", b, 16)[0]
+    server = b[24:88].decode("utf-16-le", "replace").split("\0", 1)[0]
+    return dict(max=max_players if 0 < max_players <= LAST_PEER_ID else 0, name=clean_text(server, 32),
+                episode=c_string(b[88:120]), map=c_string(b[120:152]), locked=b[152:154] != b"\0\0",
+                mod=mod_name(entry[ENTRY_HEX:]))
+
+
+def sort_key(name):
+    """Close to the order JavaScript's localeCompare gives: Ä with the As, case aside."""
+    return unicodedata.normalize("NFKD", name).casefold(), name
+
+
+def player_name(b64):
+    """hello's base64 UTF-8 name, cleaned, or None if it isn't one."""
+    if len(b64) > MAX_NAME_B64 or not B64_RE.match(b64):
+        return None
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except ValueError:
+        return None
+    return clean_text(data.decode("utf-8", "replace"), MAX_NAME)
 
 
 class IceConfig:
@@ -342,12 +478,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         conn = Conn(sock, self.client_address)
+        self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())
         try:
             self.websocket_loop(conn)
         finally:
-            self.relay.leave(conn)
+            self.relay.disconnect(conn)
             conn.closed = True
 
     def websocket_loop(self, conn):

@@ -10,6 +10,9 @@ running at home. It speaks the same protocol, so the same browser build works wi
 - The lobby itself is a Durable Object, so every player reaches the same one. It uses WebSocket
   hibernation, so it isn't kept in memory while people sit in the lobby, and Cloudflare answers the
   pages' keepalive pings without waking it.
+- The landing page's live counts come from the lobby too: each running game sends its player's name
+  once, and the page gets the player count, the games and who's in them whenever they change. These
+  messages from the lobby to pages don't count toward the free plan's requests.
 - Pages get Cloudflare's STUN server (`STUN` in `wrangler.toml`), so most players link directly over
   WebRTC and their game packets never touch the lobby. There's no TURN server: players who can't
   link directly have their packets relayed by the lobby, as with `relay.py`.
