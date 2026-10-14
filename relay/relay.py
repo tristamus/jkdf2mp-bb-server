@@ -10,7 +10,7 @@ The page's network backend (src/Platform/Networking/WSRelay in the OpenJKDF2
 fork) connects to ws://<this server>/relay. Text frames are control lines,
 binary frames are game packets:
 
-  client -> relay   list | host <entry> | update <entry> | join <room>
+  client -> relay   list [<game>] | host <entry> | update <entry> | join <room>
                     welcome <id> <entry> | leave | signal <id> <data> | ping
                     hello <game> <name> | watch
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
@@ -18,7 +18,9 @@ binary frames are game packets:
                     host-left | error <code> | signal <id> <data> | ice <data>
                     status <data>
 
-<entry> is the host's hex-encoded session description, passed through as is.
+list jk1 or list mots lists only the games that game can join: it leaves out
+those whose host said hello as the other one. <entry> is the host's
+hex-encoded session description, passed through as is.
 signal carries base64 SDP or ICE candidates between a host and one of its
 clients; the relay only checks the sender is in that room and swaps the target
 id for the sender's. ice is sent once on connect when --stun or --turn is set:
@@ -27,9 +29,11 @@ base64 JSON for RTCPeerConnection's iceServers.
 The landing page's live counts: each running game sends hello with its game
 (jk1 or mots) and its player's name in base64 UTF-8, again when it changes. A
 page that sends watch gets status, base64 UTF-8 JSON, then again whenever it
-changes: {"online": n, "lobby": [names], "games": [{"id", "name", "game",
-"map", "episode", "mod", "locked", "players", "max", "names"}]}, the host's
-name first and "" for a player whose game didn't say hello. The relay reads a
+changes: {"online": n, "lobby": [names], "byGame": {"jk1": {"online": n,
+"lobby": [names]}, "mots": {...}}, "games": [{"id", "name", "game", "map",
+"episode", "mod", "locked", "players", "max", "names"}]}, the host's name
+first and "" for a player whose game didn't say hello. byGame splits the
+counts and the lobby by the game players run, for the page's rooms. The relay reads a
 game's details from its entry (a jkMultiEntry, then the mod tail from mods.js),
 and never sends its password, only whether it has one. A player is a
 connection that said hello or is in a room; watching pages don't count.
@@ -147,7 +151,9 @@ class Relay:
         outbox = []
         with self.lock:
             if op == "list":
-                games = ["%d %d %s" % (r.id, 1 + len(r.peers), r.entry) for r in self.rooms.values()]
+                want = args[0] if args and args[0] in GAMES else None
+                games = ["%d %d %s" % (r.id, 1 + len(r.peers), r.entry) for r in self.rooms.values()
+                         if not want or not r.host.game or r.host.game == want]
                 outbox.append((conn, OP_TEXT, " ".join(["list"] + games).encode()))
             elif op == "host" and len(args) == 1 and valid_entry(args[0]):
                 self._leave(conn, outbox)
@@ -237,7 +243,10 @@ class Relay:
 
     # The landing page's live counts. Same as status() in cloudflare/src/lobby.js.
     def _status(self):
-        lobby = sorted((c.name for c in self.conns if not c.room and c.name is not None), key=sort_key)
+        waiting = [c for c in self.conns if not c.room and c.name is not None]
+        lobby = sorted((c.name for c in waiting), key=sort_key)
+        by_game = {g: dict(online=0, lobby=sorted((c.name for c in waiting if c.game == g), key=sort_key))
+                   for g in GAMES}
         games = []
         online = len(lobby)
         for room in sorted(self.rooms.values(), key=lambda r: r.id):
@@ -246,11 +255,16 @@ class Relay:
                 continue
             names = [room.host.name or ""] + [room.peers[i].name or "" for i in sorted(room.peers)]
             online += len(names)
-            game = room.host.game or ("mots" if info["episode"].lower().endswith(".goo") else "jk1")
+            game = room.host.game or guess_game(info["episode"])
+            by_game[game]["online"] += len(names)
             games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
                               mod=info["mod"], locked=info["locked"], players=len(names), max=info["max"],
                               names=names[:MAX_STATUS_NAMES]))
-        data = json.dumps(dict(online=online, lobby=lobby[:MAX_STATUS_NAMES], games=games[:MAX_STATUS_GAMES]),
+        for g in by_game.values():
+            g["online"] += len(g["lobby"])
+            g["lobby"] = g["lobby"][:MAX_STATUS_NAMES]
+        data = json.dumps(dict(online=online, lobby=lobby[:MAX_STATUS_NAMES], byGame=by_game,
+                               games=games[:MAX_STATUS_GAMES]),
                           ensure_ascii=False, separators=(",", ":"))
         return b"status " + base64.b64encode(data.encode("utf-8"))
 
@@ -341,6 +355,13 @@ def read_entry(entry):
 def sort_key(name):
     """Close to the order JavaScript's localeCompare gives: Ä with the As, case aside."""
     return unicodedata.normalize("NFKD", name).casefold(), name
+
+
+def guess_game(episode):
+    """For a host that didn't say hello: the retail Mysteries of the Sith
+    episodes all start with JKM (JKM, JKM_KFY, JKM_MP, JKM_SABER). Episode
+    names have no extension."""
+    return "mots" if episode.lower().startswith("jkm") else "jk1"
 
 
 def player_name(b64):

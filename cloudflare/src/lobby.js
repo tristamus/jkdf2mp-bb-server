@@ -124,6 +124,13 @@ function readEntry(hex) {
 }
 
 // hello's base64 UTF-8 name, cleaned, or null if it isn't one.
+// For a host that didn't say hello: the retail Mysteries of the Sith episodes
+// all start with JKM (JKM, JKM_KFY, JKM_MP, JKM_SABER). Episode names have no
+// extension.
+function guessGame(episode) {
+    return /^jkm/i.test(episode) ? "mots" : "jk1";
+}
+
 function playerName(b64) {
     if (b64.length > MAX_NAME_B64 || !B64_RE.test(b64))
         return null;
@@ -302,7 +309,12 @@ export class Lobby extends DurableObject {
             return;
         const c = this.conn(ws);
         if (op === "list") {
-            const games = [...this.rooms.values()].map(r => `${r.id} ${1 + r.peers.size} ${r.entry}`);
+            // list jk1 or list mots: only the games that game can join, so
+            // not those whose host said hello as the other one.
+            const want = GAMES.includes(args[0]) ? args[0] : null;
+            const games = [...this.rooms.values()]
+                .filter(r => !want || !this.conn(r.host).game || this.conn(r.host).game === want)
+                .map(r => `${r.id} ${1 + r.peers.size} ${r.entry}`);
             this.send(ws, ["list", ...games].join(" "));
         } else if (op === "host" && args.length === 1 && validEntry(args[0])) {
             this.leave(ws);
@@ -393,15 +405,20 @@ export class Lobby extends DurableObject {
             this.send(target, data);
     }
 
-    // The landing page's live counts: who's on and the games they're in. A
-    // player is a game that said hello or is in a room; watching pages aren't.
+    // The landing page's live counts: who's on and the games they're in, in
+    // all and by game (its rooms are each for one game). A player is a game
+    // that said hello or is in a room; watching pages aren't.
     status() {
+        const byName = (a, b) => a.localeCompare(b);
         const lobby = [];
+        const byGame = Object.fromEntries(GAMES.map(g => [g, { online: 0, lobby: [] }]));
         for (const c of this.conns.values()) {
-            if (!c.room && c.name != null)
+            if (!c.room && c.name != null) {
                 lobby.push(c.name);
+                byGame[c.game].lobby.push(c.name);
+            }
         }
-        lobby.sort((a, b) => a.localeCompare(b));
+        lobby.sort(byName);
         const games = [];
         let online = lobby.length;
         for (const room of [...this.rooms.values()].sort((a, b) => a.id - b.id)) {
@@ -411,15 +428,21 @@ export class Lobby extends DurableObject {
             const host = this.conn(room.host);
             const peers = [...room.peers.entries()].sort((a, b) => a[0] - b[0]);
             const names = [host.name || "", ...peers.map(([, ws]) => this.conn(ws).name || "")];
+            const game = host.game || guessGame(info.episode);
             online += names.length;
+            byGame[game].online += names.length;
             games.push({
-                id: room.id, name: info.name, game: host.game || (/\.goo$/i.test(info.episode) ? "mots" : "jk1"),
+                id: room.id, name: info.name, game,
                 map: info.map, episode: info.episode, mod: info.mod, locked: info.locked,
                 players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
             });
         }
+        for (const g of Object.values(byGame)) {
+            g.online += g.lobby.length;
+            g.lobby = g.lobby.sort(byName).slice(0, MAX_STATUS_NAMES);
+        }
         return "status " + base64Utf8(JSON.stringify({
-            online, lobby: lobby.slice(0, MAX_STATUS_NAMES), games: games.slice(0, MAX_STATUS_GAMES),
+            online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
         }));
     }
 
