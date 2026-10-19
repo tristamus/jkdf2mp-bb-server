@@ -32,6 +32,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-25/`: `cloudflare-24` with the game going fullscreen instead of the browser's pointer notice, and Esc reaching the game's menu.
 - `cloudflare-26/`: `cloudflare-25` with notices when graphics acceleration is off or Edge's enhanced security slows the game, F8 for screenshots, and a prompt before the tab closes mid-game.
 - `cloudflare-27/`: `cloudflare-26` with the game's Quit going back to the lobby, and a Quit button on the Players screens shown at startup.
+- `cloudflare-28/`: `cloudflare-27` with a faster start after picking the game folder, reading only the files the game opens.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
