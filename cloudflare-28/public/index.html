@@ -1,0 +1,3598 @@
+<!doctype html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>jkdf2mp Game Rooms</title>
+    <style>
+      body {
+        font-family: arial;
+        margin: 0;
+        padding: none;
+      }
+
+      .emscripten { padding-right: 0; margin-left: auto; margin-right: auto; display: block; }
+      div.emscripten { text-align: center; }      
+      div.emscripten_border { border: 1px solid black; }
+      /* the canvas *must not* have any border or padding, or mouse coords will be wrong */
+      canvas.emscripten { border: 0px none; background-color: black; }
+      #canvas {
+          position: absolute;
+          top: 0px;
+          left: 0px;
+          margin: 0px;
+          width: 100%;
+          height: 100%;
+          overflow: hidden;
+          display: block;
+      }
+
+      #emscripten_logo {
+        display: inline-block;
+        margin: 0;
+      }
+
+      .spinner {
+        height: 30px;
+        width: 30px;
+        margin: 0;
+        margin-top: 20px;
+        margin-left: 20px;
+        display: inline-block;
+        vertical-align: top;
+
+        -webkit-animation: rotation .8s linear infinite;
+        -moz-animation: rotation .8s linear infinite;
+        -o-animation: rotation .8s linear infinite;
+        animation: rotation 0.8s linear infinite;
+
+        border-left: 5px solid rgb(235, 235, 235);
+        border-right: 5px solid rgb(235, 235, 235);
+        border-bottom: 5px solid rgb(235, 235, 235);
+        border-top: 5px solid rgb(120, 120, 120);
+        
+        border-radius: 100%;
+        background-color: rgb(189, 215, 46);
+      }
+
+      @-webkit-keyframes rotation {
+        from {-webkit-transform: rotate(0deg);}
+        to {-webkit-transform: rotate(360deg);}
+      }
+      @-moz-keyframes rotation {
+        from {-moz-transform: rotate(0deg);}
+        to {-moz-transform: rotate(360deg);}
+      }
+      @-o-keyframes rotation {
+        from {-o-transform: rotate(0deg);}
+        to {-o-transform: rotate(360deg);}
+      }
+      @keyframes rotation {
+        from {transform: rotate(0deg);}
+        to {transform: rotate(360deg);}
+      }
+
+      #status {
+        display: inline-block;
+        vertical-align: top;
+        margin-top: 30px;
+        margin-left: 20px;
+        font-weight: bold;
+        color: rgb(120, 120, 120);
+      }
+
+      #progress {
+        height: 20px;
+        width: 300px;
+      }
+
+      #controls {
+        display: inline-block;
+        float: right;
+        vertical-align: top;
+        margin-top: 30px;
+        margin-right: 20px;
+      }
+
+      #output {
+        width: 100%;
+        height: 200px;
+        margin: 0 auto;
+        margin-top: 10px;
+        border-left: 0px;
+        border-right: 0px;
+        padding-left: 0px;
+        padding-right: 0px;
+        display: block;
+        background-color: black;
+        color: white;
+        font-family: 'Lucida Console', Monaco, monospace;
+        outline: none;
+      }
+      /* The landing page, after the turn-of-the-century game lobbies: teal page,
+         gold menu bar, pale yellow links. It covers the canvas until a folder is
+         picked. */
+      :root {
+        --teal: #336666;
+        --teal-light: #669999;
+        --teal-dark: #003333;
+        --gold: #ffcc66;
+        --link: #ffffcc;
+        --muted: #99cccc;
+        --ink: #ffffff;
+        --bad: #ffb199;
+      }
+      [hidden] { display: none !important; }
+      /* Over the game while Quit takes the player back to the lobby. */
+      .quit-note {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        padding: 0 16px;
+        background-color: #000;
+        color: var(--gold);
+        font: bold 17px Verdana, Geneva, sans-serif;
+        text-align: center;
+      }
+      html.zone-open, html.zone-open body { overflow: hidden; }
+      #zone {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        overflow-y: auto;
+        background-color: var(--teal);
+        color: var(--ink);
+        font: 14px/1.35 Arial, Helvetica, sans-serif;
+      }
+      #zone a, .link-button {
+        color: var(--link);
+        text-decoration: underline;
+      }
+      #zone a:hover, .link-button:hover { color: var(--gold); }
+      #zone a:focus-visible, #zone button:focus-visible, #picker :focus-visible {
+        outline: 2px solid var(--gold);
+        outline-offset: 2px;
+      }
+      .zone-page { max-width: 940px; }
+
+      .topnav {
+        display: flex;
+        flex-wrap: wrap;
+        background-color: var(--teal-dark);
+        border-bottom: 1px solid #000;
+        font: bold 15px Verdana, Geneva, sans-serif;
+      }
+      .topnav a { padding: 3px 8px; border-right: 1px solid var(--teal-light); }
+
+      .masthead {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: stretch;
+        background: linear-gradient(100deg, var(--teal-dark) 0 62%, var(--teal) 62%);
+      }
+      .brand { padding: 10px 14px 8px; min-width: 190px; }
+      .brand-mark {
+        font: italic bold 40px/1 Verdana, Geneva, sans-serif;
+        letter-spacing: -2px;
+        color: #fff;
+      }
+      .brand-mark span { color: var(--gold); }
+      .brand-sub {
+        margin-top: 4px;
+        font: bold 17px Verdana, Geneva, sans-serif;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .banner {
+        flex: 1 1 300px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 6px;
+        padding: 10px 14px;
+        background-color: #fff;
+        border: 1px solid #000;
+        color: #003333;
+      }
+      .banner p { margin: 0; font: bold 15px Verdana, Geneva, sans-serif; }
+      .banner small { display: block; margin-top: 3px; font: 12px Arial, sans-serif; color: #335555; }
+
+      .play {
+        flex: none;
+        padding: 8px 20px;
+        border: 2px outset #ffe7a8;
+        background: linear-gradient(#ffe7a8, var(--gold) 55%, #e8a93a);
+        color: #1a1a00;
+        font: bold 18px Verdana, Geneva, sans-serif;
+        cursor: pointer;
+        text-shadow: 0 1px 0 #fff3cf;
+      }
+      .play:hover { background: linear-gradient(#fff1c9, #ffd780 55%, #f0b549); }
+      .play:active { border-style: inset; }
+      .play.big { padding: 12px 34px; font-size: 22px; }
+
+      .goldnav {
+        display: flex;
+        flex-wrap: wrap;
+        background-color: var(--gold);
+        border-top: 1px solid #000;
+        border-bottom: 1px solid #000;
+        font: bold 15px Arial, Helvetica, sans-serif;
+      }
+      #zone .goldnav a {
+        padding: 2px 12px;
+        border-right: 1px solid #000;
+        color: #000;
+        text-decoration: none;
+      }
+      #zone .goldnav a:hover { background-color: #ffe0a0; }
+      .tagline { margin: 6px 8px; color: var(--muted); font-size: 15px; }
+
+      .layout { display: flex; align-items: flex-start; }
+      .sidebar {
+        flex: none;
+        width: 198px;
+        padding-bottom: 14px;
+        background-color: var(--teal-light);
+        border-bottom-right-radius: 48px;
+      }
+      .boxart {
+        height: 66px;
+        padding: 8px 10px;
+        box-sizing: border-box;
+        background: radial-gradient(circle at 80% 30%, #7a4a1a, #2a1200 60%, #000);
+        border-bottom: 1px solid #000;
+        font-family: Georgia, 'Times New Roman', serif;
+        color: #f2e6c4;
+      }
+      .boxart b { display: block; font-size: 20px; letter-spacing: 2px; text-transform: uppercase; }
+      .boxart span { font-size: 13px; letter-spacing: 1px; color: #e0c27a; }
+      .sidebar ul { list-style: none; margin: 6px 0 0; padding: 0 8px; }
+      .sidebar li { font: bold 14px/1.2 Verdana, Geneva, sans-serif; }
+      #zone .sidebar li a { color: #000; text-decoration: none; }
+      #zone .sidebar li a:hover { color: #fff; text-decoration: underline; }
+      #zone .sidebar li a.here { color: var(--gold); }
+      .goto { margin: 18px 8px 0; color: #fff; }
+      .goto a { display: block; }
+
+      .main { flex: 1; min-width: 0; padding: 0 8px 24px 8px; }
+      .main h1 { margin: 2px 0 8px; font: 20px Arial, Helvetica, sans-serif; }
+      .steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+        align-items: center;
+        margin: 4px 0 10px;
+        padding: 0;
+        list-style: none;
+      }
+      .steps li { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+      .steps li b {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        border: 2px solid #000;
+        background: radial-gradient(circle at 35% 30%, #ffe7a8, #c27a2a 70%, #5a3000);
+        color: #2a1200;
+        font: bold 16px Verdana, Geneva, sans-serif;
+      }
+      .main h2 {
+        margin: 16px 0 2px;
+        padding-bottom: 1px;
+        font: bold 18px Arial, Helvetica, sans-serif;
+      }
+      .main h2.ruled { border-bottom: 1px solid var(--teal-light); display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .main h2.ruled small { font: 14px Arial, sans-serif; color: var(--muted); }
+      .main h3 { margin: 16px 0 0; font: bold 18px Arial, Helvetica, sans-serif; }
+      .main p { margin: 4px 0 8px; }
+      .main ul.headlines { margin: 2px 0 0; padding-left: 22px; }
+      .note { color: var(--muted); }
+      .lead-play { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 6px 0 4px; }
+      .lead-play p { margin: 0; flex: 1 1 220px; color: var(--muted); }
+
+      .rooms {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        column-gap: 28px;
+        margin: 2px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+      .rooms li { border-bottom: 1px solid var(--teal-light); }
+      .link-button {
+        display: block;
+        width: 100%;
+        padding: 1px 0;
+        border: 0;
+        background: none;
+        font: bold 15px Arial, Helvetica, sans-serif;
+        text-align: left;
+        cursor: pointer;
+      }
+      .link-button .tag { font-weight: normal; color: var(--muted); }
+
+      .info { margin: 0; padding-left: 20px; }
+      .info li { margin-bottom: 6px; }
+
+      /* Features: small windows like the folder prompt, two to a row. */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+        gap: 10px;
+        margin-top: 6px;
+      }
+      .feature {
+        background-color: var(--teal-dark);
+        border: 1px solid #000;
+        box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.35);
+      }
+      .main .feature h3 {
+        margin: 0;
+        padding: 3px 8px;
+        background-color: var(--gold);
+        border-bottom: 1px solid #000;
+        color: #000;
+        font: bold 14px Verdana, Geneva, sans-serif;
+      }
+      .feature ul { margin: 6px 0 8px; padding: 0 10px 0 24px; }
+      .feature li { margin-bottom: 4px; font-size: 13px; }
+      .feature li::marker { color: var(--gold); }
+
+      .zone-button {
+        padding: 4px 12px;
+        border: 2px outset #9cc;
+        background-color: var(--teal-light);
+        color: #fff;
+        font: bold 13px Verdana, Geneva, sans-serif;
+        cursor: pointer;
+      }
+      .zone-button:active { border-style: inset; }
+      .zone-button:disabled { opacity: 0.5; cursor: default; }
+      .text-button {
+        padding: 0;
+        border: 0;
+        background: none;
+        color: var(--link);
+        font: inherit;
+        text-decoration: underline;
+        cursor: pointer;
+      }
+      .text-button:hover { color: var(--gold); }
+      .shots-bar { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }
+      .shots {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .shots li {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px;
+        background-color: var(--teal-dark);
+        border: 1px solid var(--teal-light);
+        font-size: 13px;
+      }
+      .shots img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background-color: #000; }
+      .shots .when { margin-top: 4px; font-weight: bold; font-size: 14px; }
+      .shots .what { color: var(--muted); }
+      .shots .shot-actions { display: flex; gap: 14px; margin-top: 2px; }
+      #zone code { color: var(--gold); font: bold 14px 'Courier New', monospace; }
+
+      .footer {
+        margin-top: 8px;
+        padding: 12px 14px;
+        background-color: var(--teal-dark);
+        color: var(--muted);
+        font-size: 12px;
+        border-top: 1px solid var(--teal-light);
+      }
+      .footer p { margin: 0 0 6px; }
+      .footer a { margin-right: 14px; }
+
+      @media (max-width: 700px) {
+        .layout { flex-direction: column; align-items: stretch; }
+        .sidebar { width: auto; border-bottom-right-radius: 0; }
+        .sidebar ul { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+        .goto { display: none; }
+        .main { padding: 0 16px 24px; }
+        .rooms { grid-template-columns: 1fr; }
+        .masthead { background: var(--teal-dark); }
+        .brand-mark { font-size: 32px; }
+        .topnav a { padding-left: 8px; padding-right: 8px; }
+        .goldnav { font-size: 14px; }
+        #zone .goldnav a { padding-left: 7px; padding-right: 7px; }
+        .steps { gap: 8px 18px; }
+      }
+
+      /* The folder prompt, opened by Play JKDF2 or any room, and reused to
+         report problems once the game runs. */
+      #picker {
+        width: min(560px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        padding: 0;
+        border: 2px solid #000;
+        background-color: var(--teal-dark);
+        color: #fff;
+        font: 15px/1.45 Arial, Helvetica, sans-serif;
+        box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.45);
+      }
+      #picker::backdrop { background-color: rgba(0, 20, 20, 0.6); }
+      #picker .titlebar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 4px 6px 4px 12px;
+        background-color: var(--gold);
+        border-bottom: 1px solid #000;
+        color: #000;
+      }
+      #picker h1 { margin: 0; font: bold 17px Verdana, Geneva, sans-serif; }
+      #picker .close {
+        width: 26px;
+        height: 24px;
+        border: 2px outset #fff;
+        background: #ddd;
+        font: bold 14px Verdana, sans-serif;
+        cursor: pointer;
+      }
+      #picker .body { padding: 14px 16px 16px; }
+      #picker p { margin: 0 0 12px; }
+      #picker code { color: var(--gold); font: bold 15px 'Courier New', monospace; }
+      #picker .promises { margin: 0 0 12px; padding: 0; list-style: none; }
+      #picker .promises li {
+        position: relative;
+        margin-bottom: 10px;
+        padding: 8px 10px 8px 38px;
+        background-color: var(--teal);
+        border: 1px solid var(--teal-light);
+      }
+      #picker .promises li::before {
+        content: "\2713";
+        position: absolute;
+        left: 10px;
+        top: 7px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background-color: var(--gold);
+        color: #000;
+        font: bold 14px/20px Arial, sans-serif;
+        text-align: center;
+      }
+      #picker .promises b { color: var(--gold); }
+      #picker .fine { color: var(--muted); font-size: 13px; }
+      #picker .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+      #picker label.play { display: inline-block; }
+      #picker label.play[aria-disabled=true] { opacity: 0.5; pointer-events: none; }
+      #picker .cancel {
+        padding: 7px 14px;
+        border: 2px outset #9cc;
+        background-color: var(--teal-light);
+        color: #fff;
+        font: bold 14px Verdana, Geneva, sans-serif;
+        cursor: pointer;
+      }
+      #picker input[type=file] { display: none; }
+      #picker .picker-option { display: flex; gap: 10px; align-items: baseline; margin-top: 14px; cursor: pointer; }
+      #picker .picker-option[hidden] { display: none; }
+      #picker .picker-option input { accent-color: var(--gold); }
+      #picker .picker-option .fine { display: block; }
+      #mod-choice fieldset { margin: 0 0 12px; padding: 0; border: 0; }
+      #mod-choice legend { margin-bottom: 6px; padding: 0; font: bold 15px Verdana, Geneva, sans-serif; color: var(--gold); }
+      #mod-choice label {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        margin-bottom: 6px;
+        padding: 7px 10px;
+        background-color: var(--teal);
+        border: 1px solid var(--teal-light);
+        cursor: pointer;
+      }
+      #mod-choice label:has(input:checked) { border-color: var(--gold); }
+      #mod-choice label.mod-all, #mod-choice label.mod-all:has(input:checked) {
+        align-items: center;
+        background-color: transparent;
+        border-color: transparent transparent var(--teal-light);
+      }
+      #mod-choice label.mod-all[hidden] { display: none; }
+      #mod-choice .mod-count { margin-left: auto; color: var(--muted); font-size: 13px; }
+      #mod-choice input { accent-color: var(--gold); }
+      #mod-choice .where { display: block; color: var(--muted); font-size: 13px; }
+      #mod-choice .mod-clash { margin: 0 0 12px; padding: 7px 10px; border-left: 3px solid var(--gold); font-size: 14px; white-space: pre-line; }
+      #picker-result { margin-top: 14px; white-space: pre-line; }
+      #picker-result:empty { display: none; }
+      #picker-result.error { color: var(--bad); font-weight: bold; }
+
+      /* Shown only when the browser draws without the graphics card. */
+      .gfx-notice {
+        margin: 8px;
+        padding: 10px 14px;
+        background-color: var(--teal-dark);
+        border: 1px solid #000;
+        border-left: 6px solid var(--gold);
+      }
+      #picker .gfx-notice { margin: 0 0 12px; }
+      .gfx-notice h2 { margin: 0 0 6px; font: bold 17px Verdana, Geneva, sans-serif; color: var(--gold); }
+      .gfx-notice p { margin: 0 0 6px; }
+      .gfx-notice ol { margin: 0 0 6px; padding-left: 22px; }
+      .gfx-notice li { margin-bottom: 4px; }
+      .gfx-notice code { font: bold 14px 'Courier New', monospace; color: var(--gold); overflow-wrap: anywhere; }
+      .gfx-notice .copy, .gfx-notice .hide {
+        margin-left: 6px;
+        padding: 1px 8px;
+        border: 2px outset #9cc;
+        background-color: var(--teal-light);
+        color: #fff;
+        font: bold 12px Verdana, Geneva, sans-serif;
+        cursor: pointer;
+      }
+      .gfx-notice .copy:active, .gfx-notice .hide:active { border-style: inset; }
+      .gfx-notice .fine { margin: 0; color: var(--muted); font-size: 13px; }
+
+      /* Live counts in Standard Rooms, and Nar Shaddaa's room window, after
+         the Zone's room list and its game room client: tables on black, a
+         white list of who's on, a grey toolbar and status bar. */
+      :root {
+        --win-grey: #d4d0c8;
+        --win-dark: #808080;
+        --win-text: #000;
+        --live: #33cc66;
+        --join-hi: #e9ffff;
+        --join: #8fdbe4;
+        --join-lo: #2b8796;
+      }
+      .rooms.counted .link-button, .note.counted {
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        align-items: baseline;
+      }
+      .rooms.counted .link-button { text-decoration: none; }
+      .rooms.counted .room-name { text-decoration: underline; }
+      .rooms .count {
+        color: var(--ink);
+        font-weight: normal;
+        font-variant-numeric: tabular-nums;
+      }
+      .rooms .count.busy { color: var(--muted); }
+      .main h2.ruled small b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+      #room {
+        width: min(1040px, calc(100vw - 32px));
+        height: min(760px, calc(100vh - 32px));
+        padding: 0;
+        border: 2px solid #000;
+        background-color: var(--win-grey);
+        color: var(--win-text);
+        font: 13px/1.35 Verdana, Geneva, sans-serif;
+        box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.45);
+      }
+      #room[open] { display: flex; flex-direction: column; }
+      #room::backdrop { background-color: rgba(0, 20, 20, 0.6); }
+      #room :focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+      #room .titlebar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 6px 4px 12px;
+        background-color: var(--gold);
+        border-bottom: 1px solid #000;
+      }
+      #room h1 { margin: 0; font: bold 15px Verdana, Geneva, sans-serif; overflow-wrap: anywhere; }
+      #room .close {
+        flex: none;
+        width: 26px;
+        height: 24px;
+        border: 2px outset #fff;
+        background: #ddd;
+        font: bold 14px Verdana, sans-serif;
+        cursor: pointer;
+      }
+      .room-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 2px;
+        padding: 3px 6px;
+        border-bottom: 1px solid var(--win-dark);
+      }
+      .room-toolbar button {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 8px;
+        border: 1px solid transparent;
+        background: none;
+        color: var(--win-text);
+        font: 12px Tahoma, Verdana, sans-serif;
+        cursor: pointer;
+      }
+      .room-toolbar button:hover { border-color: #fff var(--win-dark) var(--win-dark) #fff; }
+      .room-toolbar button[aria-pressed=true] {
+        border-color: var(--win-dark) #fff #fff var(--win-dark);
+        background-color: #e4e1db;
+      }
+      .room-toolbar svg { width: 14px; height: 14px; flex: none; }
+      .room-toolbar .sep { width: 1px; height: 18px; margin: 0 6px; background: var(--win-dark); border-right: 1px solid #fff; }
+      .room-body { flex: 1; min-height: 0; display: flex; }
+      .room-games {
+        flex: 1;
+        min-width: 0;
+        overflow: auto;
+        padding: 12px;
+        background-color: #000;
+        color: #fff;
+        border-right: 2px solid var(--win-dark);
+      }
+      .room-message { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+      .sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      .room-message b { color: var(--gold); }
+
+      .tables {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(208px, 1fr));
+        gap: 14px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .table { position: relative; display: flex; flex-direction: column; min-width: 0; }
+      .table-head {
+        position: relative;
+        padding: 3px 12px 4px 7px;
+        background-color: var(--teal);
+        border-radius: 0 20px 20px 0;
+        color: #fff;
+      }
+      .table-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      .table-no { font: bold 13px Verdana, Geneva, sans-serif; white-space: nowrap; }
+      .table-title {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 12px;
+        color: #e8f4f4;
+      }
+      .table-seats { margin-left: auto; font: 12px Verdana, sans-serif; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .table-seats.changed { animation: table-flash 1.2s ease-out; }
+      @keyframes table-flash { from { background-color: var(--gold); color: #000; } to { background-color: transparent; } }
+      .table-lock { width: 10px; height: 12px; flex: none; }
+      .table-info { position: relative; margin: 3px 0 0 7px; font-size: 11px; }
+      .table-info summary {
+        display: inline-block;
+        padding: 0 5px;
+        background-color: #1f5f8b;
+        color: #fff;
+        cursor: pointer;
+        list-style: none;
+      }
+      .table-info summary::-webkit-details-marker { display: none; }
+      .table-info[open] summary { background-color: var(--gold); color: #000; }
+      .table-info dl {
+        position: absolute;
+        z-index: 2;
+        left: 0;
+        top: 100%;
+        min-width: 190px;
+        margin: 2px 0 0;
+        padding: 6px 8px;
+        background-color: #fff;
+        border: 1px solid #000;
+        box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.5);
+        color: #000;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 2px 8px;
+      }
+      .table-info dt { font-weight: bold; }
+      .table-info dd { margin: 0; overflow-wrap: anywhere; }
+      .table-body { display: flex; align-items: center; gap: 8px; min-height: 104px; }
+      .ring { position: relative; flex: none; width: 100px; height: 100px; }
+      .ring::before {
+        content: "";
+        position: absolute;
+        inset: 6px;
+        border: 9px solid var(--teal);
+        border-top-color: transparent;
+        border-right-color: transparent;
+        border-radius: 50%;
+        transform: rotate(-20deg);
+      }
+      .seat {
+        position: absolute;
+        width: 7px;
+        height: 7px;
+        margin: -3.5px 0 0 -3.5px;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.7);
+      }
+      .seat.taken { background-color: #fff; border-color: #fff; }
+      .round {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 54px;
+        height: 54px;
+        margin: -27px 0 0 -27px;
+        padding: 0;
+        border: 2px solid #0c2a2a;
+        border-radius: 50%;
+        background: radial-gradient(circle at 35% 30%, var(--join-hi), var(--join) 45%, var(--join-lo));
+        color: #001a1a;
+        font: bold 12px Verdana, Geneva, sans-serif;
+        cursor: pointer;
+        box-shadow: 0 2px 0 rgba(255, 255, 255, 0.15);
+      }
+      .round span { padding: 1px 4px; background-color: rgba(255, 255, 255, 0.55); border: 1px solid rgba(0, 0, 0, 0.35); }
+      .round.host { background: radial-gradient(circle at 35% 30%, #fff3c4, var(--gold) 45%, #b07a1a); color: #2a1200; }
+      .round:hover { filter: brightness(1.1); }
+      .round:active { transform: translateY(1px); }
+      .round:disabled {
+        cursor: default;
+        filter: none;
+        background: repeating-conic-gradient(#666 0 25%, #333 0 50%) 0 0 / 4px 4px;
+        border-color: #444;
+      }
+      .table-players { flex: 1; min-width: 0; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+      .table-players li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .table-players .host-tag { margin-left: 4px; color: var(--gold); font-size: 10px; }
+      .table-players .more, .table-players .unnamed { color: var(--muted); }
+      .table-state { margin: 0; padding-left: 7px; font: bold 12px Verdana, sans-serif; color: #fff; }
+      .table-state.full { color: var(--gold); }
+      .table.empty .table-head { background-color: #224444; }
+      .table.empty .table-state { color: var(--muted); font-weight: normal; }
+
+      .game-list { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .game-list th {
+        padding: 4px 8px;
+        background-color: var(--teal);
+        text-align: left;
+        white-space: nowrap;
+      }
+      .game-list td { padding: 5px 8px; border-bottom: 1px solid #224444; vertical-align: top; }
+      .game-list td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .game-list .zone-button { padding: 2px 10px; font-size: 12px; }
+      .list-scroll { overflow-x: auto; }
+
+      .roster {
+        flex: none;
+        width: 210px;
+        overflow-y: auto;
+        background-color: #fff;
+        color: #000;
+        font: 12px Tahoma, Verdana, sans-serif;
+      }
+      .roster-head {
+        position: sticky;
+        top: 0;
+        padding: 2px 6px;
+        background-color: var(--win-grey);
+        border-bottom: 1px solid var(--win-dark);
+        text-align: center;
+      }
+      .roster section { padding: 6px 6px 4px; }
+      .roster h2 {
+        display: flex;
+        justify-content: space-between;
+        margin: 0 0 2px;
+        font: bold 12px Tahoma, Verdana, sans-serif;
+        text-transform: uppercase;
+      }
+      .roster h2 span { font-variant-numeric: tabular-nums; }
+      .roster ul { margin: 0; padding: 0 0 0 12px; list-style: none; }
+      .roster li { display: flex; justify-content: space-between; gap: 6px; }
+      .roster li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .roster li .where { flex: none; color: #555; }
+      .roster .none { color: #555; }
+
+      .room-note {
+        margin: 0;
+        padding: 6px 10px;
+        background-color: #fffbe6;
+        border-top: 1px solid var(--win-dark);
+        font-size: 12px;
+      }
+      .room-status {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 12px;
+        padding: 3px 8px;
+        border-top: 1px solid #fff;
+        font: 12px Tahoma, Verdana, sans-serif;
+      }
+      .room-status .panel {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 1px 6px;
+        border: 1px solid;
+        border-color: var(--win-dark) #fff #fff var(--win-dark);
+      }
+      .live-dot { width: 8px; height: 8px; border-radius: 50%; background-color: var(--win-dark); }
+      .live-dot.on { background-color: var(--live); box-shadow: 0 0 0 1px #116633; }
+      #room-status-extra { margin-left: auto; }
+
+      @media (max-width: 700px) {
+        #room { width: 100vw; height: 100dvh; max-width: none; max-height: none; border: 0; box-shadow: none; }
+        .room-body { flex-direction: column; overflow-y: auto; }
+        .room-games { flex: none; overflow: visible; border-right: 0; border-bottom: 2px solid var(--win-dark); padding: 12px 16px; }
+        .roster { width: auto; overflow: visible; }
+        .tables { grid-template-columns: repeat(auto-fill, minmax(min(208px, 100%), 1fr)); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .table-seats.changed { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+
+    <div class="emscripten_border">
+      <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex=-1></canvas>
+    </div>
+    <p class="quit-note" id="quit-note" role="status" hidden>Saving your settings and going back to the lobby&hellip;</p>
+<div class="spinner" id='spinner'></div>
+    <div class="emscripten" id="status">Downloading...</div>
+<div class="emscripten">
+      <progress value="0" max="100" id="progress" hidden=1></progress>
+    </div>
+<span id='controls'>
+  <span><input type="checkbox" id="resize">Resize canvas</span>
+  <span><input type="checkbox" id="pointerLock" checked>Lock/hide mouse pointer &nbsp;&nbsp;&nbsp;</span>
+  <span><input type="button" value="Fullscreen" onclick="Module.requestFullscreen(document.getElementById('pointerLock').checked, 
+                                                                            document.getElementById('resize').checked)">
+  </span>
+</span>
+    <textarea id="output" rows="8"></textarea>
+    <div id="zone">
+      <div class="zone-page">
+        <nav class="topnav" aria-label="Project links">
+          <a href="#rooms">Home</a>
+          <a href="#features">Features</a>
+          <a href="https://github.com/shinyquagsire23/OpenJKDF2">OpenJKDF2</a>
+          <a href="https://github.com/tristamus/OpenJKDF2">Source code</a>
+          <a href="#help">Help</a>
+        </nav>
+
+        <header class="masthead">
+          <div class="brand">
+            <div class="brand-mark">jkdf2<span>mp</span></div>
+            <div class="brand-sub">Game Rooms</div>
+          </div>
+          <div class="banner">
+            <p>Jedi Knight multiplayer, right in your browser.
+              <small>Bring your own copy of the game. Nothing to install.</small></p>
+            <button class="play" type="button" data-play>Play JKDF2</button>
+          </div>
+        </header>
+
+        <nav class="goldnav" aria-label="Sections">
+          <a href="#rooms">Game Rooms</a>
+          <a href="#features">Features</a>
+          <a href="#start">Getting Started</a>
+          <a href="#files">Your Files</a>
+          <a href="#screenshots">Screenshots</a>
+          <a href="#help">Help</a>
+        </nav>
+        <p class="tagline">Free to play. No account needed.</p>
+        <section class="gfx-notice" id="gfx-notice" role="alert" hidden></section>
+        <section class="gfx-notice jit-notice" id="jit-notice" role="status" hidden></section>
+
+        <div class="layout">
+          <aside class="sidebar">
+            <div class="boxart" aria-hidden="true"><b>Jedi Knight</b><span>Dark Forces II</span></div>
+            <ul>
+              <li><a href="#rooms" class="here">Game Rooms</a></li>
+              <li><a href="#features">Features</a></li>
+              <li><a href="#start">Getting Started</a></li>
+              <li><a href="#files">Your Files</a></li>
+              <li><a href="#screenshots">Your Screenshots</a></li>
+              <li><a href="#help">Game Help</a></li>
+            </ul>
+            <div class="goto">Go To:
+              <a href="https://github.com/shinyquagsire23/OpenJKDF2">OpenJKDF2</a>
+              <a href="https://github.com/tristamus/jkdf2mp-bb-server">Lobby source</a>
+            </div>
+          </aside>
+
+          <main class="main">
+            <h1>Jedi Knight: Dark Forces II</h1>
+            <div class="lead-play">
+              <button class="play big" type="button" data-play>Play JKDF2</button>
+              <p>Pick your game folder and the game starts right here in this tab.</p>
+            </div>
+            <ol class="steps" aria-label="How it works">
+              <li><b>1</b>Pick your game folder</li>
+              <li><b>2</b>The game starts in this tab</li>
+              <li><b>3</b>Host or join a match</li>
+            </ol>
+
+            <h2 class="ruled">Headlines</h2>
+            <ul class="headlines">
+              <li><a href="#features">What's new: colored saber glow, mods, automatic map downloads and more.</a></li>
+              <li><a href="#files">Your game files stay on your computer, apart from custom maps you host. Here's how.</a></li>
+              <li><a href="#start">New here? Getting started takes a minute.</a></li>
+            </ul>
+
+            <section id="rooms" aria-labelledby="rooms-title">
+              <h2 class="ruled" id="rooms-title">Play in the rooms below <small id="total-players" aria-live="polite"></small></h2>
+              <p class="note">Standard and Capture the Flag rooms start Jedi Knight, and Mysteries of the Sith rooms
+                start Mysteries of the Sith. Once it's running, choose Multiplayer to host a match or join one. Open
+                Nar Shaddaa or Sith: Asteroid to see who's playing right now. Play JKDF2 starts either game.</p>
+
+              <h3>Standard Rooms</h3>
+              <p class="note counted"><span>Players</span><span>Open to everyone with Jedi Knight: Dark Forces II</span></p>
+              <ul class="rooms counted">
+                <li><button class="link-button" type="button" data-room="nar-shaddaa" aria-haspopup="dialog"><span class="count busy">&ndash;</span><span><span class="room-name">Nar Shaddaa</span> <span class="tag game-count"></span></span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1"><span class="count"></span><span class="room-name">The Cantina</span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1"><span class="count"></span><span class="room-name">Sulon</span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1"><span class="count"></span><span><span class="room-name">Bespin</span> <span class="tag">(Rookie)</span></span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1"><span class="count"></span><span><span class="room-name">Canyon Oasis</span> <span class="tag">(Rookie)</span></span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1"><span class="count"></span><span><span class="room-name">Dark Palace</span> <span class="tag">(Expert)</span></span></button></li>
+              </ul>
+
+              <h3>Capture the Flag Rooms</h3>
+              <p class="note">For team play</p>
+              <ul class="rooms">
+                <li><button class="link-button" type="button" data-play data-game="jk1">CTF Room 1</button></li>
+                <li><button class="link-button" type="button" data-play data-game="jk1">CTF Room 2</button></li>
+              </ul>
+
+              <h3>Mysteries of the Sith Rooms</h3>
+              <p class="note counted"><span>Players</span><span>Pick your Mysteries of the Sith folder for these</span></p>
+              <ul class="rooms counted">
+                <li><button class="link-button" type="button" data-room="sith-asteroid" aria-haspopup="dialog"><span class="count busy">&ndash;</span><span><span class="room-name">Sith: Asteroid</span> <span class="tag game-count"></span></span></button></li>
+                <li><button class="link-button" type="button" data-play data-game="mots"><span class="count"></span><span class="room-name">Sith: Altyr 5</span></button></li>
+              </ul>
+            </section>
+
+            <section id="features" aria-labelledby="features-title">
+              <h2 class="ruled" id="features-title">Features <small>What this web version adds</small></h2>
+              <p class="note">Works in both Jedi Knight and Mysteries of the Sith.</p>
+              <div class="features">
+                <div class="feature">
+                  <h3>Play online</h3>
+                  <ul>
+                    <li>Host or join from the game's Multiplayer menu.</li>
+                    <li>Browsers connect directly, with the lobby as a fallback.</li>
+                    <li>No install, port forwarding or account.</li>
+                  </ul>
+                </div>
+                <div class="feature">
+                  <h3>Custom maps and mods</h3>
+                  <ul>
+                    <li>Don't have the maps or mods the host does? No worries, they get downloaded
+                      automatically from the host and you get in the game right away.</li>
+                    <li>Mix and match mods from your game folder.</li>
+                    <li>Original game files are never sent.</li>
+                  </ul>
+                </div>
+                <div class="feature">
+                  <h3>Sabers and screenshots</h3>
+                  <ul>
+                    <li>Sabers light their surroundings in the blade's color.</li>
+                    <li>F8 or F12 saves screenshots to <a href="#screenshots">Your Screenshots</a>.</li>
+                  </ul>
+                </div>
+                <div class="feature">
+                  <h3>Kept for next time</h3>
+                  <ul>
+                    <li>Characters and controls come in from your game folder.</li>
+                    <li>Settings, maps, mods and which mods you ticked are saved in this browser.</li>
+                  </ul>
+                </div>
+              </div>
+            </section>
+
+            <section id="start" aria-labelledby="start-title">
+              <h2 class="ruled" id="start-title">Getting Started</h2>
+              <ol class="info">
+                <li>You need Jedi Knight: Dark Forces II installed on this computer, for example from
+                  Steam or GOG. In Steam, right-click the game, then choose Manage, then Browse local files
+                  to see where it is.</li>
+                <li>Click <b>Play JKDF2</b>, any room, or Join or Host in Nar Shaddaa or Sith: Asteroid, then pick the
+                  game's folder: the one with the <code>episode</code> and <code>resource</code> folders inside. A
+                  room asks for its own game's folder.</li>
+                <li>When the game starts, choose Multiplayer to host a match or join one.</li>
+                <li>To play with mods, put them in the game folder: in a <code>mod</code> or <code>mods</code>
+                  folder, in a folder of their own, or as a GOB in <code>Resource</code>. GOBs, zip files and
+                  unzipped mods all work, and so do JK Patch Commander's patches. After you pick the game
+                  folder, each mod it finds has its own checkbox. They start ticked, and you can untick any,
+                  or all of them at once with Select all. This browser remembers which you left unticked for
+                  next time. Players who join you get them too, and if you join a game with other mods, yours
+                  are swapped for the host's.</li>
+              </ol>
+            </section>
+
+            <section id="files" aria-labelledby="files-title">
+              <h2 class="ruled" id="files-title">Your Files</h2>
+              <ul class="info">
+                <li><b>Your game stays on your computer.</b> When you pick your game folder, this page reads the
+                  files on your computer and loads them into the game in this browser tab. They aren't uploaded
+                  to our server.</li>
+                <li><b>Except custom maps and mods you host.</b> When you host a custom map or play with a mod,
+                  players who join without it get a copy from your browser, directly or passed through our
+                  server, which doesn't keep it. Files from the original game are never sent: each player's
+                  browser fills those in from their own copy.</li>
+                <li><b>Why we ask for the folder.</b> This web version comes with no game files at all, so it
+                  only runs from a copy of the game you already have. The check makes sure the folder holds
+                  the game's files before it starts.</li>
+                <li><b>About the browser's "upload" message.</b> Your browser may ask whether to "upload"
+                  the files. That's its standard wording for letting a page read a folder. The files still
+                  stay on your computer.</li>
+                <li>Your characters and controls are saved in this browser, so they're there next time.</li>
+                <li>So are your screenshots, under <a href="#screenshots">Your Screenshots</a>. Clearing this
+                  site's data in your browser deletes them, so download the ones you want to keep.</li>
+              </ul>
+            </section>
+
+            <section id="screenshots" aria-labelledby="screenshots-title">
+              <h2 class="ruled" id="screenshots-title">Your Screenshots <small id="shots-summary"></small></h2>
+              <p class="note">Press F8 or F12 in a game, or the key you set for screenshots, and the picture
+                is saved here, in this browser. In Edge use F8: Edge keeps F12 for its developer tools.</p>
+              <div class="shots-bar" id="shots-bar" hidden>
+                <button class="zone-button" type="button" id="shots-zip">Download all (.zip)</button>
+                <button class="zone-button" type="button" id="shots-clear">Delete all</button>
+              </div>
+              <ul class="shots" id="shots"></ul>
+            </section>
+
+            <section id="help" aria-labelledby="help-title">
+              <h2 class="ruled" id="help-title">Game Help</h2>
+              <ul class="info">
+                <li>Use a current Chrome or Firefox on a computer. Phones and tablets can't open a game folder.</li>
+                <li>If the page says files are missing, you picked a folder one level too high or too low.
+                  Pick the one that has <code>episode</code> and <code>resource</code> directly inside.</li>
+                <li>The game needs graphics acceleration. If it won't start, or runs at a few frames per
+                  second, turn on graphics acceleration in your browser's settings and restart the browser.
+                  This page tells you how when it's off.</li>
+              </ul>
+            </section>
+          </main>
+        </div>
+
+        <footer class="footer">
+          <p>jkdf2mp is a free fan project built on OpenJKDF2. It is not affiliated with or endorsed by
+            Lucasfilm or Disney. Star Wars and Jedi Knight are trademarks of Lucasfilm Ltd.
+            You need your own copy of the game to play.</p>
+          <p><a href="https://github.com/shinyquagsire23/OpenJKDF2">OpenJKDF2</a><a href="https://github.com/tristamus/OpenJKDF2">Source code</a><a href="https://github.com/tristamus/jkdf2mp-bb-server">Lobby source</a></p>
+        </footer>
+      </div>
+    </div>
+
+    <dialog id="picker" aria-labelledby="picker-title">
+      <div class="titlebar">
+        <h1 id="picker-title">Pick your game folder</h1>
+        <button class="close" type="button" aria-label="Close">&#x2715;</button>
+      </div>
+      <div class="body">
+        <p class="picker-intro">Choose the folder where <span id="picker-game">Jedi Knight: Dark Forces II (or Mysteries
+          of the Sith)</span> is installed: the one with the <code>episode</code> and <code>resource</code> folders inside.</p>
+        <ul class="promises picker-intro">
+          <li><b>Your game stays on your computer.</b> Your files are read right here in this browser tab
+            and aren't uploaded. The one exception is a custom map or mod you host: players who join
+            without it get a copy. Original game files are never sent.</li>
+          <li><b>It's a quick check that you have your own copy of the game.</b> This web version comes
+            with no game files, so it can only run from a copy you already have.</li>
+        </ul>
+        <p class="fine picker-intro">Your browser may ask whether to "upload" the files. That's just its
+          standard wording for letting this page read them. Choose Upload to continue.</p>
+        <section class="gfx-notice picker-intro" id="picker-gfx" role="alert" hidden></section>
+        <section class="gfx-notice jit-notice picker-intro" id="picker-jit" role="status" hidden></section>
+        <div class="actions picker-intro">
+          <label class="play" for="gamedir" tabindex="0" role="button">Choose game folder</label>
+          <button class="cancel" type="button">Not now</button>
+        </div>
+        <label class="picker-intro picker-option"><input type="checkbox" id="fullscreen-option" checked>
+          <span>Play in fullscreen <span class="fine">The game fills the screen when you click it. Hold Esc to leave fullscreen.</span></span></label>
+        <input type="file" id="gamedir" webkitdirectory multiple>
+        <div id="mod-choice" hidden>
+          <fieldset>
+            <legend>Mods to play with</legend>
+            <label class="mod-all" hidden><input type="checkbox"><b>Select all</b><span class="mod-count"></span></label>
+            <div class="mod-list"></div>
+          </fieldset>
+          <p class="mod-clash" role="status" hidden></p>
+          <p class="fine">Mods start the way you left them last time, and new ones start ticked.
+            Untick any you don't want, or untick Select all and tick the few you want.
+            When two mods change the same file, the one higher in the list is used. Players who join you
+            get your mods, except files from the original game, which their browser fills in from their
+            own copy. If you join a game with different mods, the game restarts with those.</p>
+          <div class="actions">
+            <button class="play" type="button">Start</button>
+          </div>
+        </div>
+        <div id="picker-result" role="status"></div>
+      </div>
+    </dialog>
+
+    <dialog id="room" aria-labelledby="room-title">
+      <div class="titlebar">
+        <h1 id="room-title">Jedi Knight: Dark Forces II - Nar Shaddaa</h1>
+        <button class="close" type="button" aria-label="Close">&#x2715;</button>
+      </div>
+      <div class="room-toolbar" role="toolbar" aria-label="Room">
+        <button type="button" data-act="host"><svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="#ffcc66" stroke="#7a5200"/><path d="M5 4l5 3-5 3z" fill="#2a1200"/></svg>Quick Host</button>
+        <button type="button" data-act="join"><svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="#8fdbe4" stroke="#1f5f6b"/><path d="M3 7h6M7 4l3 3-3 3" fill="none" stroke="#001a1a" stroke-width="1.5"/></svg>Quick Join</button>
+        <span class="sep" aria-hidden="true"></span>
+        <button type="button" data-view="table" aria-pressed="true"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1h5v5H1zM8 1h5v5H8zM1 8h5v5H1zM8 8h5v5H8z" fill="#336666"/></svg>Table View</button>
+        <button type="button" data-view="list" aria-pressed="false"><svg viewBox="0 0 14 14" aria-hidden="true"><path d="M1 2h12v2H1zM1 6h12v2H1zM1 10h12v2H1z" fill="#336666"/></svg>List View</button>
+      </div>
+      <div class="room-body">
+        <div class="room-games" id="room-games"></div>
+        <aside class="roster" id="roster" aria-label="Players online"></aside>
+      </div>
+      <p class="room-note" id="room-note" role="status" hidden></p>
+      <div class="room-status">
+        <span class="panel"><span class="live-dot" id="room-live-dot"></span><span id="room-live">Connecting</span></span>
+        <span class="panel" id="room-summary"></span>
+        <span id="room-status-extra"></span>
+      </div>
+    </dialog>
+
+    <script type='text/javascript'>
+      var statusElement = document.getElementById('status');
+      var progressElement = document.getElementById('progress');
+      var spinnerElement = document.getElementById('spinner');
+
+      var Module = {
+        preRun: [],
+        postRun: [],
+        print: (function() {
+          var element = document.getElementById('output');
+          if (element) element.value = ''; // clear browser cache
+          return function(text) {
+            if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+            // These replacements are necessary if you render to raw HTML
+            //text = text.replace(/&/g, "&amp;");
+            //text = text.replace(/</g, "&lt;");
+            //text = text.replace(/>/g, "&gt;");
+            //text = text.replace('\n', '<br>', 'g');
+            console.log(text);
+            if (element) {
+              element.value += text + "\n";
+              element.scrollTop = element.scrollHeight; // focus on bottom
+            }
+          };
+        })(),
+        printErr: function(text) {
+          if (arguments.length > 1) text = Array.prototype.slice.call(arguments).join(' ');
+          console.error(text);
+        },
+        canvas: (function() {
+          var canvas = document.getElementById('canvas');
+
+          // As a default initial behavior, pop up an alert when webgl context is lost. To make your
+          // application robust, you may want to override this behavior before shipping!
+          // See http://www.khronos.org/registry/webgl/specs/latest/1.0/#5.15.2
+          canvas.addEventListener("webglcontextlost", function(e) { alert('WebGL context lost. You will need to reload the page.'); e.preventDefault(); }, false);
+
+          return canvas;
+        })(),
+        setStatus: function(text) {
+          if (!Module.setStatus.last) Module.setStatus.last = { time: Date.now(), text: '' };
+          if (text === Module.setStatus.last.text) return;
+          var m = text.match(/([^(]+)\((\d+(\.\d+)?)\/(\d+)\)/);
+          var now = Date.now();
+          if (m && now - Module.setStatus.last.time < 30) return; // if this is a progress update, skip it if too soon
+          Module.setStatus.last.time = now;
+          Module.setStatus.last.text = text;
+          if (m) {
+            text = m[1];
+            progressElement.value = parseInt(m[2])*100;
+            progressElement.max = parseInt(m[4])*100;
+            progressElement.hidden = false;
+            spinnerElement.hidden = false;
+          } else {
+            progressElement.value = null;
+            progressElement.max = null;
+            progressElement.hidden = true;
+            if (!text) spinnerElement.style.display = 'none';
+          }
+          statusElement.innerHTML = text;
+        },
+        totalDependencies: 0,
+        monitorRunDependencies: function(left) {
+          this.totalDependencies = Math.max(this.totalDependencies, left);
+          Module.setStatus(left ? 'Preparing... (' + (this.totalDependencies-left) + '/' + this.totalDependencies + ')' : 'All downloads complete.');
+
+          if (!left) {
+            window.onresize();
+          }
+        }
+      };
+      Module.setStatus('Downloading...');
+      Module['arguments'] = window.location.search.substr(1).split('&')
+        .filter(i => i.length)
+        .flatMap(i => { var kv = i.split('='); return kv.length > 1 ? ['-' + kv[0], decodeURIComponent(kv.slice(1).join('='))] : ['-' + kv[0]]; });
+      window.onerror = function(event) {
+        // TODO: do not warn on ok events like simulating an infinite loop or exitStatus
+        Module.setStatus('Exception thrown, see JavaScript console');
+        spinnerElement.style.display = 'none';
+        Module.setStatus = function(text) {
+          if (text) Module.printErr('[post-exception status] ' + text);
+        };
+        // The status line sits under the canvas, so say it where players can see it.
+        // Emscripten throws 'unwind' and ExitStatus on purpose; those aren't crashes.
+        if (!/unwind|ExitStatus/.test(String(event))) {
+          leaveGuard = false;
+          showProblem('The game stopped', String(event) +
+                      '\n\nPress F12 and open Console for details. Click anywhere to hide this.');
+        }
+      };
+
+      // ---- Leaving mid-game. Ctrl fires and W walks forward, and Ctrl+W also
+      // closes the tab: outside fullscreen the browser keeps that shortcut for
+      // itself, so the page can't stop it. Once the game is running the
+      // browser asks first, as it does for a page with unsaved work.
+      var leaveGuard = false;
+      window.addEventListener('beforeunload', function(ev) {
+        if (!leaveGuard) return;
+        ev.preventDefault();
+        ev.returnValue = true;  // Chrome and Edge before 119
+      });
+
+      window.onresize = function()
+      {
+          var canvas = document.getElementById('canvas');
+          canvas.width = window.innerWidth;
+          canvas.style.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          canvas.style.height = window.innerHeight;
+      }
+    </script>
+    <script type='text/javascript'>
+      // ---- Screenshots: F8 or F12 in a game, or the key set for them. The engine
+      // reads the finished frame back and hands it here
+      // (jkGame_UpdateScreenshots in src/Main/jkGame.c). Each one is turned
+      // into a PNG and kept in this browser's IndexedDB, in a database of its
+      // own rather than with the characters and settings, and listed under
+      // Your Screenshots on this page.
+
+      var SHOT_GAMES = {
+        jk1: { tag: 'JK', title: 'Jedi Knight' },
+        mots: { tag: 'MotS', title: 'Mysteries of the Sith' }
+      };
+
+      // The level's file name without .jkl, safe in a file name.
+      function shotLevel(level) {
+        return String(level || '').replace(/^.*[\\/]/, '').replace(/\.jkl$/i, '')
+                                  .replace(/[^\w.-]+/g, '_').substring(0, 31);
+      }
+
+      // "JK 2026-10-12 02-42-16 m10", in the player's own time zone, so they
+      // sort by when they were taken.
+      function shotName(game, level, date) {
+        function two(n) { return (n < 10 ? '0' : '') + n; }
+        var name = (SHOT_GAMES[game] || SHOT_GAMES.jk1).tag + ' ' +
+                   date.getFullYear() + '-' + two(date.getMonth() + 1) + '-' + two(date.getDate()) + ' ' +
+                   two(date.getHours()) + '-' + two(date.getMinutes()) + '-' + two(date.getSeconds());
+        var lvl = shotLevel(level);
+        return lvl ? name + ' ' + lvl : name;
+      }
+
+      // The engine's rows run from the bottom up, and what's on screen isn't
+      // meant to be seen through.
+      function shotPixels(rgba, w, h) {
+        var out = new Uint8ClampedArray(w * h * 4);
+        var row = w * 4;
+        for (var y = 0; y < h; y++)
+          out.set(rgba.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+        for (var i = 3; i < out.length; i += 4)
+          out[i] = 255;
+        return out;
+      }
+
+      function canvasBytes(canvas, type, quality) {
+        return new Promise(function(resolve, reject) {
+          canvas.toBlob(function(blob) {
+            if (!blob) return reject(new Error('the browser could not make the ' + type));
+            blob.arrayBuffer().then(function(b) { resolve(new Uint8Array(b)); }, reject);
+          }, type, quality);
+        });
+      }
+
+      var THUMB_WIDTH = 320;
+
+      // The PNG, and a small JPEG for the list on this page, so the page
+      // doesn't load every full-size picture to show them.
+      async function shotImages(pixels, w, h) {
+        var canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').putImageData(new ImageData(pixels, w, h), 0, 0);
+        var thumb = document.createElement('canvas');
+        thumb.width = Math.min(THUMB_WIDTH, w);
+        thumb.height = Math.max(1, Math.round(h * thumb.width / w));
+        var ctx = thumb.getContext('2d');
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(canvas, 0, 0, thumb.width, thumb.height);
+        return { png: await canvasBytes(canvas, 'image/png'), thumb: await canvasBytes(thumb, 'image/jpeg', 0.85) };
+      }
+
+      // A record per screenshot in meta (name, game, level, time, size and
+      // the small picture) and its PNG in data, both under its file name.
+      function shotStore(idb) {
+        var dbPromise = null;
+
+        function open() {
+          if (!dbPromise) {
+            dbPromise = new Promise(function(resolve, reject) {
+              var req = idb.open('jkdf2mp-screenshots', 1);
+              req.onupgradeneeded = function() {
+                req.result.createObjectStore('meta', { keyPath: 'key' });
+                req.result.createObjectStore('data');
+              };
+              req.onsuccess = function() { resolve(req.result); };
+              req.onerror = function() { reject(req.error); };
+              req.onblocked = function() { reject(new Error('the screenshot store is busy')); };
+            });
+            // Lets a later call try again.
+            dbPromise.catch(function() { dbPromise = null; });
+          }
+          return dbPromise;
+        }
+
+        function request(req) {
+          return new Promise(function(resolve, reject) {
+            req.onsuccess = function() { resolve(req.result); };
+            req.onerror = function() { reject(req.error); };
+          });
+        }
+
+        function done(tx) {
+          return new Promise(function(resolve, reject) {
+            tx.oncomplete = function() { resolve(); };
+            tx.onerror = tx.onabort = function() { reject(tx.error); };
+          });
+        }
+
+        // Newest first.
+        async function list() {
+          var db = await open();
+          var all = await request(db.transaction('meta').objectStore('meta').getAll());
+          return all.sort(function(a, b) { return b.time - a.time; });
+        }
+
+        async function read(key) {
+          var db = await open();
+          return request(db.transaction('data').objectStore('data').get(key));
+        }
+
+        async function add(meta, png) {
+          var db = await open();
+          var tx = db.transaction(['meta', 'data'], 'readwrite');
+          tx.objectStore('data').put(png, meta.key);
+          tx.objectStore('meta').put(meta);
+          await done(tx);
+        }
+
+        async function remove(keys) {
+          var db = await open();
+          var tx = db.transaction(['meta', 'data'], 'readwrite');
+          for (var key of keys) {
+            tx.objectStore('meta').delete(key);
+            tx.objectStore('data').delete(key);
+          }
+          await done(tx);
+        }
+
+        return { list: list, read: read, add: add, remove: remove };
+      }
+
+      // What the engine calls: save() takes a screenshot and stores it in the
+      // background, and result() tells it how the oldest one still owed went
+      // (0 not done yet, 1 saved, 2 not saved), each one once, in order.
+      function shotSaver(store, makeImages) {
+        var queue = Promise.resolve();
+        var results = [];
+
+        function save(rgba, w, h, game, level) {
+          var date = new Date();
+          var job = queue.then(async function() {
+            var images = await makeImages(shotPixels(rgba, w, h), w, h);
+            var base = shotName(game, level, date);
+            var taken = {};
+            for (var m of await store.list())
+              taken[m.key] = true;
+            var name = base + '.png';
+            for (var n = 2; taken[name]; n++)
+              name = base + ' (' + n + ').png';
+            await store.add({ key: name, game: SHOT_GAMES[game] ? game : 'jk1', level: shotLevel(level),
+                              time: date.getTime(), width: w, height: h, size: images.png.length,
+                              thumb: images.thumb }, images.png);
+          });
+          queue = job.then(function() {
+            results.push(1);
+          }, function(err) {
+            console.warn('OpenJKDF2: screenshot not saved (' + err + ')');
+            results.push(2);
+          });
+          return true;
+        }
+
+        function result() {
+          return results.length ? results.shift() : 0;
+        }
+
+        return { save: save, result: result };
+      }
+
+      // ---- A zip of them all, stored rather than compressed: PNGs already are.
+
+      var crcTable = null;
+      function crc32(bytes) {
+        if (!crcTable) {
+          crcTable = new Uint32Array(256);
+          for (var n = 0; n < 256; n++) {
+            var c = n;
+            for (var k = 0; k < 8; k++)
+              c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+            crcTable[n] = c >>> 0;
+          }
+        }
+        var crc = 0xFFFFFFFF;
+        for (var i = 0; i < bytes.length; i++)
+          crc = crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+        return (crc ^ 0xFFFFFFFF) >>> 0;
+      }
+
+      // files: [{ name, data: Uint8Array, date }]
+      function zipFiles(files) {
+        var enc = new TextEncoder();
+        var parts = [], central = [], at = 0;
+        for (var f of files) {
+          var name = enc.encode(f.name);
+          var crc = crc32(f.data), d = f.date;
+          var time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+          var day = (Math.max(0, d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+          var local = new DataView(new ArrayBuffer(30));
+          local.setUint32(0, 0x04034b50, true);
+          local.setUint16(4, 20, true);
+          local.setUint16(6, 0x800, true); // UTF-8 names
+          local.setUint16(10, time, true);
+          local.setUint16(12, day, true);
+          local.setUint32(14, crc, true);
+          local.setUint32(18, f.data.length, true);
+          local.setUint32(22, f.data.length, true);
+          local.setUint16(26, name.length, true);
+          parts.push(new Uint8Array(local.buffer), name, f.data);
+          var entry = new DataView(new ArrayBuffer(46));
+          entry.setUint32(0, 0x02014b50, true);
+          entry.setUint16(4, 20, true);
+          entry.setUint16(6, 20, true);
+          entry.setUint16(8, 0x800, true);
+          entry.setUint16(12, time, true);
+          entry.setUint16(14, day, true);
+          entry.setUint32(16, crc, true);
+          entry.setUint32(20, f.data.length, true);
+          entry.setUint32(24, f.data.length, true);
+          entry.setUint16(28, name.length, true);
+          entry.setUint32(42, at, true);
+          central.push(new Uint8Array(entry.buffer), name);
+          at += 30 + name.length + f.data.length;
+        }
+        var cdSize = central.reduce(function(n, p) { return n + p.length; }, 0);
+        var end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true);
+        end.setUint16(8, files.length, true);
+        end.setUint16(10, files.length, true);
+        end.setUint32(12, cdSize, true);
+        end.setUint32(16, at, true);
+        var all = parts.concat(central, [new Uint8Array(end.buffer)]);
+        var out = new Uint8Array(at + cdSize + 22), p = 0;
+        for (var a of all) {
+          out.set(a, p);
+          p += a.length;
+        }
+        return out;
+      }
+
+      // ---- Your Screenshots on this page.
+
+      var shots = typeof indexedDB !== 'undefined' ? shotStore(indexedDB) : null;
+      var thumbUrls = [];
+
+      Module.jkScreenshots = shotSaver(shots || {
+        list: async function() { return []; },
+        add: async function() { throw new Error('this browser has no IndexedDB'); }
+      }, shotImages);
+
+      function sizeText(bytes) {
+        return bytes < 1048576 ? Math.max(1, Math.round(bytes / 1024)) + ' KB'
+                               : (bytes / 1048576).toFixed(1) + ' MB';
+      }
+
+      function downloadFile(bytes, name, type) {
+        var url = URL.createObjectURL(new Blob([bytes], { type: type }));
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
+      }
+
+      async function downloadShot(key) {
+        var png = await shots.read(key);
+        if (png) downloadFile(png, key, 'image/png');
+      }
+
+      // Full size in a new tab. The tab is opened right away, while the click
+      // still counts, or the browser would block it as a pop-up.
+      async function viewShot(key) {
+        var tab = window.open('', '_blank');
+        var png = await shots.read(key);
+        if (!png) {
+          if (tab) tab.close();
+          return;
+        }
+        var url = URL.createObjectURL(new Blob([png], { type: 'image/png' }));
+        if (tab) tab.location.href = url;
+        else window.location.href = url;
+        setTimeout(function() { URL.revokeObjectURL(url); }, 60000);
+      }
+
+      function textButton(label, ariaLabel, onClick) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'text-button';
+        b.textContent = label;
+        b.setAttribute('aria-label', ariaLabel);
+        b.addEventListener('click', onClick);
+        return b;
+      }
+
+      async function showShots() {
+        var list = document.getElementById('shots');
+        var metas = [];
+        try {
+          metas = shots ? await shots.list() : [];
+        } catch (err) {
+          console.warn('OpenJKDF2: could not read screenshots (' + err + ')');
+        }
+        thumbUrls.forEach(function(u) { URL.revokeObjectURL(u); });
+        thumbUrls = [];
+        list.replaceChildren();
+        var total = 0;
+        for (var meta of metas) {
+          total += meta.size;
+          var when = new Date(meta.time).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
+          var game = (SHOT_GAMES[meta.game] || SHOT_GAMES.jk1).title;
+
+          var li = document.createElement('li');
+          var view = document.createElement('a');
+          view.href = '#screenshots';
+          view.title = 'Open full size';
+          view.addEventListener('click', (function(key) {
+            return function(ev) {
+              ev.preventDefault();
+              viewShot(key);
+            };
+          })(meta.key));
+          var img = document.createElement('img');
+          if (meta.thumb) {
+            var url = URL.createObjectURL(new Blob([meta.thumb], { type: 'image/jpeg' }));
+            thumbUrls.push(url);
+            img.src = url;
+          }
+          img.alt = 'Screenshot: ' + game + (meta.level ? ', ' + meta.level : '') + ', ' + when;
+          view.appendChild(img);
+          var whenEl = document.createElement('span');
+          whenEl.className = 'when';
+          whenEl.textContent = when;
+          var what = document.createElement('span');
+          what.className = 'what';
+          what.textContent = game + (meta.level ? ', level ' + meta.level : '') + ', ' +
+                             meta.width + ' x ' + meta.height + ', ' + sizeText(meta.size);
+          var actions = document.createElement('span');
+          actions.className = 'shot-actions';
+          actions.append(
+            textButton('Download', 'Download the screenshot from ' + when, (function(key) {
+              return function() {
+                downloadShot(key).catch(function(err) { console.warn('OpenJKDF2: ' + err); });
+              };
+            })(meta.key)),
+            textButton('Delete', 'Delete the screenshot from ' + when, (function(key) {
+              return async function() {
+                try { await shots.remove([key]); } catch (err) { console.warn('OpenJKDF2: ' + err); }
+                showShots();
+              };
+            })(meta.key)));
+          li.append(view, whenEl, what, actions);
+          list.appendChild(li);
+        }
+        document.getElementById('shots-bar').hidden = !metas.length;
+        document.getElementById('shots-summary').textContent = !metas.length ? 'None yet' :
+          metas.length + (metas.length === 1 ? ' screenshot, ' : ' screenshots, ') + sizeText(total);
+      }
+
+      document.getElementById('shots-zip').addEventListener('click', async function(ev) {
+        var button = ev.currentTarget;
+        button.disabled = true;
+        try {
+          var files = [];
+          for (var m of (await shots.list()).reverse()) {
+            var png = await shots.read(m.key);
+            if (png) files.push({ name: m.key, data: new Uint8Array(png), date: new Date(m.time) });
+          }
+          if (files.length) {
+            var d = new Date();
+            downloadFile(zipFiles(files), 'jkdf2mp screenshots ' + d.getFullYear() + '-' +
+                         String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + '.zip',
+                         'application/zip');
+          }
+        } catch (err) {
+          console.warn('OpenJKDF2: could not make the zip (' + err + ')');
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      document.getElementById('shots-clear').addEventListener('click', async function() {
+        var metas = await shots.list();
+        if (!metas.length) return;
+        var what = metas.length === 1 ? 'your screenshot' : 'all ' + metas.length + ' screenshots';
+        if (!confirm('Delete ' + what + ' from this browser? This can\'t be undone.')) return;
+        try {
+          await shots.remove(metas.map(function(m) { return m.key; }));
+        } catch (err) {
+          console.warn('OpenJKDF2: ' + err);
+        }
+        showShots();
+      });
+
+      showShots();
+    </script>
+    <script type='text/javascript'>
+      // Files every install needs, spelled the way the engine opens them
+      // (src/Main/InstallHelper.c, aRequiredAssets / aRequiredAssetsMots).
+      // MEMFS is case-sensitive, so picked files are renamed to these spellings.
+      var REQUIRED_JK = ["episode/JK1.gob", "episode/JK1CTF.gob", "episode/JK1MP.gob",
+                         "resource/Res1hi.gob", "resource/Res2.gob", "resource/jk_.cd"];
+      var REQUIRED_MOTS = ["episode/JKM_KFY.goo", "episode/JKM_MP.goo", "episode/JKM_SABER.goo",
+                           "episode/JKM.goo", "resource/Jkmres.goo", "resource/JKMsndLO.goo",
+                           "resource/jk_.cd"];
+
+      // Not copied into memory: the WASM build skips cutscenes (jkCutscene.c) and
+      // has music disabled (stdMci.c), so videos and soundtrack only cost memory.
+      // jkmcutscenes/ is the MotS Remastered pack's cutscenes, which its
+      // launcher runs with -path.
+      // player/ is handled on its own: see importPlayers.
+      function isSkipped(lowerPath) {
+        return lowerPath.startsWith("resource/video/") ||
+               lowerPath.startsWith("jkmcutscenes/") ||
+               lowerPath.startsWith("music/") ||
+               /\.(exe|dll|ico|ini|txt|url|pdf|htm|html)$/.test(lowerPath);
+      }
+
+      // The picked files, by their path in the game folder: the characters
+      // in player/ (as <name>/...), and the rest. webkitRelativePath is
+      // "<picked folder>/episode/JK1.gob", so its first segment goes. Loose
+      // files in player/ aren't characters, and saved single-player games
+      // stay behind, since this build is multiplayer only.
+      function pickedFiles(fileList) {
+        var files = [], playerFiles = [];
+        for (var f of fileList) {
+          var rel = f.webkitRelativePath.split('/').slice(1).join('/');
+          if (!rel || isSkipped(rel.toLowerCase())) continue;
+          var m = rel.match(/^player\/([^\/]+\/.+)$/i);
+          if (m) {
+            if (!/\.jks$/i.test(m[1])) playerFiles.push({ path: m[1], file: f });
+          } else if (!/^player\//i.test(rel)) {
+            files.push({ path: rel, file: f });
+          }
+        }
+        return { files: files, playerFiles: playerFiles };
+      }
+
+      function loadEngine(withBundledData) {
+        leaveGuard = true;
+        if (withBundledData) {
+          var data = document.createElement('script');
+          data.src = 'openjkdf2_data.js';
+          document.body.appendChild(data);
+        }
+        var engine = document.createElement('script');
+        engine.src = 'openjkdf2.js';
+        document.body.appendChild(engine);
+      }
+
+      var picker = document.getElementById('picker');
+      var pickerTitle = document.getElementById('picker-title');
+      var chooseButton = picker.querySelector('label.play');
+      var modChoice = document.getElementById('mod-choice');
+      var readingFolder = false;
+      var GAME_NAMES = { jk1: 'Jedi Knight', mots: 'Mysteries of the Sith' };
+      // The game a room starts, and the room's name, while its prompt is
+      // open. Play JKDF2 takes either game.
+      var pickerWant = null;
+
+      function openPicker(want) {
+        pickerWant = want && GAME_NAMES[want.game] ? want : null;
+        pickerTitle.textContent = pickerWant ? 'Pick your ' + GAME_NAMES[pickerWant.game] + ' folder' :
+                                               'Pick your game folder';
+        document.getElementById('picker-game').textContent = !pickerWant ?
+          'Jedi Knight: Dark Forces II (or Mysteries of the Sith)' :
+          pickerWant.game === 'mots' ? 'Mysteries of the Sith' : 'Jedi Knight: Dark Forces II';
+        picker.querySelectorAll('.picker-intro').forEach(function(e) { e.hidden = false; });
+        modChoice.hidden = true;
+        picker.onclick = null;
+        var problem = browserProblem();
+        showPickerResult(problem || '', !!problem);
+        showGfxNotice(document.getElementById('picker-gfx'), problem ? null : gfxCheck);
+        showJitNotice(document.getElementById('picker-jit'), problem ? null : jitRatio);
+        if (!picker.open) picker.showModal();
+        chooseButton.focus();
+      }
+
+      function closePicker() {
+        if (!readingFolder && picker.open) picker.close();
+      }
+
+      function showProblem(title, text) {
+        pickerTitle.textContent = title;
+        picker.querySelectorAll('.picker-intro').forEach(function(e) { e.hidden = true; });
+        modChoice.hidden = true;
+        showPickerResult(text, true);
+        if (!picker.open) picker.showModal();
+        picker.onclick = function() { picker.close(); };
+      }
+
+      function hideZone() {
+        document.getElementById('zone').hidden = true;
+        document.documentElement.classList.remove('zone-open');
+      }
+
+      // ---- Quit. The game's Quit (the main menu, or the Players screens
+      // shown at startup) brings the player back here, to the lobby, instead
+      // of starting the game again (main.c). By then the game has shut down
+      // and closed its files. The page reloads once the browser has stored
+      // them, or after QUIT_SAVE_MS if storing them hangs, so nobody is stuck.
+      var QUIT_SAVE_MS = 5000;
+
+      // The lobby's address: this page's, keeping any test options, with the
+      // room window the player started from, which the page opens again.
+      function lobbyAddress(loc, roomKey) {
+        return loc.pathname + loc.search + (roomKey ? '#' + roomKey : '');
+      }
+
+      // Stores the saves (sync), then calls leave once: when they're stored,
+      // or after waitMs, whichever comes first.
+      function saveThenLeave(sync, waitMs, leave) {
+        var left = false;
+        function go() {
+          if (left) return;
+          left = true;
+          clearTimeout(timer);
+          leave();
+        }
+        var timer = setTimeout(function() {
+          console.warn('OpenJKDF2: storing the saves is taking too long, going back to the lobby anyway');
+          go();
+        }, waitMs);
+        try {
+          sync(function(err) {
+            if (err) console.warn('OpenJKDF2: could not store the saves (' + err + ')');
+            go();
+          });
+        } catch (e) {
+          console.warn('OpenJKDF2: could not store the saves (' + e + ')');
+          go();
+        }
+      }
+
+      Module.jkQuitToLobby = function() {
+        leaveGuard = false;  // no "Leave site?" question: the player chose Quit
+        document.getElementById('quit-note').hidden = false;
+        // pickerWant is still the prompt the game was started from.
+        var roomKey = pickerWant && pickerWant.lobbyRoom;
+        saveThenLeave(function(done) { Module.FS.syncfs(false, done); }, QUIT_SAVE_MS, function() {
+          // A new hash alone doesn't load the page again.
+          history.replaceState(null, '', lobbyAddress(location, roomKey));
+          location.reload();
+        });
+      };
+
+      // What the game can't run without, checked before anyone picks a folder,
+      // so players see what's wrong instead of a page that never starts.
+      function browserProblem() {
+        var ua = navigator.userAgent;
+        // iPadOS reports itself as a Mac; touch points give it away.
+        var touchMac = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+        if ((navigator.userAgentData && navigator.userAgentData.mobile) ||
+            /Android|iPhone|iPad|iPod/i.test(ua) || touchMac) {
+          return "This needs a computer. Phones and tablets can't open a game folder.";
+        }
+        if (typeof WebAssembly !== 'object') {
+          return "This browser has WebAssembly turned off, and the game needs it. " +
+                 "Use a current Chrome or Firefox.";
+        }
+        return null;
+      }
+
+      // ---- Graphics acceleration. With it off, the browser draws the game on
+      // the CPU (SwiftShader, or WARP on Windows): 3 fps on a 4-core computer,
+      // half speed with 12 cores busy on a 24-thread one. Or it can't draw it at
+      // all (Edge and Chrome on Linux since they dropped SwiftShader for web
+      // pages). Players are told how to turn it on, only when it's off.
+      var SOFTWARE_GL = /SwiftShader|llvmpipe|softpipe|lavapipe|Basic Render|\bWARP\b|Software Render|Software Rasterizer|Mesa OffScreen|GDI Generic/i;
+      // Names a real graphics card or driver. Anything else (a hidden name,
+      // as with Firefox's fingerprinting protection) is checked another way.
+      var NAMED_GL = /ANGLE|NVIDIA|GeForce|Quadro|AMD|Radeon|Intel|Apple|Adreno|Mali|PowerVR|Mesa|Direct3D|OpenGL|Metal|Vulkan/i;
+
+      function webgl2(attrs) {
+        try { return document.createElement('canvas').getContext('webgl2', attrs); } catch (e) { return null; }
+      }
+
+      // Lets go of a test context now rather than when it's collected, as
+      // browsers only keep a few contexts alive and the game needs one.
+      function releaseGl(gl) {
+        var lose = gl.getExtension('WEBGL_lose_context');
+        if (lose) lose.loseContext();
+      }
+
+      // 'none': no WebGL 2 at all. 'software': drawn without the graphics card.
+      function graphicsCheck() {
+        var gl = webgl2();
+        if (!gl) return { state: 'none', renderer: '' };
+        var renderer = '';
+        try {
+          var info = gl.getExtension('WEBGL_debug_renderer_info');
+          renderer = String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+        } catch (e) {}
+        releaseGl(gl);
+        if (SOFTWARE_GL.test(renderer)) return { state: 'software', renderer: renderer };
+        if (!NAMED_GL.test(renderer)) {
+          var hw = webgl2({ failIfMajorPerformanceCaveat: true });
+          if (!hw) return { state: 'software', renderer: renderer };
+          releaseGl(hw);
+        }
+        return { state: 'ok', renderer: renderer };
+      }
+
+      // Where each browser keeps the setting, and how it restarts. Pages
+      // can't open these addresses, so players copy one into a new tab.
+      // Edge 155 shows no Restart button after the switch; edge://restart
+      // typed in the address bar restarts it with its tabs.
+      var GFX_HOW = {
+        edge: { name: 'Microsoft Edge', address: 'edge://settings/system/manageSystem',
+                toggle: 'Turn on <b>Use graphics acceleration when available</b>.',
+                restart: 'Restart Edge: go to <code>edge://restart</code> the same way. Your tabs reopen.' },
+        chrome: { name: 'Chrome', address: 'chrome://settings/system',
+                  toggle: 'Turn on <b>Use graphics acceleration when available</b>.',
+                  restart: 'Click <b>Relaunch</b>.' },
+        brave: { name: 'Brave', address: 'brave://settings/system',
+                 toggle: 'Turn on <b>Use graphics acceleration when available</b>.',
+                 restart: 'Click <b>Relaunch</b>.' },
+        firefox: { name: 'Firefox', address: 'about:preferences#general',
+                   toggle: 'Under Performance, untick <b>Use recommended performance settings</b>, ' +
+                           'then tick <b>Use hardware acceleration when available</b>.',
+                   restart: 'Close Firefox completely and open it again.' }
+      };
+
+      function browserKind() {
+        var brands = ((navigator.userAgentData && navigator.userAgentData.brands) || [])
+          .map(function(b) { return b.brand; });
+        var ua = navigator.userAgent;
+        if (brands.indexOf('Microsoft Edge') >= 0 || /\bEdg\//.test(ua)) return 'edge';
+        if (/Firefox\//.test(ua)) return 'firefox';
+        if (navigator.brave) return 'brave';
+        if (brands.indexOf('Google Chrome') >= 0) return 'chrome';
+        return null;
+      }
+
+      // Fills a notice with the steps for this browser, or hides it.
+      function showGfxNotice(el, gfx) {
+        if (!gfx || gfx.state === 'ok') {
+          el.hidden = true;
+          return;
+        }
+        var how = GFX_HOW[browserKind()];
+        var name = how ? how.name : 'Your browser';
+        var html = gfx.state === 'none'
+          ? '<h2>Turn on graphics acceleration to play</h2><p>' + name + " can't draw 3D graphics (WebGL 2) " +
+            "right now, and the game needs them. Usually that's because graphics acceleration is turned off.</p>"
+          : '<h2>Turn on graphics acceleration</h2><p>' + name + ' is drawing without your graphics card, ' +
+            'so the game runs slower and works your processor hard. On many computers that means only ' +
+            "a few frames per second. Usually that's because graphics acceleration is turned off.</p>";
+        if (how) {
+          html += '<ol><li>Open a new tab and go to <code>' + how.address + '</code>' +
+                  '<button class="copy" type="button">Copy</button></li>' +
+                  '<li>' + how.toggle + '</li>' +
+                  '<li>' + how.restart + ' Then come back to this page.</li></ol>';
+        } else {
+          html += "<p>Open your browser's settings, search for <b>acceleration</b>, turn on graphics " +
+                  '(hardware) acceleration, then restart the browser and come back to this page.</p>';
+        }
+        html += '<p class="fine">Already on? Update your graphics driver, then restart ' +
+                (how ? how.name : 'the browser') + '.<span class="renderer"></span></p>';
+        el.innerHTML = html;
+        if (gfx.renderer)
+          el.querySelector('.renderer').textContent = ' Drawing with: ' + gfx.renderer + '.';
+        var copy = el.querySelector('.copy');
+        if (copy) {
+          copy.addEventListener('click', function() {
+            var done = function() { copy.textContent = 'Copied'; };
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(how.address).then(done, function() { selectText(el.querySelector('code')); });
+            } else {
+              selectText(el.querySelector('code'));
+            }
+          });
+        }
+        el.hidden = false;
+      }
+
+      function selectText(node) {
+        var range = document.createRange();
+        range.selectNodeContents(node);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+
+      // Checked once, when the page opens; a restart of the browser reloads it.
+      var gfxCheck = browserProblem() ? null : graphicsCheck();
+      showGfxNotice(document.getElementById('gfx-notice'), gfxCheck);
+
+      // ---- Edge's enhanced security. Where it applies (every site on Strict,
+      // unfamiliar sites on Balanced; it's off by default) Edge turns off its
+      // just-in-time compiler, so the game's WebAssembly runs in an interpreter.
+      // Pages can't ask whether it's on, so a short speed test in a worker
+      // tells: a WebAssembly loop timed against the browser's own sort, which
+      // isn't slowed. In Edge 155 the loop took 0.5 to 0.8 times as long as
+      // the sort normally, and on Strict 8 times on Windows and 13 to 15 on
+      // Linux; back to 0.8 once it was turned off for the site.
+      var JIT_SLOW_RATIO = 4;
+      var JIT_NOTICE_SETTING = 'jkdf2mp-jit-notice';
+
+      // Runs in the worker, so it uses nothing else from this page. f(n) is n
+      // rounds of add, multiply and xor.
+      function jitBench() {
+        var body = [0x01,0x02,0x7f, 0x02,0x40, 0x03,0x40,
+          0x20,0x02,0x20,0x00,0x4e,0x0d,0x01,
+          0x20,0x01,0x20,0x02,0x6a,0x41,0x03,0x6c,0x41,0x07,0x73,0x21,0x01,
+          0x20,0x02,0x41,0x01,0x6a,0x21,0x02,
+          0x0c,0x00, 0x0b,0x0b, 0x20,0x01,0x0b];
+        var bytes = new Uint8Array([0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,
+          0x01,0x06,0x01,0x60,0x01,0x7f,0x01,0x7f, 0x03,0x02,0x01,0x00,
+          0x07,0x05,0x01,0x01,0x66,0x00,0x00,
+          0x0a, body.length + 2, 0x01, body.length].concat(body));
+        function sortMs() {
+          var a = new Uint32Array(1 << 18), x = 12345;
+          for (var i = 0; i < a.length; i++) { x = (x * 1103515245 + 12345) >>> 0; a[i] = x; }
+          var t = performance.now();
+          a.sort();
+          return performance.now() - t;
+        }
+        return WebAssembly.instantiate(bytes).then(function(m) {
+          var f = m.instance.exports.f;
+          f(1000);
+          var loop = Infinity;
+          for (var i = 0; i < 3; i++) {
+            var t = performance.now();
+            f(4000000);
+            loop = Math.min(loop, performance.now() - t);
+          }
+          return loop / Math.max(Math.min(sortMs(), sortMs()), 0.1);
+        });
+      }
+
+      function jitWorkerSource() {
+        return 'onmessage = function() { (' + jitBench + ')().then(' +
+               'function(r) { postMessage(r); }, function() { postMessage(null); }); };';
+      }
+
+      // The loop's time over the sort's, or null when the test can't run or
+      // takes over 10 seconds.
+      function jitCheck() {
+        return new Promise(function(resolve) {
+          var url = null, worker = null, timer = null;
+          function done(r) {
+            clearTimeout(timer);
+            if (worker) worker.terminate();
+            if (url) URL.revokeObjectURL(url);
+            resolve(typeof r === 'number' && isFinite(r) ? r : null);
+          }
+          try {
+            url = URL.createObjectURL(new Blob([jitWorkerSource()], { type: 'text/javascript' }));
+            worker = new Worker(url);
+          } catch (e) {
+            done(null);
+            return;
+          }
+          worker.onmessage = function(ev) { done(ev.data); };
+          worker.onerror = function() { done(null); };
+          timer = setTimeout(function() { done(null); }, 10000);
+          worker.postMessage('go');
+        });
+      }
+
+      function jitNoticeHidden() {
+        try { return localStorage.getItem(JIT_NOTICE_SETTING) === 'hidden'; } catch (e) { return false; }
+      }
+
+      // Edge only: other browsers have no such setting, so a slow test there
+      // means something this notice can't fix.
+      function showJitNotice(el, ratio) {
+        if (!(ratio > JIT_SLOW_RATIO) || browserKind() !== 'edge' || jitNoticeHidden()) {
+          el.hidden = true;
+          return;
+        }
+        el.innerHTML = '<h2>Turn off enhanced security for this site</h2>' +
+          "<p>Microsoft Edge's enhanced security is on for this site. It turns off the part of Edge " +
+          'that makes web games like this one run fast, so the game runs slower than it should.</p>' +
+          '<ol><li>Click the lock at the left of the address bar.</li>' +
+          '<li>Click <b>Enhanced security is active for this site</b>.</li>' +
+          '<li>Turn off <b>Use enhanced security for this site</b>, then reload this page.</li></ol>' +
+          '<p class="fine">This comes from a quick speed test, which a busy computer can throw off. ' +
+          "If Edge doesn't show that option, enhanced security is already off here." +
+          '<button class="hide" type="button">Hide</button></p>';
+        el.querySelector('.hide').addEventListener('click', function() {
+          try { localStorage.setItem(JIT_NOTICE_SETTING, 'hidden'); } catch (e) {}
+          document.querySelectorAll('.jit-notice').forEach(function(n) { n.hidden = true; });
+        });
+        el.hidden = false;
+      }
+
+      // Timed once, when the page opens, in Edge only. The game folder prompt
+      // shows the notice too once the test is done.
+      var jitRatio = null;
+      if (!browserProblem() && browserKind() === 'edge') {
+        jitCheck().then(function(r) {
+          jitRatio = r;
+          showJitNotice(document.getElementById('jit-notice'), r);
+        });
+      }
+
+      // Characters (player/<name>/: the .plr with controls, difficulty and
+      // weapon settings, plus saved games) and OpenJKDF2's settings (persist/)
+      // live in the browser's IndexedDB, one store per site. They're mounted
+      // and loaded before the engine starts, so it never reads an empty folder
+      // or saves over what's stored. Every file is stored again when the engine
+      // closes it after a write (autoPersist).
+      var SAVE_DIRS = ['/jk1/player', '/mots/player', '/jk1/persist', '/mots/persist'];
+
+      function mountSaves(FS, picked, gameRoot) {
+        var IDBFS = FS.filesystems.IDBFS;
+        for (var dir of SAVE_DIRS) {
+          FS.mkdirTree(dir);
+          FS.mount(IDBFS, { autoPersist: true }, dir);
+        }
+        Module.jkSavesMounted = true;  // main.c leaves them alone
+        Module.addRunDependency('saves');
+        FS.syncfs(true, function(err) {
+          if (err)
+            console.warn('OpenJKDF2: could not load saved characters (' + err + '), they will only last until the page closes');
+          importPlayers(FS, picked, gameRoot + 'player');
+          Module.removeRunDependency('saves');
+        });
+      }
+
+      // Brings in the characters from the picked install's player folder, so
+      // nobody has to make their character or set up controls again. A
+      // character the browser already has is kept as is, since it holds the
+      // changes made here.
+      function importPlayers(FS, picked, playerDir) {
+        var have = {};
+        for (var name of FS.readdir(playerDir)) have[name.toLowerCase()] = true;
+        var added = {};
+        for (var e of picked) {
+          var name = e.path.split('/')[0];
+          if (have[name.toLowerCase()]) continue;
+          var path = playerDir + '/' + e.path;
+          FS.mkdirTree(path.substring(0, path.lastIndexOf('/')));
+          FS.writeFile(path, e.data, { canOwn: true });
+          added[name] = true;
+        }
+        var names = Object.keys(added);
+        if (names.length)
+          console.log('OpenJKDF2: added characters from the game folder: ' + names.join(', '));
+      }
+
+      // ---- Mods: folders the engine loads ahead of the game's own files
+      // (-path), each in its own folder inside the game folder. mods.js (in
+      // openjkdf2.js) shares the chosen one with joiners.
+
+      // A folder is a mod if it holds the game's GOBs (.gob, or .goo for
+      // MotS) or the game's resource folders.
+      var MOD_RESOURCE_DIRS = ['3do', 'mat', 'cog', 'misc', 'sound', 'ui', 'jkl', 'ai', 'voice', 'cmp', 'key', 'snd', 'pup'];
+      // Folders of the install itself. expansions/<mod> (OpenJKDF2's own
+      // place for them) and mods/<folder> are looked inside.
+      var NOT_MODS = ['episode', 'resource', 'player', 'music', 'persist', 'mods', 'netmods', 'jkmods',
+                      'expansions', 'jkpatch', '__macosx'];
+
+      // The game's own GOBs in resource/. The engine also loads every other
+      // GOB there, and every GOB in mods/, whatever its command line says
+      // (jkRes_LoadNew in src/Main/jkRes.c).
+      var RETAIL_RESOURCE = {
+        '.gob': ['res1hi.gob', 'res1low.gob', 'res2.gob', 'res1demo.gob'],
+        '.goo': ['jkmres.goo', 'jkmsndlo.goo']
+      };
+      // Loaded like the game's own GOBs, so not listed: the MotS Remastered
+      // pack's assets, which its installer puts in mods/. It loads for whoever
+      // has it, and in multiplayer every player runs it as the host does
+      // (mods.js). It isn't sent to joiners. A ticked mod still comes first.
+      var ALWAYS_LOADED = {
+        '.gob': [],
+        '.goo': ['jkmremasteredassets.goo']
+      };
+
+      // ---- What gets read. Only the files the engine opens are read into
+      // the tab: the rest of the folder (the MotS Remastered pack's jkgm
+      // textures, which this build can't use, backups, screenshots,
+      // launchers) is never read. detectMods finds the mods' files; these say
+      // which files of a mod, and which of the rest, the engine reads. Paths
+      // are lowercase and spelled one way.
+
+      // A file in a mod's folder that the engine reads when it runs the mod
+      // with -path: a GOB at its top, or a file in one of the game's resource
+      // folders, which it looks in before any GOB (jkRes_FileOpen).
+      function isModFile(rel, ext) {
+        var parts = rel.split('/');
+        if (parts.length === 1) return rel.endsWith(ext) && rel[0] !== '.';
+        return MOD_RESOURCE_DIRS.indexOf(parts[0]) >= 0;
+      }
+
+      // A file of the game folder itself that the engine reads
+      // (src/Main/jkRes.c, src/Main/jkEpisode.c):
+      // - episode/: its GOBs, and in each episode's own folder, episode.jk and
+      //   the resource folders, which come before the episode's GOB.
+      // - resource/: its GOBs, jk_.cd, and the resource folders in it.
+      // - mods/: its GOBs. The ones that are mods have moved under jkmods/.
+      // - the game's resource folders at the top: the engine looks there
+      //   before anywhere else, so a player's own loose cogs and the like
+      //   are there.
+      // - controls/: saved control setups.
+      // player/ is read on its own (importPlayers). modPath is a folder given
+      // with ?path= in the address, which is read like a mod.
+      function isGameFile(lower, ext, modPath) {
+        if (modPath && lower.startsWith(modPath + '/'))
+          return isModFile(lower.substring(modPath.length + 1), ext);
+        var parts = lower.split('/');
+        var last = parts[parts.length - 1];
+        var gob = last.endsWith(ext) && last[0] !== '.';
+        switch (parts[0]) {
+          case 'episode':
+            return parts.length === 2 ? gob :
+                   parts.length === 3 ? last === 'episode.jk' : MOD_RESOURCE_DIRS.indexOf(parts[2]) >= 0;
+          case 'resource':
+            return parts.length === 2 ? gob || last === 'jk_.cd' : MOD_RESOURCE_DIRS.indexOf(parts[1]) >= 0;
+          case 'mods':
+            return parts.length === 2 && gob;
+          case 'controls':
+            return parts.length > 1;
+        }
+        return parts.length > 1 && MOD_RESOURCE_DIRS.indexOf(parts[0]) >= 0;
+      }
+
+      // The mods among the picked files, each with the files that belong to it,
+      // in the order they take precedence, which is the original game's where
+      // it has one (-path, then mods/, then resource/):
+      // - each GOB in JK Patch Commander's active folder. It keeps patches in
+      //   JKPatch/ and starts the game with -path JKPatch\active.
+      // - a folder of its own: top-level folders, the folders inside them, and
+      //   expansions/<mod> and mods/<mod>. A folder is a mod if it has a GOB
+      //   or the game's resource folders directly inside, which is all the
+      //   engine reads from a mod folder, so a mod folder inside another one
+      //   is a mod of its own. A folder with several GOBs, or with mod folders
+      //   inside, is a collection: one mod for its resource folders if it has
+      //   any, then one per GOB.
+      // - each GOB the engine would always load: in mods/, and in resource/
+      //   besides the game's own and ALWAYS_LOADED. They move under jkmods/
+      //   like the others, so they only load when ticked and a host always
+      //   shares what it runs.
+      // A zip with a mod in it is a folder of its own wherever it is, since
+      // openZips has already opened it in place.
+      // Paths are already spelled one way.
+      function detectMods(files, isMots) {
+        var ext = isMots ? '.goo' : '.gob';
+        var dirs = {};
+        var gobs = [];
+        for (var e of files) {
+          var parts = e.path.split('/');
+          var lowerParts = e.path.toLowerCase().split('/');
+          var last = lowerParts[lowerParts.length - 1];
+          if (last.endsWith(ext) && last[0] !== '.' && ALWAYS_LOADED[ext].indexOf(last) < 0) {
+            if (parts.length === 2 && lowerParts[0] === 'mods')
+              gobs.push({ e: e, rank: 2, key: last, from: parts[0], always: true });
+            else if (parts.length === 2 && lowerParts[0] === 'resource' && RETAIL_RESOURCE[ext].indexOf(last) < 0)
+              gobs.push({ e: e, rank: 3, key: last, from: parts[0], always: true });
+            else if (parts.length === 3 && lowerParts[0] === 'jkpatch' && lowerParts[1] === 'active')
+              gobs.push({ e: e, rank: 0, key: last, from: 'JKPatch/active' });
+          }
+          for (var d = 1; d < parts.length; d++) {
+            var dir = parts.slice(0, d).join('/');
+            var k = dir.toLowerCase();
+            var x = dirs[k] || (dirs[k] = { path: dir, gobs: [], subdirs: {} });
+            if (d === parts.length - 1) {
+              if (lowerParts[d].endsWith(ext) && lowerParts[d][0] !== '.') x.gobs.push(e);
+            } else {
+              x.subdirs[lowerParts[d]] = true;
+            }
+          }
+        }
+        function isMod(k) {
+          var x = dirs[k];
+          return !!x && (x.gobs.length > 0 || hasResourceDirs(x));
+        }
+        function hasResourceDirs(x) {
+          return MOD_RESOURCE_DIRS.some(function(r) { return x.subdirs[r]; });
+        }
+        function gobMod(e, rank, from, always) {
+          var file = e.path.split('/').pop(), lower = e.path.toLowerCase();
+          return { rank: rank, from: from, always: always, name: file.replace(/\.[^.]*$/, ''),
+                   rel: function(l) { return l === lower ? file : null; } };
+        }
+        gobs.sort(function(a, b) { return a.rank - b.rank || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0); });
+        var mods = gobs.map(function(g) { return gobMod(g.e, g.rank, g.from, g.always); });
+        var zipRoots = {};
+        for (var e of files) {
+          if (e.zipDepth) zipRoots[e.path.toLowerCase().split('/').slice(0, e.zipDepth).join('/')] = true;
+        }
+        var found = [];
+        for (var k in dirs) {
+          var parts = k.split('/');
+          var top = parts[0];
+          if ((parts.length === 1 && NOT_MODS.indexOf(top) < 0) ||
+              (parts.length === 2 && (top === 'expansions' || top === 'mods')) ||
+              (parts.length === 2 && NOT_MODS.indexOf(top) < 0 && MOD_RESOURCE_DIRS.indexOf(parts[1]) < 0) ||
+              zipRoots[k] ||
+              (zipRoots[parts.slice(0, -1).join('/')] && MOD_RESOURCE_DIRS.indexOf(parts[parts.length - 1]) < 0)) {
+            if (isMod(k)) found.push(k);
+          }
+        }
+        found.sort();
+        for (var k of found) {
+          (function(k, x) {
+            // Its files, apart from the mod folders inside it.
+            var inner = found.filter(function(j) { return j.startsWith(k + '/'); });
+            function mine(lower) {
+              return lower.startsWith(k + '/') && !inner.some(function(j) { return lower.startsWith(j + '/'); });
+            }
+            var name = x.path.split('/').pop();
+            if (zipRoots[k]) name = name.replace(/\.zip$/i, '');
+            // A folder with one GOB or none is one mod, unless it also holds
+            // mod folders: then it's a collection, like a mod/ folder. Its
+            // readmes, screenshots and the like aren't part of it.
+            if (x.gobs.length < 2 && !inner.length) {
+              mods.push({ rank: 1, from: x.path, name: name,
+                          rel: function(lower, path) {
+                            return mine(lower) && isModFile(lower.substring(k.length + 1), ext) ? path.substring(k.length + 1) : null;
+                          } });
+              return;
+            }
+            // Its resource folders first: the engine looks for a loose file
+            // in a folder before it looks in the GOBs there.
+            if (hasResourceDirs(x)) {
+              mods.push({ rank: 1, from: x.path, name: name + ' (loose files)',
+                          rel: function(lower, path) {
+                            var rest = lower.substring(k.length + 1);
+                            return mine(lower) && MOD_RESOURCE_DIRS.indexOf(rest.split('/')[0]) >= 0 && rest.indexOf('/') > 0
+                              ? path.substring(k.length + 1) : null;
+                          } });
+            }
+            x.gobs.slice().sort(function(a, b) {
+              var p = a.path.toLowerCase(), q = b.path.toLowerCase();
+              return p < q ? -1 : p > q ? 1 : 0;
+            }).forEach(function(e) { mods.push(gobMod(e, 1, x.path)); });
+          })(k, dirs[k]);
+        }
+        // Sorting is stable, so each kind keeps its order.
+        mods.sort(function(a, b) { return a.rank - b.rank; });
+        for (var m of mods) m.bytes = 0;
+        for (var e of files) {
+          var lower = e.path.toLowerCase();
+          var m = mods.find(function(m) { return m.rel(lower, e.path); });
+          if (m) m.bytes += e.file.size;
+        }
+        return mods.map(function(m, i) {
+          // No spaces: the engine splits its command line on them.
+          m.path = 'jkmods/' + i + '-' + m.name.replace(/[^A-Za-z0-9_.-]+/g, '_').substring(0, 40);
+          return m;
+        });
+      }
+
+      // Moves each mod's files into its folder under jkmods/, marking them
+      // with the mod's place in the list (.mod) and their path in the mod
+      // (.rel).
+      function placeModFiles(files, mods) {
+        for (var e of files) {
+          var lower = e.path.toLowerCase();
+          for (var i = 0; i < mods.length; i++) {
+            var rel = mods[i].rel(lower, e.path);
+            if (rel) {
+              e.path = mods[i].path + '/' + rel;
+              e.mod = i;
+              e.rel = rel;
+              break;
+            }
+          }
+        }
+      }
+
+      // The files to read: every mod's, and the files of the game folder the
+      // engine opens. The rest of the folder is left unread.
+      function filesToRead(files, ext, modPath) {
+        return files.filter(function(e) { return e.mod !== undefined || isGameFile(e.path.toLowerCase(), ext, modPath); });
+      }
+
+      // ---- Mods kept as zip files. The game can't read a zip, so the page
+      // opens each one that holds a mod and puts its files in a folder named
+      // after it, as if it had been unzipped in place, like
+      // mod/SBX.zip/Saber Battle X - JK.gob. detectMods then finds it like
+      // any mod folder. A zip holds a mod if it has a GOB or the game's
+      // resource folders, at its top or in the one folder there. A resource
+      // folder in it is opened too, since some mods are zipped the way
+      // they're installed; levels in an episode folder in it are left out.
+      // Zips with the game's own files, zips in the game's own folders or
+      // JK Patch Commander's, and zips that use anything but deflate or no
+      // compression, or a password, stay closed.
+      var ZIP_SKIPPED = ['episode', 'player', 'music', 'netmods', 'jkmods', 'jkpatch'];
+      var ZIP_MAX_BYTES = 512 * 1048576;
+
+      async function openZips(files, isMots) {
+        var ext = isMots ? '.goo' : '.gob';
+        var retail = REQUIRED_JK.concat(REQUIRED_MOTS, RETAIL_RESOURCE[ext]).map(function(r) {
+          return r.split('/').pop().toLowerCase();
+        }).filter(function(n) { return n.endsWith(ext); });
+        var out = [];
+        for (var e of files) {
+          var lower = e.path.toLowerCase();
+          if (!lower.endsWith('.zip') || ZIP_SKIPPED.indexOf(lower.split('/')[0]) >= 0) { out.push(e); continue; }
+          var inside = null;
+          try {
+            inside = await zipMod(e.file, ext, retail);
+          } catch (err) {
+            console.warn('OpenJKDF2: could not open ' + e.path + ': ' + err);
+          }
+          if (!inside) { out.push(e); continue; }
+          console.log('OpenJKDF2: opened ' + e.path + ' (' + inside.length + ' files)');
+          var depth = e.path.split('/').length;
+          for (var f of inside) out.push({ path: e.path + '/' + f.path, file: f.file, zipDepth: depth });
+        }
+        return out;
+      }
+
+      // The files a zip would unzip to, with their paths in the mod, or null
+      // if it doesn't hold a mod or can't be opened.
+      async function zipMod(file, ext, retail) {
+        var list = await zipList(file);
+        if (!list) return null;
+        list = list.filter(function(z) {
+          var parts = z.name.split('/');
+          return !z.name.endsWith('/') && parts[0].toLowerCase() !== '__macosx' &&
+                 parts[parts.length - 1][0] !== '.' &&
+                 !parts.some(function(p) { return p === '' || p === '.' || p === '..' || p.indexOf(':') >= 0; });
+        });
+        // A zip of one folder: the mod is what's in it.
+        var tops = {};
+        for (var z of list) tops[z.name.indexOf('/') > 0 ? z.name.split('/')[0].toLowerCase() : ''] = true;
+        var only = Object.keys(tops);
+        var strip = only.length === 1 && only[0] && only[0] !== 'resource' && only[0] !== 'episode' &&
+                    MOD_RESOURCE_DIRS.indexOf(only[0]) < 0;
+        var kept = [], bytes = 0, isMod = false;
+        for (var z of list) {
+          var rel = strip ? z.name.substring(z.name.indexOf('/') + 1) : z.name;
+          var parts = rel.toLowerCase().split('/');
+          if (retail.indexOf(parts[parts.length - 1]) >= 0) return null;
+          if (parts[0] === 'episode') continue;
+          if (parts[0] === 'resource' && parts.length > 1) { rel = rel.substring(rel.indexOf('/') + 1); parts.shift(); }
+          if (isSkipped(parts.join('/'))) continue;
+          if ((parts.length <= 2 && parts[parts.length - 1].endsWith(ext)) ||
+              (parts.length > 1 && MOD_RESOURCE_DIRS.indexOf(parts[0]) >= 0) ||
+              (parts.length > 2 && MOD_RESOURCE_DIRS.indexOf(parts[1]) >= 0)) isMod = true;
+          if ((z.flags & 1) || (z.method !== 0 && z.method !== 8)) return null;
+          bytes += z.size;
+          kept.push({ path: rel, z: z });
+        }
+        if (!isMod || bytes > ZIP_MAX_BYTES) return null;
+        if (kept.some(function(k) { return k.z.method === 8; }) && typeof DecompressionStream === 'undefined') return null;
+        for (var k of kept) k.file = await zipRead(file, k.z);
+        return kept;
+      }
+
+      // A zip's entries, from its central directory at the end. Names not
+      // marked as UTF-8 are read a byte a character, which is right for the
+      // plain names mods use.
+      async function zipList(file) {
+        var tailLen = Math.min(file.size, 22 + 65535);
+        var tail = new Uint8Array(await file.slice(file.size - tailLen).arrayBuffer());
+        var t = new DataView(tail.buffer);
+        var i = tail.length - 22;
+        while (i >= 0 && t.getUint32(i, true) !== 0x06054b50) i--;
+        if (i < 0) return null;
+        var count = t.getUint16(i + 10, true), cdSize = t.getUint32(i + 12, true), cdAt = t.getUint32(i + 16, true);
+        if (count === 0xffff || cdAt === 0xffffffff || cdAt + cdSize > file.size) return null;
+        var cd = new Uint8Array(await file.slice(cdAt, cdAt + cdSize).arrayBuffer());
+        var c = new DataView(cd.buffer), list = [];
+        for (var p = 0, n = 0; n < count; n++) {
+          if (p + 46 > cd.length || c.getUint32(p, true) !== 0x02014b50) return null;
+          var flags = c.getUint16(p + 8, true), nameLen = c.getUint16(p + 28, true);
+          var raw = cd.subarray(p + 46, p + 46 + nameLen);
+          list.push({ name: ((flags & 0x800) ? new TextDecoder().decode(raw) : String.fromCharCode.apply(null, raw)).replace(/\\/g, '/'),
+                      flags: flags, method: c.getUint16(p + 10, true), csize: c.getUint32(p + 20, true),
+                      size: c.getUint32(p + 24, true), at: c.getUint32(p + 42, true) });
+          p += 46 + nameLen + c.getUint16(p + 30, true) + c.getUint16(p + 32, true);
+        }
+        return list;
+      }
+
+      async function zipRead(file, z) {
+        var head = new DataView(await file.slice(z.at, z.at + 30).arrayBuffer());
+        if (head.byteLength < 30 || head.getUint32(0, true) !== 0x04034b50) throw new Error('no file at ' + z.at);
+        var start = z.at + 30 + head.getUint16(26, true) + head.getUint16(28, true);
+        var data = file.slice(start, start + z.csize);
+        var out = z.method === 0 ? data :
+          await new Response(data.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
+        if (out.size !== z.size) throw new Error(z.name + ' came out the wrong size');
+        return out;
+      }
+
+      // ---- Which files each mod changes, to tell when two ticked mods change
+      // the same one: its loose files, and what's inside the GOBs at its top
+      // level, by lowercase path. Text files don't count: the game doesn't read
+      // them, and every JK Patch Commander patch has a patchinfo.txt.
+
+      async function gobTable(file) {
+        try {
+          var head = new DataView(await file.slice(0, 12).arrayBuffer());
+          if (head.byteLength < 12 || head.getUint32(0, true) !== 0x20424f47) return null;
+          var at = head.getUint32(8, true);
+          var count = new DataView(await file.slice(at, at + 4).arrayBuffer()).getUint32(0, true);
+          if (count > 100000) return null;
+          var table = new Uint8Array(await file.slice(at + 4, at + 4 + count * 136).arrayBuffer());
+          if (table.length < count * 136) return null;
+          var v = new DataView(table.buffer), out = [];
+          for (var i = 0; i < count; i++) {
+            var name = '';
+            for (var j = 8; j < 136 && table[i * 136 + j]; j++) name += String.fromCharCode(table[i * 136 + j]);
+            out.push({ offset: v.getUint32(i * 136, true), size: v.getUint32(i * 136 + 4, true), name: name });
+          }
+          return out;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      async function modContents(mod, files, ext) {
+        var out = {};
+        for (var e of files) {
+          var rel = mod.rel(e.path.toLowerCase(), e.path);
+          if (!rel) continue;
+          var lower = rel.toLowerCase();
+          var table = lower.indexOf('/') < 0 && lower.endsWith(ext) ? await gobTable(e.file) : null;
+          if (table) {
+            for (var g of table) {
+              var p = g.name.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+              if (p && !p.endsWith('.txt') && !(p in out))
+                out[p] = { file: e.file, offset: g.offset, size: g.size, inGob: true };
+            }
+          } else if (!lower.endsWith('.txt')) {
+            out[lower] = { file: e.file, offset: 0, size: e.file.size, inGob: false };
+          }
+        }
+        return out;
+      }
+
+      // The SHA-256 of a file or part of one, read once.
+      var digests = new WeakMap();
+      function digest(file, offset, size) {
+        var m = digests.get(file);
+        if (!m) digests.set(file, m = {});
+        var k = offset + ':' + size;
+        return m[k] || (m[k] = file.slice(offset, offset + size).arrayBuffer()
+          .then(function(b) { return crypto.subtle.digest('SHA-256', b); })
+          .then(function(h) { return Array.from(new Uint8Array(h)).join(','); }));
+      }
+
+      async function sameBytes(a, b) {
+        if (a.size !== b.size) return false;
+        if (a.file === b.file && a.offset === b.offset) return true;
+        // Two copies of one GOB: compare them whole, once, not entry by entry.
+        if (a.inGob && b.inGob && a.file.size === b.file.size && a.offset === b.offset &&
+            await digest(a.file, 0, a.file.size) === await digest(b.file, 0, b.file.size))
+          return true;
+        return await digest(a.file, a.offset, a.size) === await digest(b.file, b.offset, b.size);
+      }
+
+      // What each mod changes, and for each pair of mods, the files both
+      // change but differently, as "i,j" -> [paths]. Without WebCrypto (an
+      // http page that isn't local) nothing is compared.
+      async function findClashes(mods, files, ext) {
+        var clashes = {};
+        var contents = [];
+        for (var m of mods) contents.push(await modContents(m, files, ext));
+        if (typeof crypto === 'undefined' || !crypto.subtle) return { clashes: clashes, contents: contents };
+        for (var i = 0; i < mods.length; i++) {
+          for (var j = i + 1; j < mods.length; j++) {
+            var list = [];
+            for (var p in contents[i]) {
+              if (p in contents[j] && !(await sameBytes(contents[i][p], contents[j][p]))) list.push(p);
+            }
+            if (list.length) clashes[i + ',' + j] = list;
+          }
+        }
+        return { clashes: clashes, contents: contents };
+      }
+
+      // Mods saved from earlier games (mods.js keeps them), newest first.
+      function storedMods(game) {
+        return new Promise(function(resolve) {
+          var settled = false;
+          function done(list) {
+            if (settled) return;
+            settled = true;
+            resolve(list || []);
+          }
+          setTimeout(function() { done([]); }, 3000);
+          try {
+            var req = indexedDB.open('jkdf2mp-mods', 1);
+            req.onupgradeneeded = function() {
+              req.result.createObjectStore('meta', { keyPath: 'key' });
+              req.result.createObjectStore('data');
+            };
+            req.onsuccess = function() {
+              var db = req.result;
+              try {
+                var all = db.transaction('meta').objectStore('meta').getAll();
+                all.onsuccess = function() {
+                  db.close();
+                  var seen = {};
+                  done(all.result.filter(function(m) {
+                    if (m.game !== game || seen[m.sha256]) return false;
+                    return (seen[m.sha256] = true);
+                  }).sort(function(a, b) { return b.used - a.used; }));
+                };
+                all.onerror = function() { db.close(); done([]); };
+              } catch (e) {
+                db.close();
+                done([]);
+              }
+            };
+            req.onerror = req.onblocked = function() { done([]); };
+          } catch (e) {
+            done([]);
+          }
+        });
+      }
+
+      // Which mods from the game folder this browser left unticked last
+      // time, per game, so the list starts the way the player left it. A mod
+      // that's new since then starts ticked.
+      var MODS_LEFT_OUT = 'jkdf2mp-mods-left-out-';
+      function modKey(m) {
+        return (m.from + '/' + m.name).toLowerCase();
+      }
+      function modsLeftOut(game) {
+        try {
+          var keys = JSON.parse(localStorage.getItem(MODS_LEFT_OUT + game) || '[]');
+          return Array.isArray(keys) ? keys : [];
+        } catch (e) {
+          return [];
+        }
+      }
+      function rememberModsLeftOut(game, keys) {
+        try {
+          localStorage.setItem(MODS_LEFT_OUT + game, JSON.stringify(keys));
+        } catch (e) {}
+      }
+
+      function megabytes(n) {
+        return n < 1048576 ? 'under 1 MB' : Math.round(n / 1048576) + ' MB';
+      }
+
+      // Asks which mods to start with. Mods in the game folder start ticked,
+      // apart from those left unticked last time. A mod saved from an online
+      // game is that host's whole set, so it starts unticked and runs on its
+      // own. Resolves to the ticked options, highest first.
+      function chooseMods(folderMods, saved, clashes, game) {
+        var leftOut = modsLeftOut(game);
+        var options = folderMods.map(function(m, i) {
+          return { index: i, name: m.name, path: m.path, key: modKey(m),
+                   where: (m.always ? 'In your game folder (' + m.from + "), so the original game always loads it, "
+                                    : 'In your game folder (' + m.from + '), ') + megabytes(m.bytes) +
+                          (m.bytes > 100 * 1048576 ? ". Too big to send: players need their own copy" : '') };
+        });
+        for (var s of saved) {
+          options.push({ name: s.name, path: 'netmods/' + s.sha256.substring(0, 16), saved: true,
+                         where: 'Saved from an online game, ' + megabytes(s.size) + '. Runs on its own' });
+        }
+
+        var list = modChoice.querySelector('.mod-list');
+        var note = modChoice.querySelector('.mod-clash');
+        list.textContent = '';
+        var inputs = options.map(function(o, i) {
+          var label = document.createElement('label');
+          var input = document.createElement('input');
+          input.type = 'checkbox';
+          input.value = String(i);
+          input.checked = !o.saved && leftOut.indexOf(o.key) < 0;
+          var text = document.createElement('span');
+          var name = document.createElement('b');
+          name.textContent = o.name;
+          var where = document.createElement('span');
+          where.className = 'where';
+          where.textContent = o.where;
+          text.append(name, where);
+          label.append(input, text);
+          list.appendChild(label);
+          return input;
+        });
+
+        function ticked() {
+          return options.filter(function(o, i) { return inputs[i].checked; });
+        }
+        function update() {
+          var on = ticked().filter(function(o) { return !o.saved; });
+          var lines = [];
+          for (var x = 0; x < on.length; x++) {
+            for (var y = x + 1; y < on.length; y++) {
+              var paths = clashes[on[x].index + ',' + on[y].index];
+              if (paths)
+                lines.push(on[x].name + ' and ' + on[y].name + ' both change ' +
+                           (paths.length === 1 ? paths[0] + '. ' + on[x].name + "'s version is used"
+                                               : paths.length + ' files, such as ' + paths[0] + '. ' + on[x].name + "'s versions are used") +
+                           ", since it's higher in the list.");
+            }
+          }
+          note.textContent = lines.join('\n');
+          note.hidden = !lines.length;
+        }
+        // Select all ticks or unticks every mod from the game folder. It
+        // shows mixed when only some are ticked, and a click on it then
+        // ticks them all. Shown for two or more.
+        var all = modChoice.querySelector('.mod-all');
+        var allBox = all.querySelector('input');
+        var mine = inputs.filter(function(input, i) { return !options[i].saved; });
+        all.hidden = mine.length < 2;
+        function updateAll() {
+          var n = mine.filter(function(input) { return input.checked; }).length;
+          allBox.checked = n === mine.length;
+          allBox.indeterminate = n > 0 && n < mine.length;
+          all.querySelector('.mod-count').textContent = n + ' of ' + mine.length + ' ticked';
+        }
+        allBox.onchange = function() {
+          inputs.forEach(function(input, i) {
+            if (!options[i].saved) input.checked = allBox.checked;
+            else if (allBox.checked) input.checked = false;
+          });
+          update();
+          updateAll();
+        };
+        inputs.forEach(function(input, i) {
+          input.onchange = function() {
+            // A saved set runs on its own.
+            if (input.checked) {
+              inputs.forEach(function(other, j) {
+                if (j !== i && (options[i].saved || options[j].saved)) other.checked = false;
+              });
+            }
+            update();
+            updateAll();
+          };
+        });
+        update();
+        updateAll();
+
+        pickerTitle.textContent = 'Choose your mods';
+        picker.querySelectorAll('.picker-intro').forEach(function(e) { e.hidden = true; });
+        showPickerResult('');
+        modChoice.hidden = false;
+        var start = modChoice.querySelector('button.play');
+        start.focus();
+        return new Promise(function(resolve) {
+          start.onclick = function() {
+            start.onclick = null;
+            modChoice.hidden = true;
+            // A saved set says nothing about the folder's mods.
+            if (!ticked().some(function(o) { return o.saved; }))
+              rememberModsLeftOut(game, options.filter(function(o, i) { return !o.saved && !inputs[i].checked; })
+                                               .map(function(o) { return o.key; }));
+            resolve(ticked());
+          };
+        });
+      }
+
+      // The name of several mods together, for the lobby (at most 63
+      // characters, mods.js).
+      function setName(names) {
+        for (var n = names.length; n > 1; n--) {
+          var name = names.slice(0, n).join(' + ') + (n < names.length ? ' + ' + (names.length - n) + ' more' : '');
+          if (name.length <= 63) return name;
+        }
+        return names[0].substring(0, 50) + ' + ' + (names.length - 1) + ' more';
+      }
+
+      // The ticked mods as one folder, since the engine takes one -path, as
+      // [{ rel, data }]. The higher a mod is in the list, the more it wins:
+      // its GOBs are numbered first, because the engine looks in GOBs in the
+      // order they were added, and a lower mod's loose file is left out when
+      // a higher mod has that file, because the engine reads loose files
+      // before any GOB. A GOB that's an exact copy of one already in is left
+      // out. files carry .mod (the mod's index), .rel and .data, and so does
+      // what comes back.
+      async function setFiles(picked, files, contents, ext) {
+        var out = [], taken = {}, spelling = {}, gobs = [];
+        var hash = typeof crypto !== 'undefined' && !!crypto.subtle;
+        // A file and a folder can't share a name, and each folder is spelled
+        // one way, as in onFolderPicked.
+        function add(rel, data, mod) {
+          var parts = rel.split('/'), lower = rel.toLowerCase(), keys = [], dir = '';
+          if (taken[lower]) return;
+          for (var k = 1; k < parts.length; k++) {
+            var key = lower.split('/').slice(0, k).join('/');
+            if (taken[key] === 'file') return;
+            keys.push(key);
+          }
+          keys.forEach(function(key, k) {
+            taken[key] = 'dir';
+            dir = spelling[key] || (spelling[key] = (dir ? dir + '/' : '') + parts[k]);
+          });
+          taken[lower] = 'file';
+          out.push({ rel: (dir ? dir + '/' : '') + parts[parts.length - 1], data: data, mod: mod });
+        }
+        for (var r = 0; r < picked.length; r++) {
+          var i = picked[r].index;
+          var prefix = String(r + 1).padStart(3, '0') + '-';
+          for (var e of files) {
+            if (e.mod !== i) continue;
+            var lower = e.rel.toLowerCase();
+            if (lower.indexOf('/') < 0 && lower.endsWith(ext)) {
+              var copy = false;
+              for (var g of gobs) {
+                if (g === e.file || (hash && g.size === e.file.size &&
+                    await digest(g, 0, g.size) === await digest(e.file, 0, e.file.size))) {
+                  copy = true;
+                  break;
+                }
+              }
+              if (copy) continue;
+              gobs.push(e.file);
+              add(prefix + e.rel, e.data, i);
+            } else if (!picked.slice(0, r).some(function(o) { return lower in contents[o.index]; })) {
+              add(e.rel, e.data, i);
+            }
+          }
+        }
+        return out;
+      }
+
+      function wrongGameText(want, found) {
+        var home = found === 'mots' ? 'Sith: Asteroid' : 'Nar Shaddaa';
+        return 'That folder has ' + GAME_NAMES[found] + ', and ' + want.room + ' is for ' + GAME_NAMES[want.game] +
+               '. Pick your ' + GAME_NAMES[want.game] + ' folder, or close this and use ' + home +
+               ' or Play JKDF2 for ' + GAME_NAMES[found] + '.';
+      }
+
+      function showPickerResult(text, isError) {
+        var el = document.getElementById('picker-result');
+        el.textContent = text;
+        el.className = isError ? 'error' : '';
+      }
+
+      async function onFolderPicked(fileList) {
+        // How long each stage takes, for the console, so a slow start can be
+        // told apart on the player's own PC.
+        var clock = { at: performance.now(), stages: [] };
+        function lap(stage) {
+          var now = performance.now();
+          clock.stages.push(stage + ' ' + Math.round(now - clock.at) + ' ms');
+          clock.at = now;
+        }
+        var sorted = pickedFiles(fileList);
+        var files = sorted.files;
+        var playerFiles = sorted.playerFiles;
+
+        var byLower = {};
+        for (var e of files) byLower[e.path.toLowerCase()] = e;
+        var isMots = REQUIRED_MOTS.some(r => r.endsWith('.goo') && byLower[r.toLowerCase()]);
+        // A room starts one game: a folder with both starts the room's, and
+        // the other game's folder sends the player to its own room.
+        var wantMots = pickerWant ? pickerWant.game === 'mots' : isMots;
+        if (wantMots !== isMots && (wantMots ? REQUIRED_MOTS : REQUIRED_JK).every(r => byLower[r.toLowerCase()]))
+          isMots = wantMots;
+        var required = isMots ? REQUIRED_MOTS : REQUIRED_JK;
+        if (wantMots !== isMots) {
+          if (isMots || required.every(r => byLower[r.toLowerCase()])) {
+            showPickerResult(wrongGameText(pickerWant, isMots ? 'mots' : 'jk1'), true);
+            return;
+          }
+          required = REQUIRED_MOTS;
+        }
+        var missing = required.filter(r => !byLower[r.toLowerCase()]);
+        if (missing.length) {
+          showPickerResult("That folder doesn't have the game files we're looking for:\n" + missing.join("\n") +
+                           "\n\nPick the folder that has episode and resource directly inside, then try again.", true);
+          return;
+        }
+        lap('listing');
+        // Zipped mods are opened first, so they're found and loaded like the rest.
+        if (Module['arguments'].indexOf('-path') < 0 && files.some(function(e) { return /\.zip$/i.test(e.path); })) {
+          showPickerResult('Opening zipped mods...');
+          files = await openZips(files, isMots);
+          lap('opening zips');
+        }
+        // Windows folders ignore case but MEMFS doesn't, so "Episode/AODpc.gob" and
+        // a renamed "episode/JK1MP.gob" would land in two sibling folders. The
+        // engine's casepath() then only lists whichever folder it finds first,
+        // hiding the other one's files. Spell every folder one way: the required
+        // list's spelling where it has one, else the first spelling seen.
+        // mods/ is spelled the engine's way too, since it always loads the
+        // GOBs left there (jkRes_LoadNew).
+        var dirSpelling = { mods: 'mods' };
+        for (var r of required) {
+          var rd = r.substring(0, r.lastIndexOf('/'));
+          dirSpelling[rd.toLowerCase()] = rd;
+        }
+        for (var e of files) {
+          var parts = e.path.split('/');
+          var dir = "";
+          for (var p = 0; p < parts.length - 1; p++) {
+            dir = dir ? dir + '/' + parts[p] : parts[p];
+            var key = dir.toLowerCase();
+            if (!(key in dirSpelling)) dirSpelling[key] = dir;
+            dir = dirSpelling[key];
+          }
+          e.path = dir ? dir + '/' + parts[parts.length - 1] : parts[parts.length - 1];
+        }
+        for (var r of required) byLower[r.toLowerCase()].path = r;
+
+        // Each mod is loaded in its own folder under jkmods/, named so the
+        // engine's command line can carry it. One ticked mod starts with -path
+        // set to its folder; several are put together in jkmods/set. A path
+        // given in the address (?path=...) is left as it is.
+        var game = isMots ? 'mots' : 'jk1';
+        var ext = isMots ? '.goo' : '.gob';
+        var picked = null, found = { clashes: {}, contents: [] };
+        var pathAt = Module['arguments'].indexOf('-path');
+        if (pathAt < 0) {
+          var folderMods = detectMods(files, isMots);
+          var saved = typeof indexedDB !== 'undefined' ? await storedMods(game) : [];
+          lap('finding mods');
+          if (folderMods.length > 1) {
+            showPickerResult('Looking through your mods...');
+            found = await findClashes(folderMods, files, ext);
+            lap('comparing mods');
+          }
+          placeModFiles(files, folderMods);
+          Module.jkModFolders = folderMods.map(function(m) { return { name: m.name, path: m.path }; });
+          if (folderMods.length || saved.length) {
+            picked = await chooseMods(folderMods, saved, found.clashes, game);
+            lap('choosing mods');
+          }
+        }
+        // A folder given with ?path= is read like a mod.
+        var modPath = pathAt < 0 ? null : String(Module['arguments'][pathAt + 1] || '').replace(/\\/g, '/')
+          .replace(/^\.\//, '').replace(/\/+$/, '').toLowerCase();
+        files = filesToRead(files, ext, modPath);
+
+        readingFolder = true;
+        chooseButton.setAttribute('aria-disabled', 'true');
+        var totalBytes = files.reduce((n, e) => n + e.file.size, 0);
+        var gameRoot = isMots ? '/mots/' : '/jk1/';
+        var loaded = [];
+        for (var i = 0; i < files.length; i++) {
+          showPickerResult("Found your copy of " + (isMots ? "Mysteries of the Sith" : "Jedi Knight") +
+                           ". Loading it into this tab (" + (i + 1) + " of " + files.length + " files, " +
+                           Math.round(totalBytes / 1048576) + " MB)...");
+          files[i].data = new Uint8Array(await files[i].file.arrayBuffer());
+          loaded.push({ path: gameRoot + files[i].path, data: files[i].data });
+        }
+        lap('reading');
+        // One ticked mod runs from its own folder. Several are put together
+        // in jkmods/set, sharing their files' data, unless only one of them
+        // adds anything, as when they're all copies of one mod.
+        var start = null;
+        if (picked && picked.length === 1) {
+          start = picked[0];
+        } else if (picked && picked.length > 1) {
+          var set = await setFiles(picked, files, found.contents, ext);
+          lap('putting mods together');
+          var from = picked.filter(function(o) { return set.some(function(e) { return e.mod === o.index; }); });
+          if (from.length === 1) {
+            start = from[0];
+          } else if (from.length > 1) {
+            start = { path: 'jkmods/set', name: setName(from.map(function(o) { return o.name; })) };
+            Module.jkModFolders.push({ name: start.name, path: start.path });
+            for (var e of set) loaded.push({ path: gameRoot + start.path + '/' + e.rel, data: e.data });
+          }
+        }
+        if (start) {
+          Module['arguments'].push('-path', start.path);
+          console.log('OpenJKDF2: starting with ' + start.name + ' (' + start.path + ')');
+        }
+        for (var e of files) e.data = null;
+        // A mod's files are written in the order mods.js unpacks them for a
+        // joiner, sorted, since the engine looks in GOBs in the order they
+        // were added. The game's own files keep the order they came in.
+        var modRoot = gameRoot + 'jkmods/';
+        loaded = loaded.filter(function(e) { return !e.path.startsWith(modRoot); }).concat(
+          loaded.filter(function(e) { return e.path.startsWith(modRoot); })
+                .sort(function(a, b) { return a.path < b.path ? -1 : a.path > b.path ? 1 : 0; }));
+        var pickedPlayers = [];
+        for (var e of playerFiles)
+          pickedPlayers.push({ path: e.path, data: new Uint8Array(await e.file.arrayBuffer()) });
+        lap('characters');
+        // Not the whole folder's size: the browser looks up each file's size
+        // one by one, which takes a while in a big folder.
+        var readBytes = totalBytes + playerFiles.reduce((n, e) => n + e.file.size, 0);
+        console.log('OpenJKDF2: read ' + (files.length + playerFiles.length) + ' of the ' + fileList.length +
+                    ' files in the folder (' + megabytes(readBytes) + '): ' + clock.stages.join(', '));
+
+        Module.preRun.push(function() {
+          var FS = Module.FS;
+          var t = performance.now();
+          FS.mkdirTree('/jk1');
+          FS.mkdirTree('/mots');
+          for (var e of loaded) {
+            FS.mkdirTree(e.path.substring(0, e.path.lastIndexOf('/')));
+            FS.writeFile(e.path, e.data, { canOwn: true });
+          }
+          loaded = null;
+          console.log('OpenJKDF2: the engine loaded ' + Math.round(t - clock.at) + ' ms after the folder was read, ' +
+                      'and took its files in ' + Math.round(performance.now() - t) + ' ms');
+          mountSaves(FS, pickedPlayers, gameRoot);
+        });
+        if (isMots && Module['arguments'].indexOf('-motsCompat') < 0) {
+          Module['arguments'].push('-motsCompat');
+        }
+
+        readingFolder = false;
+        picker.close();
+        hideZone();
+        loadEngine(false);
+      }
+
+      document.getElementById('gamedir').addEventListener('change', function(ev) {
+        // Copied so the input can be cleared, which lets the same folder be
+        // picked again after fixing a problem.
+        var fileList = Array.from(ev.target.files);
+        ev.target.value = '';
+        onFolderPicked(fileList).catch(function(err) {
+          showPickerResult("Could not read that folder: " + err, true);
+        }).finally(function() {
+          readingFolder = false;
+          chooseButton.removeAttribute('aria-disabled');
+        });
+      });
+
+      // Play JKDF2 and every room open the folder prompt, a room's asking for
+      // its game's folder. Nar Shaddaa and Sith: Asteroid open their room
+      // window first, whose Join and Host buttons open it.
+      function roomName(b) {
+        var name = b.querySelector('.room-name');
+        return (name || b).textContent.trim();
+      }
+      document.querySelectorAll('[data-play]').forEach(function(b) {
+        b.addEventListener('click', function() {
+          delete Module.jkJoinRoom;
+          openPicker(b.dataset.game ? { game: b.dataset.game, room: roomName(b) } : null);
+        });
+      });
+      picker.querySelector('.close').addEventListener('click', closePicker);
+      picker.querySelector('.cancel').addEventListener('click', closePicker);
+      // Escape closes the prompt, except while the folder is being read.
+      picker.addEventListener('cancel', function(ev) {
+        if (readingFolder) ev.preventDefault();
+      });
+      // The label stands in for the hidden file input, so let the keyboard press it too.
+      chooseButton.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          chooseButton.click();
+        }
+      });
+
+      // Local testing with a build made with -DOPENJKDF2_WASM_PRELOAD_DATA=ON:
+      // open index.html#bundled to use the baked-in openjkdf2_data.data instead.
+      if (window.location.hash === '#bundled') {
+        hideZone();
+        loadEngine(true);
+      } else {
+        document.documentElement.classList.add('zone-open');
+        Module.setStatus('Waiting for game folder...');
+      }
+    </script>
+    <script type='text/javascript'>
+      // ---- Live counts and the room windows. The lobby sends the landing
+      // page a status whenever a game or a player comes or goes ("watch" in
+      // jkdf2mp-bb-server's lobby): how many players are online, the names of
+      // those not in a game, and each game with its players' names. Nar
+      // Shaddaa shows Jedi Knight's count and Sith: Asteroid Mysteries of the
+      // Sith's, and each opens a window listing that game's games, like the
+      // Zone's game room client did.
+      //
+      // A status looks like:
+      //   { online: 8, lobby: ['DarkJedi_7', 'Dash_R'],
+      //     byGame: { jk1: { online: 3, lobby: ['DarkJedi_7'] }, mots: { online: 5, lobby: ['Dash_R'] } },
+      //     games: [{ id: 3, name: 'No mods dueling', game: 'jk1', map: '01narshadda.jkl',
+      //               episode: 'JK1MP.gob', mod: '', locked: false, players: 2, max: 4,
+      //               names: ['Kyle_K', 'MaraJade'] }] }
+      // id is the lobby's room number, names start with the host's, and online
+      // counts everyone with the game running, in a game or not. Names are
+      // typed by players, so they only ever go into the page as text.
+
+      var ROOM_MAX_NAMES = 4;   // names on a table before "+N more"
+      var ROOM_MAX_SEATS = 8;   // seat dots drawn around a table's button
+      var ROOMS = {
+        'nar-shaddaa': { game: 'jk1', name: 'Nar Shaddaa', title: 'Jedi Knight: Dark Forces II - Nar Shaddaa' },
+        'sith-asteroid': { game: 'mots', name: 'Sith: Asteroid', title: 'Mysteries of the Sith - Sith: Asteroid' }
+      };
+      var room = document.getElementById('room');
+      var roomGames = document.getElementById('room-games');
+      var roster = document.getElementById('roster');
+      var roomNote = document.getElementById('room-note');
+      var lobbyLive = { state: 'connecting', status: null, updated: null, view: 'table', seen: {}, cols: 0,
+                        room: 'nar-shaddaa' };
+      try {
+        if (localStorage.getItem('jkdf2mp-room-view') === 'list') lobbyLive.view = 'list';
+      } catch (e) {}
+
+      function el(tag, cls, str) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (str !== undefined) e.textContent = str;
+        return e;
+      }
+
+      function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+
+      // Only what the page shows, in the types it expects, whatever arrives.
+      function cleanStatus(s) {
+        function str(v, max) {
+          return typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').substring(0, max) : '';
+        }
+        function num(v) { return typeof v === 'number' && isFinite(v) && v >= 0 ? Math.floor(v) : 0; }
+        function names(v) {
+          return Array.isArray(v) ? v.slice(0, 64).map(function(n) { return str(n, 32); }) : [];
+        }
+        if (!s || typeof s !== 'object') return null;
+        var games = (Array.isArray(s.games) ? s.games : []).slice(0, 64).filter(function(g) {
+          return g && typeof g === 'object';
+        }).map(function(g) {
+          return { id: num(g.id), name: str(g.name, 32), game: g.game === 'mots' ? 'mots' : 'jk1',
+                   map: str(g.map, 64), episode: str(g.episode, 64), mod: str(g.mod, 64),
+                   locked: !!g.locked, players: num(g.players), max: num(g.max), names: names(g.names) };
+        });
+        var lobby = names(s.lobby);
+        var by = s.byGame && typeof s.byGame === 'object' ? s.byGame : {};
+        var byGame = {};
+        Object.keys(GAME_NAMES).forEach(function(k) {
+          var b = by[k] && typeof by[k] === 'object' ? by[k] : null;
+          var playing = games.reduce(function(n, g) { return n + (g.game === k ? g.players : 0); }, 0);
+          // A lobby that doesn't say which game its players run: they're
+          // counted as Jedi Knight's.
+          var waiting = b ? names(b.lobby) : k === 'jk1' ? lobby : [];
+          byGame[k] = { online: b ? num(b.online) : waiting.length + playing, lobby: waiting };
+        });
+        return { online: num(s.online), lobby: lobby, byGame: byGame, games: games };
+      }
+
+      // One room's part of the status: its game's players and games.
+      function roomStatus(s, key) {
+        if (!s) return null;
+        var game = ROOMS[key].game;
+        return { online: s.byGame[game].online, lobby: s.byGame[game].lobby,
+                 games: s.games.filter(function(g) { return g.game === game; }) };
+      }
+
+      // Takes the lobby's latest status, or null with why there's none:
+      // 'connecting' or 'down'.
+      function lobbyShow(status, state) {
+        lobbyLive.status = status ? cleanStatus(status) : null;
+        lobbyLive.state = lobbyLive.status ? 'live' : (state || 'down');
+        if (lobbyLive.status) lobbyLive.updated = new Date();
+        renderRoomCount();
+        if (room.open) renderRoom();
+      }
+
+      function renderRoomCount() {
+        var s = lobbyLive.status;
+        document.querySelectorAll('[data-room]').forEach(function(b) {
+          var r = roomStatus(s, b.dataset.room);
+          var count = b.querySelector('.count');
+          count.textContent = r ? r.online : '–';
+          count.classList.toggle('busy', !r);
+          b.querySelector('.game-count').textContent = r ? plural(r.games.length, 'game', 'games') : '';
+        });
+        var total = document.getElementById('total-players');
+        if (s)
+          total.replaceChildren(el('b', null, String(s.online)), document.createTextNode(' Total Players'));
+        else
+          total.textContent = lobbyLive.state === 'down' ? 'Live counts unavailable' : '';
+      }
+
+      var LOCK_SVG = '<svg class="table-lock" viewBox="0 0 10 12" role="img" aria-label="Password">' +
+                     '<rect x="1" y="5" width="8" height="7" rx="1" fill="#ffcc66"/>' +
+                     '<path d="M3 5V3.5a2 2 0 0 1 4 0V5" fill="none" stroke="#ffcc66" stroke-width="1.5"/></svg>';
+
+      function gameNumber(i) { return 'Game ' + (i + 1); }
+
+      function isFull(g) { return g.max > 0 && g.players >= g.max; }
+
+      // The dots around a table's button: one per seat, filled when taken.
+      function seatDots(ring, taken, seats) {
+        if (seats < 1 || seats > ROOM_MAX_SEATS) return;
+        for (var k = 0; k < seats; k++) {
+          var a = (-115 + (seats > 1 ? k * 125 / (seats - 1) : 62)) * Math.PI / 180;
+          var dot = el('span', 'seat' + (k < taken ? ' taken' : ''));
+          dot.style.left = (50 + 40 * Math.cos(a)).toFixed(1) + 'px';
+          dot.style.top = (50 + 40 * Math.sin(a)).toFixed(1) + 'px';
+          dot.setAttribute('aria-hidden', 'true');
+          ring.append(dot);
+        }
+      }
+
+      function gameTable(g, i) {
+        var li = el('li', 'table');
+        var no = gameNumber(i);
+        var full = isFull(g);
+        var head = el('div', 'table-head');
+        var line = el('div', 'table-line');
+        line.append(el('b', 'table-no', no));
+        if (g.locked) line.insertAdjacentHTML('beforeend', LOCK_SVG);
+        var seats = el('span', 'table-seats');
+        var shown = el('span', null, g.max ? g.players + '/' + g.max : String(g.players));
+        shown.setAttribute('aria-hidden', 'true');
+        seats.append(shown, el('span', 'sr', g.players + (g.max ? ' of ' + g.max : '') + ' players'));
+        if (lobbyLive.seen[g.id] !== undefined && lobbyLive.seen[g.id] !== g.players) seats.classList.add('changed');
+        line.append(seats);
+        head.append(line);
+        var title = el('div', 'table-line');
+        title.append(el('span', 'table-title', g.name || '(no name)'));
+        head.append(title);
+        li.append(head);
+
+        var info = el('details', 'table-info');
+        info.dataset.key = 'info-' + g.id;
+        var summary = el('summary', null, 'Info');
+        summary.dataset.key = 'sum-' + g.id;
+        var dl = el('dl');
+        [['Game', g.game === 'mots' ? 'Mysteries of the Sith' : 'Jedi Knight'],
+         ['Map', g.map || 'Unknown'], ['Episode', g.episode || 'Unknown'],
+         ['Mod', g.mod || 'None'], ['Password', g.locked ? 'Yes' : 'No']].forEach(function(row) {
+          dl.append(el('dt', null, row[0]), el('dd', null, row[1]));
+        });
+        info.append(summary, dl);
+        li.append(info);
+
+        var body = el('div', 'table-body');
+        var ring = el('div', 'ring');
+        seatDots(ring, g.players, g.max);
+        var button = el('button', 'round');
+        button.type = 'button';
+        if (full) {
+          button.disabled = true;
+          button.setAttribute('aria-label', no + ' is full');
+        } else {
+          button.append(el('span', null, 'Join'));
+          button.setAttribute('aria-label', 'Join ' + no);
+          button.dataset.join = g.id;
+          button.dataset.label = no;
+          button.dataset.key = 'join-' + g.id;
+        }
+        ring.append(button);
+        body.append(ring, playerList(g));
+        li.append(body);
+
+        var open = g.max - g.players;
+        li.append(el('p', 'table-state' + (full ? ' full' : ''),
+                     full ? 'Game Is Full' : (g.max ? plural(open, 'seat open', 'seats open') : '')));
+        return li;
+      }
+
+      // Host first, as many names as fit, then how many more. A player whose
+      // name the lobby doesn't have (an older game) still takes a line.
+      function playerList(g) {
+        var ul = el('ul', 'table-players');
+        var names = g.names.slice();
+        while (names.length < g.players) names.push(null);
+        var shown = names.length > ROOM_MAX_NAMES ? ROOM_MAX_NAMES - 1 : names.length;
+        names.slice(0, shown).forEach(function(n, k) {
+          var li = el('li', n ? null : 'unnamed', n || 'Player');
+          if (k === 0) li.append(el('span', 'host-tag', 'host'));
+          ul.append(li);
+        });
+        if (names.length > shown) ul.append(el('li', 'more', '+' + (names.length - shown) + ' more'));
+        return ul;
+      }
+
+      function emptyTable(i) {
+        var li = el('li', 'table empty');
+        var head = el('div', 'table-head');
+        var line = el('div', 'table-line');
+        line.append(el('b', 'table-no', gameNumber(i)));
+        head.append(line, el('div', 'table-line', ' '));
+        li.append(head);
+        var body = el('div', 'table-body');
+        var ring = el('div', 'ring');
+        var button = el('button', 'round host');
+        button.type = 'button';
+        button.append(el('span', null, 'Host'));
+        button.setAttribute('aria-label', 'Host a game');
+        button.dataset.act = 'host';
+        button.dataset.key = 'host-' + i;
+        ring.append(button);
+        body.append(ring);
+        li.append(body, el('p', 'table-state', 'Open table'));
+        return li;
+      }
+
+      // Open tables fill out the last row, and there's always one to host at.
+      function fillTables(force) {
+        var ul = roomGames.querySelector('.tables');
+        if (!ul) return;
+        var cols = getComputedStyle(ul).gridTemplateColumns.split(' ').filter(Boolean).length || 1;
+        if (cols === lobbyLive.cols && !force) return;
+        lobbyLive.cols = cols;
+        ul.querySelectorAll('.table.empty').forEach(function(e) { e.remove(); });
+        var n = ul.children.length;
+        var slots = Math.max(cols, Math.ceil((n + 1) / cols) * cols);
+        for (var i = n; i < slots; i++) ul.append(emptyTable(i));
+      }
+
+      function gameList(games) {
+        var wrap = el('div', 'list-scroll');
+        var table = el('table', 'game-list');
+        var head = el('tr');
+        ['Game', 'Name', 'Players', 'Map', 'Mod', "Who's playing", ''].forEach(function(h) {
+          head.append(el('th', null, h));
+        });
+        var thead = el('thead');
+        thead.append(head);
+        var tbody = el('tbody');
+        games.forEach(function(g, i) {
+          var tr = el('tr');
+          var no = gameNumber(i);
+          var name = el('td', null, g.name || '(no name)');
+          if (g.locked) name.insertAdjacentHTML('beforeend', ' ' + LOCK_SVG);
+          var names = g.names.filter(Boolean);
+          var action = el('td');
+          if (isFull(g)) {
+            action.textContent = 'Full';
+          } else {
+            var b = el('button', 'zone-button', 'Join');
+            b.type = 'button';
+            b.setAttribute('aria-label', 'Join ' + no);
+            b.dataset.join = g.id;
+            b.dataset.label = no;
+            b.dataset.key = 'join-' + g.id;
+            action.append(b);
+          }
+          tr.append(el('td', 'num', no), name,
+                    el('td', 'num', g.max ? g.players + '/' + g.max : String(g.players)),
+                    el('td', null, g.map || 'Unknown'), el('td', null, g.mod || 'None'),
+                    el('td', null, names.length ? names.join(', ') : '–'), action);
+          tbody.append(tr);
+        });
+        table.append(thead, tbody);
+        wrap.append(table);
+        return wrap;
+      }
+
+      function renderRoster() {
+        var s = roomStatus(lobbyLive.status, lobbyLive.room);
+        roster.replaceChildren(el('div', 'roster-head', "Who's on"));
+        function section(title, count, rows, none) {
+          var sec = el('section');
+          var h = el('h2', null, title);
+          h.append(el('span', null, count));
+          sec.append(h);
+          if (rows) {
+            var ul = el('ul');
+            rows.forEach(function(r) {
+              var li = el('li');
+              li.append(el('span', null, r[0]));
+              if (r[1]) li.append(el('span', 'where', r[1]));
+              ul.append(li);
+            });
+            if (!rows.length && none) ul.append(el('li', 'none', none));
+            sec.append(ul);
+          }
+          roster.append(sec);
+        }
+        if (!s) {
+          section('In this room', '–');
+          return;
+        }
+        var playing = [];
+        var inGames = 0;
+        s.games.forEach(function(g, i) {
+          inGames += g.players;
+          g.names.forEach(function(n) { if (n) playing.push([n, gameNumber(i)]); });
+        });
+        var inLobby = Math.max(0, s.online - inGames);
+        var lobbyRows = s.lobby.filter(Boolean).map(function(n) { return [n]; });
+        if (lobbyRows.length < inLobby) lobbyRows.push(['+' + (inLobby - lobbyRows.length) + ' without a name']);
+        if (playing.length < inGames) playing.push(['+' + (inGames - playing.length) + ' without a name']);
+        section('In this room', String(s.online));
+        section('In the lobby', String(inLobby), lobbyRows, 'Nobody');
+        section('Playing', String(inGames), playing, 'Nobody');
+      }
+
+      function renderRoomStatus() {
+        var s = roomStatus(lobbyLive.status, lobbyLive.room);
+        var dot = document.getElementById('room-live-dot');
+        dot.classList.toggle('on', !!s);
+        document.getElementById('room-live').textContent =
+          s ? 'Live' : (lobbyLive.state === 'down' ? 'Not connected' : 'Connecting');
+        var summary = document.getElementById('room-summary');
+        if (s) {
+          summary.textContent = 'Updated ' + lobbyLive.updated.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) +
+                                ' · ' + plural(s.games.length, 'game', 'games') + ' · ' + plural(s.online, 'player', 'players');
+        } else {
+          summary.textContent = lobbyLive.state === 'down' ? 'Trying again' : 'Waiting for the lobby';
+        }
+      }
+
+      function renderRoom() {
+        var s = roomStatus(lobbyLive.status, lobbyLive.room);
+        document.getElementById('room-title').textContent = ROOMS[lobbyLive.room].title;
+        // A redraw keeps what has focus and which Info panels are open.
+        var active = document.activeElement;
+        var focusKey = active && roomGames.contains(active) ? active.dataset.key : null;
+        var openInfo = Array.from(roomGames.querySelectorAll('details[open]')).map(function(d) { return d.dataset.key; });
+        roomGames.replaceChildren();
+        if (!s) {
+          roomGames.append(el('p', 'room-message', lobbyLive.state === 'down' ?
+            "Live counts unavailable: the lobby isn't answering right now, so the games can't be listed here. " +
+            'You can still start the game, choose Multiplayer, then Join.' : 'Connecting to the lobby…'));
+        } else {
+          if (!s.games.length)
+            roomGames.append(el('p', 'room-message', 'No games right now. Host one and it shows up here for everyone.'));
+          if (lobbyLive.view === 'list') {
+            if (s.games.length) roomGames.append(gameList(s.games));
+          } else {
+            var ul = el('ul', 'tables');
+            s.games.forEach(function(g, i) { ul.append(gameTable(g, i)); });
+            roomGames.append(ul);
+          }
+          lobbyLive.seen = {};
+          s.games.forEach(function(g) { lobbyLive.seen[g.id] = g.players; });
+        }
+        lobbyLive.cols = 0;
+        fillTables(true);
+        openInfo.forEach(function(k) {
+          var d = roomGames.querySelector('details[data-key="' + k + '"]');
+          if (d) d.open = true;
+        });
+        if (focusKey) {
+          var f = roomGames.querySelector('[data-key="' + focusKey + '"]');
+          if (f) f.focus();
+        }
+        room.querySelectorAll('[data-view]').forEach(function(b) {
+          b.setAttribute('aria-pressed', String(b.dataset.view === lobbyLive.view));
+        });
+        renderRoster();
+        renderRoomStatus();
+      }
+
+      function openRoom(key) {
+        if (!Object.prototype.hasOwnProperty.call(ROOMS, key)) return;
+        if (lobbyLive.room !== key) lobbyLive.seen = {};
+        lobbyLive.room = key;
+        roomNote.hidden = true;
+        if (!room.open) room.showModal();
+        renderRoom();
+      }
+
+      var roomNoteTimer = null;
+      function showRoomNote(text) {
+        roomNote.textContent = text;
+        roomNote.hidden = false;
+        clearTimeout(roomNoteTimer);
+        roomNoteTimer = setTimeout(function() { roomNote.hidden = true; }, 10000);
+      }
+
+      // Quick Join picks the open game with the most players, without a password.
+      function quickJoinGame() {
+        var s = roomStatus(lobbyLive.status, lobbyLive.room);
+        var best = null, bestIndex = -1;
+        (s ? s.games : []).forEach(function(g, i) {
+          if (!isFull(g) && !g.locked && (!best || g.players > best.players)) { best = g; bestIndex = i; }
+        });
+        return best ? { id: best.id, label: gameNumber(bestIndex) } : null;
+      }
+
+      // Join and Host start the room's game the way its other rooms do.
+      // Joining hands the engine the room to select on its Join screen
+      // (Module.jkJoinRoom).
+      function roomAction(kind, id, label) {
+        // lobbyRoom: Quit comes back to this room window (jkQuitToLobby).
+        var want = { game: ROOMS[lobbyLive.room].game, room: ROOMS[lobbyLive.room].name, lobbyRoom: lobbyLive.room };
+        var quick = kind === 'quick-join';
+        if (quick) {
+          var pick = quickJoinGame();
+          kind = 'join';
+          id = pick ? pick.id : 0;
+          label = pick ? pick.label : '';
+        }
+        if (window.jkLobbyMock) {
+          showRoomNote(window.jkLobbyMock.describe(kind, label, quick, want));
+          return;
+        }
+        // A Join that was closed before picking a folder doesn't carry over.
+        if (kind === 'join' && id) Module.jkJoinRoom = Number(id);
+        else delete Module.jkJoinRoom;
+        room.close();
+        openPicker(want);
+      }
+
+      roomGames.addEventListener('click', function(ev) {
+        var join = ev.target.closest('[data-join]');
+        if (join) return roomAction('join', join.dataset.join, join.dataset.label);
+        if (ev.target.closest('[data-act=host]')) roomAction('host');
+      });
+      room.querySelector('[data-act=host]').addEventListener('click', function() { roomAction('host'); });
+      room.querySelector('[data-act=join]').addEventListener('click', function() { roomAction('quick-join'); });
+      room.querySelectorAll('[data-view]').forEach(function(b) {
+        b.addEventListener('click', function() {
+          lobbyLive.view = b.dataset.view;
+          try { localStorage.setItem('jkdf2mp-room-view', lobbyLive.view); } catch (e) {}
+          renderRoom();
+        });
+      });
+      room.querySelector('.close').addEventListener('click', function() { room.close(); });
+      document.querySelectorAll('[data-room]').forEach(function(b) {
+        b.addEventListener('click', function() { openRoom(b.dataset.room); });
+      });
+      if (typeof ResizeObserver === 'function') {
+        new ResizeObserver(function() { if (room.open) fillTables(); }).observe(roomGames);
+      }
+
+      // The page watches the lobby while the landing page shows; the game
+      // keeps its own connection once it runs.
+      var lobbyWatch = null;
+
+      function startLobbyWatch() {
+        if (lobbyWatch) return;
+        if (!/^https?:$/.test(location.protocol)) {
+          lobbyShow(null, 'down');
+          return;
+        }
+        var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/relay';
+        var w = lobbyWatch = { ws: null, retry: null, keepalive: null, delay: 2000, stopped: false };
+        function connect() {
+          w.retry = null;
+          var ws;
+          try {
+            ws = w.ws = new WebSocket(url);
+          } catch (e) {
+            lobbyShow(null, 'down');
+            return;
+          }
+          ws.onopen = function() {
+            ws.send('watch');
+            w.keepalive = setInterval(function() { if (ws.readyState === 1) ws.send('ping'); }, 25000);
+          };
+          ws.onmessage = function(ev) {
+            if (typeof ev.data !== 'string') return;
+            var m = /^status ([A-Za-z0-9+\/]+={0,2})$/.exec(ev.data);
+            if (m) {
+              try {
+                var bytes = Uint8Array.from(atob(m[1]), function(c) { return c.charCodeAt(0); });
+                lobbyShow(JSON.parse(new TextDecoder().decode(bytes)));
+                w.delay = 2000;
+              } catch (e) {
+                console.warn('OpenJKDF2: could not read the lobby status: ' + e);
+              }
+            } else if (/^error /.test(ev.data)) {
+              // A lobby without live counts: ask again much later.
+              w.delay = 5 * 60 * 1000;
+              ws.close();
+            }
+          };
+          ws.onclose = function() {
+            clearInterval(w.keepalive);
+            if (w.ws !== ws) return;
+            w.ws = null;
+            lobbyShow(null, 'down');
+            if (!w.stopped) {
+              w.retry = setTimeout(connect, w.delay);
+              w.delay = Math.min(w.delay * 2, 5 * 60 * 1000);
+            }
+          };
+        }
+        connect();
+      }
+
+      function stopLobbyWatch() {
+        var w = lobbyWatch;
+        if (!w) return;
+        w.stopped = true;
+        clearTimeout(w.retry);
+        clearInterval(w.keepalive);
+        if (w.ws) {
+          var ws = w.ws;
+          w.ws = null;
+          try { ws.close(); } catch (e) {}
+        }
+      }
+
+      // Fullscreen. Browsers show their own "has control of your pointer"
+      // notice each time the game locks the mouse, and no page can hide it.
+      // Firefox leaves it out while the page is fullscreen, and Chrome folds it
+      // into its fullscreen notice. Keyboard lock also gives Esc (JK's menu key)
+      // to the game instead of the browser; holding Esc leaves fullscreen.
+      // Browsers only allow fullscreen right after a click or key press, so it
+      // starts on the first one in the game, and again after leaving it.
+      var FULLSCREEN_SETTING = 'jkdf2mp-fullscreen';
+      var fullscreenOption = document.getElementById('fullscreen-option');
+      try { fullscreenOption.checked = localStorage.getItem(FULLSCREEN_SETTING) !== 'off'; } catch (e) {}
+      fullscreenOption.addEventListener('change', function() {
+        try { localStorage.setItem(FULLSCREEN_SETTING, fullscreenOption.checked ? 'on' : 'off'); } catch (e) {}
+      });
+
+      function playFullscreen() {
+        if (!fullscreenOption.checked || document.fullscreenElement || !document.fullscreenEnabled) return;
+        if (!document.getElementById('zone').hidden || document.querySelector('dialog[open]')) return;
+        // Chrome and Edge give Esc to the page this way, only in fullscreen the
+        // page asked for. Firefox and Safari use keyboardLock below instead.
+        if (navigator.keyboard && navigator.keyboard.lock)
+          navigator.keyboard.lock(['Escape']).catch(function() {});
+        var request;
+        try {
+          request = document.documentElement.requestFullscreen({ keyboardLock: 'browser' });
+        } catch (e) { return; }
+        if (request && request.catch) request.catch(function() {});
+      }
+      window.addEventListener('pointerdown', function(ev) {
+        if (ev.target === Module.canvas) playFullscreen();
+      }, true);
+      window.addEventListener('keydown', function(ev) {
+        // Not Esc, which can't start fullscreen, nor Alt, Ctrl, Shift or Windows
+        // on their own or in a shortcut, so Alt+Tab doesn't go fullscreen on the
+        // way out.
+        if (ev.key === 'Escape' || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+        if (/^(Alt|Control|Shift|Meta|OS|F\d+)$/.test(ev.key)) return;
+        playFullscreen();
+      }, true);
+
+      var hideZoneBeforeLobby = hideZone;
+      hideZone = function() {
+        stopLobbyWatch();
+        if (room.open) room.close();
+        hideZoneBeforeLobby();
+      };
+
+      if (document.documentElement.classList.contains('zone-open')) {
+        renderRoomCount();
+        if (window.jkLobbyMock)
+          window.jkLobbyMock.attach(lobbyShow);
+        else
+          startLobbyWatch();
+        openRoom(location.hash.substring(1));
+      }
+      window.addEventListener('hashchange', function() {
+        if (document.documentElement.classList.contains('zone-open')) openRoom(location.hash.substring(1));
+      });
+    </script>
+  </body>
+</html>
+
+
