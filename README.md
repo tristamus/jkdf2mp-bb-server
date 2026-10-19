@@ -29,6 +29,8 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-22/`: `cloudflare-21` with Nar Shaddaa for Jedi Knight and Sith: Asteroid for MotS, each with its own live counts and room window, and a Join screen that lists only games you can join.
 - `cloudflare-23/`: `cloudflare-22` with a lobby that ends a game whose host vanished without closing, after 2 minutes without its keepalive.
 - `cloudflare-24/`: `cloudflare-23` with no more spawning in a death pose after joining a dead player's slot, and a quick rejoin that gets in.
+- `cloudflare-25/`: `cloudflare-24` with the game going fullscreen instead of the browser's pointer notice, and Esc reaching the game's menu.
+- `cloudflare-26/`: `cloudflare-25` with notices when graphics acceleration is off or Edge's enhanced security slows the game, F8 for screenshots, and a prompt before the tab closes mid-game.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
