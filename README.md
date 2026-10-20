@@ -35,6 +35,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-28/`: `cloudflare-27` with a faster start after picking the game folder, reading only the files the game opens.
 - `cloudflare-29/`: `cloudflare-28` with the mouse wheel bindable to any action, like a mouse button.
 - `cloudflare-30/`: `cloudflare-29` with the game files saved in the browser after the first pick, so later visits start without picking the folder.
+- `cloudflare-31/`: `cloudflare-30` with Insert, Num Lock and the Menu key bindable, a held Page Up or \ that stays held, browser shortcuts kept out of game keys, and the console only on Ctrl+Shift+`.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
