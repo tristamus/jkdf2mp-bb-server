@@ -1,7 +1,8 @@
 # cloudflare-31
 
-`cloudflare-30` with the page and engine from OpenJKDF2 commit 0e9a3cc1 (`web-mp` with
-tristamus/OpenJKDF2#40 merged on top of 24a9ea5b, the source of `cloudflare-30`).
+`cloudflare-30` with the page and engine from OpenJKDF2 commit 6a6b73d1 (`web-mp` with
+tristamus/OpenJKDF2#40, #41 and #39 merged on top of 24a9ea5b, the source of `cloudflare-30`).
+Before its first deploy, the engine was rebuilt to carry #41 and #39 too.
 
 - **Every key binds and works:** Insert, Num Lock and the Menu key reach the game and can be
   bound. Insert, the Controls screen's Add shortcut, no longer binds itself. A held Page Up or \
@@ -17,6 +18,11 @@ tristamus/OpenJKDF2#40 merged on top of 24a9ea5b, the source of `cloudflare-30`)
   load.
 - **Key check:** `index.html?keycheck` lists each key pressed with the game's name for it, what it's
   bound to, what it did in a level, and whether the browser acted on it too.
+- **MotS saber blades (#41):** other players' lit sabers show their blade, not just the glow at
+  the hilt.
+- **Force Pull (#39):** a weapon pulled from another player's hands flies to the puller again, in
+  JK and MotS, and everyone sees it. In MotS, an item the host picks up also disappears for the
+  other players.
 
 `index.html`, `openjkdf2.js` and `openjkdf2.wasm` changed; the engine keeps the mouse wheel binds of
 `cloudflare-29` and the page keeps the saved game files of `cloudflare-30`. The lobby
