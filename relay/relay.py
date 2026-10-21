@@ -12,11 +12,14 @@ binary frames are game packets:
 
   client -> relay   list [<game>] | host <entry> | update <entry> | join <room>
                     welcome <id> <entry> | leave | signal <id> <data> | ping
-                    hello <game> <name> | watch
+                    hello <game> <name> | watch | rejoin <room> <id> <key>
+                    rehost <room> <key> [<entry>]
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
                     host-left | error <code> | signal <id> <data> | ice <data>
-                    status <data>
+                    status <data> | seat <room> <id> <key> | rejoined <room> <id>
+                    rehosted <room> | peer-lost <id> | peer-back <id>
+                    host-lost | host-back
 
 list jk1 or list mots lists only the games that game can join: it leaves out
 those whose host said hello as the other one. <entry> is the host's
@@ -38,6 +41,21 @@ game's details from its entry (a jkMultiEntry, then the mod tail from mods.js),
 and never sends its password, only whether it has one. A player is a
 connection that said hello or is in a room; watching pages don't count.
 
+Game packets go over WebRTC once a player's link is up, so a socket that
+drops mid-game (a network blip, or the lobby restarting) needn't end the
+match. Each seat in a room has a key, 32 hex digits sent to its player with
+seat after hosted or joining. A seat whose socket closes without leave, or
+goes quiet, is held for --hold seconds: the host hears peer-lost <id>, or the
+clients host-lost, and peer-back or host-back once the player takes the seat
+back on a new socket with rejoin <room> <id> <key> (answered rejoined) or, the
+host, rehost <room> <key> [<entry>] (answered rehosted). A rejoin replaces the
+seat's old socket if that hasn't closed yet. A wrong key or a seat that's gone
+gets error no-seat. A seat nobody takes back ends as before: peer-left for a
+client, host-left to every client for the host. While its host is away a room
+is left out of list and can't be joined. leave still ends a seat at once.
+This relay keeps its rooms in memory, so they end when it restarts;
+cloudflare/src/lobby.js keeps them in storage.
+
 Game packets start with a little-endian u32 idFrom and u32 idTo. The host is
 id 1 and clients get 2..64, as with OpenJKDF2's GNS backend. A packet goes to
 the player named in idTo (to the host when idTo is 0 or 1) and is dropped if
@@ -58,6 +76,7 @@ import http.server
 import json
 import os
 import re
+import secrets
 import socket
 import struct
 import threading
@@ -84,6 +103,11 @@ MAX_STATUS_NAMES = 64
 # player and game come off the lists. Background tabs may only ping once a
 # minute. Same as QUIET_MS in cloudflare/src/lobby.js.
 QUIET_S = 120
+# How long a dropped player's seat waits for them to take it back (--hold).
+# The game reconnects after 1 s, then 2, 4 and every 5 s. Same as HOLD_MS in
+# cloudflare/src/lobby.js.
+HOLD_S = 60
+KEY_RE = re.compile(r"^[0-9a-f]{32}$")
 # Control and invisible characters (bidi overrides among them) never reach a page.
 HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 
@@ -125,16 +149,36 @@ class Conn:
         return "%s:%d" % (self.addr[0], self.addr[1])
 
 
+class Seat:
+    """A player's place in a room, which its key takes back. until, name and
+    game are only set while it's held."""
+
+    def __init__(self):
+        self.key = secrets.token_hex(16)
+        self.until = None
+        self.name = None
+        self.game = ""
+
+
 class Room:
     def __init__(self, room_id, host, entry):
         self.id = room_id
-        self.host = host
+        self.host = host  # None while the host's seat is held
         self.entry = entry
         self.peers = {}
+        self.seats = {1: Seat()}
+
+    def seated(self):
+        """The room's players by id, the host first, held seats too: (id, conn or None, seat)."""
+        held = [(i, None, s) for i, s in self.seats.items() if s.until]
+        live = ([(1, self.host, self.seats.get(1))] if self.host else []) + \
+            [(i, c, self.seats.get(i)) for i, c in self.peers.items()]
+        return sorted(live + held, key=lambda t: t[0])
 
 
 class Relay:
-    def __init__(self):
+    def __init__(self, hold=HOLD_S):
+        self.hold = hold
         self.lock = threading.Lock()
         self.rooms = {}
         self.next_room = 1
@@ -158,8 +202,8 @@ class Relay:
         with self.lock:
             if op == "list":
                 want = args[0] if args and args[0] in GAMES else None
-                games = ["%d %d %s" % (r.id, 1 + len(r.peers), r.entry) for r in self.rooms.values()
-                         if not want or not r.host.game or r.host.game == want]
+                games = ["%d %d %s" % (r.id, len(r.seated()), r.entry) for r in self.rooms.values()
+                         if r.host and (not want or not r.host.game or r.host.game == want)]
                 outbox.append((conn, OP_TEXT, " ".join(["list"] + games).encode()))
             elif op == "host" and len(args) == 1 and valid_entry(args[0]):
                 self._leave(conn, outbox)
@@ -168,6 +212,7 @@ class Relay:
                 self.rooms[room.id] = room
                 conn.room, conn.id = room, 1
                 outbox.append((conn, OP_TEXT, b"hosted %d" % room.id))
+                outbox.append((conn, OP_TEXT, ("seat %d 1 %s" % (room.id, room.seats[1].key)).encode()))
                 log("room %d opened by %s" % (room.id, conn.addr_name()))
                 self._status_changed(outbox)
             elif op == "update" and len(args) == 1 and valid_entry(args[0]):
@@ -177,16 +222,20 @@ class Relay:
             elif op == "join" and len(args) == 1 and args[0].isdigit():
                 self._leave(conn, outbox)
                 room = self.rooms.get(int(args[0]))
-                if not room:
+                # Not while its host is away: nobody would welcome them.
+                if not room or not room.host:
                     outbox.append((conn, OP_TEXT, b"error no-room"))
                 else:
-                    peer_id = next((i for i in range(FIRST_PEER_ID, LAST_PEER_ID + 1) if i not in room.peers), None)
+                    peer_id = next((i for i in range(FIRST_PEER_ID, LAST_PEER_ID + 1)
+                                    if i not in room.peers and i not in room.seats), None)
                     if peer_id is None:
                         outbox.append((conn, OP_TEXT, b"error full"))
                     else:
                         room.peers[peer_id] = conn
+                        room.seats[peer_id] = Seat()
                         conn.room, conn.id = room, peer_id
                         outbox.append((room.host, OP_TEXT, b"peer-joined %d" % peer_id))
+                        outbox.append((conn, OP_TEXT, ("seat %d %d %s" % (room.id, peer_id, room.seats[peer_id].key)).encode()))
                         log("room %d: %s joined as id %d" % (room.id, conn.addr_name(), peer_id))
                 self._status_changed(outbox)
             elif op == "welcome" and len(args) == 2 and args[0].isdigit() and valid_entry(args[1]):
@@ -205,6 +254,11 @@ class Relay:
                         target = room.host if to == 1 else None
                     if target:
                         outbox.append((target, OP_TEXT, ("signal %d %s" % (conn.id, args[1])).encode()))
+            elif op == "rejoin" and len(args) == 3 and args[0].isdigit() and args[1].isdigit() and KEY_RE.match(args[2]):
+                self._take_seat(conn, int(args[0]), int(args[1]), args[2], None, outbox)
+            elif op == "rehost" and len(args) in (2, 3) and args[0].isdigit() and KEY_RE.match(args[1]) and \
+                    (len(args) == 2 or valid_entry(args[2])):
+                self._take_seat(conn, int(args[0]), 1, args[1], args[2] if len(args) == 3 else "", outbox)
             elif op == "leave":
                 self._leave(conn, outbox)
                 self._status_changed(outbox)
@@ -242,7 +296,7 @@ class Relay:
     def disconnect(self, conn):
         outbox = []
         with self.lock:
-            self._leave(conn, outbox)
+            self._drop(conn, outbox)
             self.conns.discard(conn)
             self._status_changed(outbox)
         self.deliver(outbox)
@@ -259,9 +313,10 @@ class Relay:
             info = read_entry(room.entry)
             if not info:
                 continue
-            names = [room.host.name or ""] + [room.peers[i].name or "" for i in sorted(room.peers)]
+            host = room.host or room.seats[1]
+            names = [((host if i == 1 else c) if c else s).name or "" for i, c, s in room.seated()]
             online += len(names)
-            game = room.host.game or guess_game(info["episode"])
+            game = host.game or guess_game(info["episode"])
             by_game[game]["online"] += len(names)
             games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
                               mod=info["mod"], locked=info["locked"], players=len(names), max=info["max"],
@@ -300,16 +355,94 @@ class Relay:
         if not room:
             return
         if room.host is conn:
-            del self.rooms[room.id]
-            for peer in room.peers.values():
-                peer.room, peer.id = None, 0
-                outbox.append((peer, OP_TEXT, b"host-left"))
+            self._end_room(room, outbox)
             log("room %d closed" % room.id)
-        else:
-            room.peers.pop(conn.id, None)
-            outbox.append((room.host, OP_TEXT, b"peer-left %d" % conn.id))
+        elif room.peers.get(conn.id) is conn:
+            del room.peers[conn.id]
+            room.seats.pop(conn.id, None)
+            if room.host:
+                outbox.append((room.host, OP_TEXT, b"peer-left %d" % conn.id))
             log("room %d: id %d left" % (room.id, conn.id))
         conn.room, conn.id = None, 0
+
+    # A socket that closed without leave or went quiet: its seat is held for
+    # its player to take back (_take_seat).
+    def _drop(self, conn, outbox):
+        room = conn.room
+        seat = room and self.rooms.get(room.id) is room and room.seats.get(conn.id)
+        if not seat or conn is not (room.host if conn.id == 1 else room.peers.get(conn.id)):
+            self._leave(conn, outbox)
+            return
+        seat.until, seat.name, seat.game = time.monotonic() + self.hold, conn.name, conn.game
+        if conn.id == 1:
+            room.host = None
+            outbox.extend((peer, OP_TEXT, b"host-lost") for peer in room.peers.values())
+        else:
+            del room.peers[conn.id]
+            if room.host:
+                outbox.append((room.host, OP_TEXT, b"peer-lost %d" % conn.id))
+        log("room %d: id %d dropped, seat held" % (room.id, conn.id))
+        timer = threading.Timer(self.hold, self._expire, (room, conn.id, seat))
+        timer.daemon = True
+        timer.start()
+        conn.room, conn.id = None, 0
+
+    # A held seat nobody took back in time ends.
+    def _expire(self, room, seat_id, seat):
+        outbox = []
+        with self.lock:
+            if self.rooms.get(room.id) is not room or room.seats.get(seat_id) is not seat or not seat.until:
+                return
+            if seat_id == 1:
+                self._end_room(room, outbox)
+                log("room %d: the host didn't come back, room closed" % room.id)
+            else:
+                del room.seats[seat_id]
+                if room.host:
+                    outbox.append((room.host, OP_TEXT, b"peer-left %d" % seat_id))
+                log("room %d: id %d didn't come back" % (room.id, seat_id))
+            self._status_changed(outbox)
+        self.deliver(outbox)
+
+    # rejoin and rehost: a player takes its seat back with its key, held or
+    # not (the old socket may not have closed yet, and is replaced). A rehost
+    # may bring the room's entry, in case it changed meanwhile.
+    def _take_seat(self, conn, room_id, seat_id, key, entry, outbox):
+        room = self.rooms.get(room_id)
+        seat = room and room.seats.get(seat_id)
+        if not seat or not hmac.compare_digest(seat.key, key) or (seat_id == 1) != (entry is not None):
+            outbox.append((conn, OP_TEXT, b"error no-seat"))
+            return
+        old = room.host if seat_id == 1 else room.peers.get(seat_id)
+        if old is not conn:
+            self._leave(conn, outbox)
+            if old:
+                old.room, old.id = None, 0
+                outbox.append((old, OP_CLOSE, struct.pack("!H", 4001) + b"replaced"))
+        was_held = bool(seat.until)
+        seat.until, seat.name, seat.game = None, None, ""
+        if seat_id == 1:
+            room.host = conn
+            if entry:
+                room.entry = entry
+        else:
+            room.peers[seat_id] = conn
+        conn.room, conn.id = room, seat_id
+        outbox.append((conn, OP_TEXT, (b"rehosted %d" % room.id) if seat_id == 1
+                       else (b"rejoined %d %d" % (room.id, seat_id))))
+        if was_held and seat_id == 1:
+            outbox.extend((peer, OP_TEXT, b"host-back") for peer in room.peers.values())
+        elif was_held and room.host:
+            outbox.append((room.host, OP_TEXT, b"peer-back %d" % seat_id))
+        log("room %d: id %d took its seat back" % (room.id, seat_id))
+        self._status_changed(outbox)
+
+    # Ends a room: its players are told the host left.
+    def _end_room(self, room, outbox):
+        self.rooms.pop(room.id, None)
+        for peer in room.peers.values():
+            peer.room, peer.id = None, 0
+            outbox.append((peer, OP_TEXT, b"host-left"))
 
 
 def valid_entry(text):
@@ -567,9 +700,11 @@ def main():
     parser.add_argument("--turn-user", help="fixed TURN username (when there's no --turn-secret)")
     parser.add_argument("--turn-pass", help="fixed TURN password (when there's no --turn-secret)")
     parser.add_argument("--turn-ttl", type=int, default=12 * 3600, help="TURN login lifetime in seconds")
+    parser.add_argument("--hold", type=float, default=HOLD_S,
+                        help="seconds a dropped player's seat waits for them to come back")
     args = parser.parse_args()
 
-    Handler.relay = Relay()
+    Handler.relay = Relay(args.hold)
     Handler.ice = IceConfig(args.stun, args.turn, args.turn_secret, args.turn_user, args.turn_pass, args.turn_ttl)
     server = http.server.ThreadingHTTPServer((args.host, args.port), functools.partial(Handler, directory=args.dir))
     server.daemon_threads = True

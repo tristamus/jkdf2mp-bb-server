@@ -15,6 +15,11 @@ running at home. It speaks the same protocol, so the same browser build works wi
   that went to sleep), so the lobby ends it: its player comes off the counts, and its game too if it
   was the host. An alarm looks for these once a minute while anyone is connected, which is up to
   1,440 alarm runs a day, and those count as requests.
+- Updating the lobby (`wrangler deploy`) closes every connection, and so can a player's network
+  blip. Neither ends a match any more: game packets go over WebRTC, the lobby keeps a dropped
+  player's seat for 60 seconds (`HOLD_MS`) in storage, and the game reconnects and takes it back
+  with the key the lobby gave it. A seat nobody takes back ends as before. This needs a game built
+  with the seat protocol; older builds still leave the match when their connection drops.
 - The landing page's live counts come from the lobby too: each running game sends its player's name
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.
@@ -43,5 +48,8 @@ npx wrangler deploy
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/index.html instead.
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
-while nobody is hosting. It plays out hosting, joining, signaling, packet routing and leaving with
-plain WebSocket clients and compares the transcript with the one `wrangler dev` gives.
+while nobody is hosting. It plays out hosting, joining, signaling, packet routing, leaving, and
+seats being held, taken back and running out, with plain WebSocket clients, and compares the
+transcript with the one `wrangler dev` gives. It waits once for held seats to run out, about a
+minute against a deployed lobby. Against `npx wrangler dev --var HOLD_MS:3000`, run it with
+`HOLD_MS=3000` to make that wait short.

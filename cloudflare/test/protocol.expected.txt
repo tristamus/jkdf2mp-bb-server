@@ -3,6 +3,7 @@ H -> list
 H <- list
 H -> host abcd
 H <- hosted <room1>
+H <- seat <room1> 1 <key>
 H -> update ab12
 H -> host zz
 H <- error bad-request
@@ -14,11 +15,13 @@ A <- list <room1> 1 ab12
 A -> join 999999
 A <- error no-room
 A -> join <room1>
+A <- seat <room1> 2 <key>
 H <- peer-joined 2
 H -> welcome 2 ab12
 A <- welcome 2 ab12
 B <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
 B -> join <room1>
+B <- seat <room1> 3 <key>
 H <- peer-joined 3
 H -> welcome 3 ab12
 B <- welcome 3 ab12
@@ -47,7 +50,10 @@ A <- list <room1> 3 ab12
 A -> leave
 H <- peer-left 2
 A -> bin
+A -> rejoin <room1> 2 <A's key>
+A <- error no-seat
 A -> join <room1>
+A <- seat <room1> 2 <key>
 H <- peer-joined 2
 H -> leave
 A <- host-left
@@ -58,13 +64,16 @@ B -> bin
 C <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
 C -> host 00
 C <- hosted <room2>
+C <- seat <room2> 1 <key>
 A -> join <room2>
+A <- seat <room2> 2 <key>
 C <- peer-joined 2
 C closes
-A <- host-left
+A <- host-lost
 C closed 1000
 A -> list
 A <- list
+A -> leave
 W <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
 W -> watch
 W <- status ok lobby jk1=[] mots=[] games=[]
@@ -81,13 +90,16 @@ B -> hello jk1 !!
 B <- error bad-request
 H -> host <t_Duel entry>
 H <- hosted <room3>
+H <- seat <room3> 1 <key>
 W <- status ok lobby jk1=["t_B"] mots=["t_Äccent long n"] games=[<room3> "t_Duel" jk1 01narshadda.jkl JK1MP mod="" open 1/4 ["t_Host"]]
 A -> join <room3>
+A <- seat <room3> 2 <key>
 H <- peer-joined 2
 W <- status ok lobby jk1=["t_B"] mots=[] games=[<room3> "t_Duel" jk1 01narshadda.jkl JK1MP mod="" open 2/4 ["t_Host","t_Äccent long n"]]
 H -> update <t_Duel entry on 03katarn.jkl with a password and the t_Sabers mod>
 W <- status ok lobby jk1=["t_B"] mots=[] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP mod="t_Sabers" locked 2/4 ["t_Host","t_Äccent long n"]]
 B -> join <room3>
+B <- seat <room3> 3 <key>
 H <- peer-joined 3
 W <- status ok lobby jk1=[] mots=[] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP mod="t_Sabers" locked 3/4 ["t_Host","t_Äccent long n","t_B"]]
 B -> hello jk1 t_Bee
@@ -98,6 +110,7 @@ W <- status ok lobby jk1=[] mots=["t_Äccent long n"] games=[<room3> "t_Duel" jk
 D <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
 D -> host <t_Sith entry on JKM_MP with the Remastered pack, no hello>
 D <- hosted <room4>
+D <- seat <room4> 1 <key>
 W <- status ok lobby jk1=[] mots=["t_Äccent long n"] games=[<room3> "t_Duel" jk1 03katarn.jkl JK1MP mod="t_Sabers" locked 2/4 ["t_Host","t_Bee"], <room4> "t_Sith" mots m2.jkl JKM_MP mod="Remastered pack" open 1/0 [""]]
 B -> list jk1
 B <- list <room3> 2 00000000000000000000000000000000040000000100000074005f004400750065006c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030336b617461726e2e6a6b6c0000000000000000000000000000000000000000730065006b00720069007400390000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020108abababababababababababababababababababababababababababababababab745f536162657273 <room4> 1 00000000000000000000000000000000630000000100000074005f005300690074006800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d5f4d5000000000000000000000000000000000000000000000000000006d322e6a6b6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020200abababababababababababababababab
@@ -114,12 +127,99 @@ B <- list <room3> 2 00000000000000000000000000000000040000000100000074005f004400
 H -> leave
 B <- host-left
 W <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room4> "t_Sith" mots m2.jkl JKM_MP mod="Remastered pack" open 1/0 ["t_D"]]
+S <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+S -> host 5ea7
+S <- hosted <room5>
+S <- seat <room5> 1 <key>
+P <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+P -> join <room5>
+P <- seat <room5> 2 <key>
+S <- peer-joined 2
+Q <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+Q -> join <room5>
+Q <- seat <room5> 3 <key>
+S <- peer-joined 3
+P closes
+P closed 1000
+S <- peer-lost 2
+S -> list
+S <- list <room4> 1 00000000000000000000000000000000630000000100000074005f005300690074006800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d5f4d5000000000000000000000000000000000000000000000000000006d322e6a6b6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020200abababababababababababababababab <room5> 3 5ea7
+P2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+P2 -> rejoin <room5> 2 <wrong key>
+P2 <- error no-seat
+P2 -> rejoin <room5> 3 <P's key>
+P2 <- error no-seat
+P2 -> rehost <room5> <P's key>
+P2 <- error no-seat
+P2 -> rejoin <room5> 2 <P's key>
+P2 <- rejoined <room5> 2
+S <- peer-back 2
+S -> bin
+P2 <- bin from=1 to=2 body=host to P2
+P2 -> bin
+S <- bin from=2 to=1 body=P2 to host
+Q2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+Q2 -> rejoin <room5> 3 <Q's key>
+Q closed 4001
+Q2 <- rejoined <room5> 3
+S -> bin
+Q2 <- bin from=1 to=3 body=host to Q2
+S closes
+P2 <- host-lost
+Q2 <- host-lost
+S closed 1000
+X <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+X -> list
+X <- list <room4> 1 00000000000000000000000000000000630000000100000074005f005300690074006800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d5f4d5000000000000000000000000000000000000000000000000000006d322e6a6b6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020200abababababababababababababababab
+X -> join <room5>
+X <- error no-room
+S2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+S2 -> rehost <room5> <S's key> 5ea8
+P2 <- host-back
+Q2 <- host-back
+S2 <- rehosted <room5>
+X -> list
+X <- list <room4> 1 00000000000000000000000000000000630000000100000074005f005300690074006800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d5f4d5000000000000000000000000000000000000000000000000000006d322e6a6b6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020200abababababababababababababababab <room5> 3 5ea8
+S2 -> bin
+P2 <- bin from=1 to=2 body=host back to P2
+Q2 -> bin
+S2 <- bin from=3 to=1 body=Q2 to host
+T <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+T -> host 7e57
+T <- hosted <room6>
+T <- seat <room6> 1 <key>
+U <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+U -> join <room6>
+T <- peer-joined 2
+U <- seat <room6> 2 <key>
+Q2 closes
+Q2 closed 1000
+S2 <- peer-lost 3
+T closes
+T closed 1000
+U <- host-lost
 D closes
 D closed 1000
+wait for the held seats to run out
+S2 <- peer-left 3
+U <- host-left
 W <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[]
+X -> rejoin <room5> 3 <Q's key>
+X <- error no-seat
+X -> rehost <room6> <T's key>
+X <- error no-seat
+X -> list
+X <- list <room5> 2 5ea8
+P2 -> leave
+S2 <- peer-left 2
+S2 -> leave
 W closes
 W closed 1000
 big message
 A closed 1009
 B closed 1000
 H closed 1000
+P2 closed 1000
+S2 closed 1000
+U closed 1000
+X closed 1000

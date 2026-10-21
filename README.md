@@ -34,6 +34,9 @@ relays network traffic between players.
   the other. Add `--host 0.0.0.0` to let other computers on your network join, and `--port` to
   change the port. The protocol is described at the top of the file.
 
+  A player whose connection to the lobby drops mid-match keeps playing over its direct link: the
+  lobby holds its seat for 60 seconds (`--hold`) and the game reconnects and takes it back.
+
   Players on different networks need a STUN server, and the ones behind strict NATs a TURN server
   (such as [coturn](https://github.com/coturn/coturn)). The relay hands their addresses to every
   page:
