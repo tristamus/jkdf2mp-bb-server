@@ -36,11 +36,12 @@ count at all. The lobby logs its message count every minute while players are co
 (`npx wrangler tail` shows it live), and the Cloudflare dashboard shows the day's requests.
 
 `node quota.mjs` shows how much of today's 100,000 is left, when it resets, and how many hours of
-play that is at the rate matches used over the last 7 days (`--days`, or `--since` a deploy that
-changed how much the game sends). It reads Cloudflare's GraphQL Analytics API with wrangler's login
-in this folder, or with `CF_ANALYTICS_TOKEN`, an API token with only Account Analytics Read. The
-rate comes from minutes with at least 60 raw requests (`--busy`), which only matches reach, and
-from those with 3 or 4 connections to the lobby when there are enough of them.
+play that is at the rates matches used over the last 7 days (`--days`, or `--since` a deploy that
+changed how much the game sends): the slowest quarter of busy minutes, the average and the busiest
+tenth. It reads Cloudflare's GraphQL Analytics API with wrangler's login in this folder, or with
+`CF_ANALYTICS_TOKEN`, an API token with only Account Analytics Read. Busy minutes are those with at
+least 60 raw requests (`--busy`), which only matches reach, and it uses the ones with 3 or 4
+connections to the lobby when there are enough of them.
 
 ## Deploy
 
