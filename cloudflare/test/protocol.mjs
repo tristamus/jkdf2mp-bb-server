@@ -15,8 +15,12 @@
 // step is listed by client (each client's lines in the order they came), since
 // messages to different clients can arrive in either order over the internet.
 // Each step waits STEP_MS (400 by default) for what it sets off.
+// Seat keys print as <key>. The test waits once for held seats to run out:
+// set HOLD_MS to the lobby's (60000 by default), e.g. HOLD_MS=3000 for
+// `wrangler dev --var HOLD_MS:3000`, which made protocol.expected.txt.
 const url = process.argv[2];
 const STEP_MS = Number(process.env.STEP_MS) || 400;
+const HOLD_MS = Number(process.env.HOLD_MS) || 60000;
 const log = [];
 let pending = [];  // what clients received since the last step: [client, line]
 const flush = () => {
@@ -27,10 +31,10 @@ const flush = () => {
 };
 const rooms = new Map();
 const roomName = id => rooms.get(id) || id;
-const named = s => s.replace(/^(hosted|join) (\d+)/, (m, op, id) => {
+const named = s => s.replace(/^(hosted|join|seat|rejoined|rehosted) (\d+)/, (m, op, id) => {
   if (op === 'hosted') rooms.set(id, '<room' + (rooms.size + 1) + '>');
   return op + ' ' + roomName(id);
-}).replace(/^list((?: \d+ \d+ [0-9a-fA-F]+)*)$/, (m, games) =>
+}).replace(/^(seat \S+ \d+) [0-9a-f]{32}$/, '$1 <key>').replace(/^list((?: \d+ \d+ [0-9a-fA-F]+)*)$/, (m, games) =>
   'list' + games.replace(/ (\d+) (\d+) ([0-9a-fA-F]+)/g, (g, id, n, e) => ` ${roomName(id)} ${n} ${e}`));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const b64 = text => Buffer.from(text, 'utf8').toString('base64');
@@ -83,6 +87,7 @@ function client(name) {
       if (typeof ev.data === 'string') {
         s = ev.data.startsWith('ice ') ? 'ice ' + Buffer.from(ev.data.slice(4), 'base64').toString() : ev.data;
         if (s.startsWith('hosted ')) ws.room = s.split(' ')[1];
+        if (s.startsWith('seat ')) ws.key = s.split(' ')[3];
         s = named(s);
         if (s.startsWith('status ') && (s = status(s.slice(7))) === null) return;
       } else {
@@ -104,6 +109,11 @@ function pkt(from, to, body) {
 const step = async (name, ws, data, shown) => {
   flush(); log.push(`${name} -> ${shown || (typeof data === 'string' ? named(data) : 'bin')}`); ws.send(data); await sleep(STEP_MS); flush();
 };
+// A socket that closes without leave.
+const closes = async (name, ws) => {
+  flush(); log.push(`${name} closes`); ws.close(); await sleep(STEP_MS); flush();
+};
+const WRONG_KEY = '0'.repeat(32);
 const H = await client('H'); await sleep(200);
 await step('H', H, 'list');
 await step('H', H, 'host abcd');
@@ -133,6 +143,8 @@ await step('A', A, 'ping');
 await step('A', A, 'list');
 await step('A', A, 'leave');
 await step('A', A, pkt(2, 1, 'after leave'));
+// leave ends the seat at once: its key doesn't take it back.
+await step('A', A, `rejoin ${H.room} 2 ${A.key}`, 'rejoin <room1> 2 <A\'s key>');
 await step('A', A, 'join ' + H.room);
 await step('H', H, 'leave');
 await step('B', B, 'list');
@@ -140,8 +152,11 @@ await step('B', B, pkt(3, 1, 'no room'));
 const C = await client('C'); await sleep(200);
 await step('C', C, 'host 00');
 await step('A', A, 'join ' + C.room);
-flush(); log.push('C closes'); C.close(); await sleep(300);
+// The host's socket closes without leave: its seat is held, so the room is
+// out of the lists, but A is still in it until it leaves.
+await closes('C', C);
 await step('A', A, 'list');
+await step('A', A, 'leave');
 // Live counts.
 // Episode names have no extension.
 const duel = { name: 't_Duel', episode: 'JK1MP', map: '01narshadda.jkl', max: 4 };
@@ -172,12 +187,60 @@ await step('B', B, 'list jk1');
 await step('B', B, 'list mots');
 await step('B', B, 'list xx');
 await step('H', H, 'leave');
-flush(); log.push('D closes'); D.close(); await sleep(300);
+// Seats. A socket that closes without leave keeps its player's seat for
+// HOLD_MS, for the player to take back on a new socket with its key.
+const S = await client('S'); await sleep(200);
+await step('S', S, 'host 5ea7');
+const P = await client('P'); await sleep(200);
+await step('P', P, 'join ' + S.room);
+const Q = await client('Q'); await sleep(200);
+await step('Q', Q, 'join ' + S.room);
+await closes('P', P);
+// A held seat still counts, and isn't given to anyone else.
+await step('S', S, 'list');
+const P2 = await client('P2'); await sleep(200);
+await step('P2', P2, `rejoin ${S.room} 2 ${WRONG_KEY}`, 'rejoin <room5> 2 <wrong key>');
+await step('P2', P2, `rejoin ${S.room} 3 ${P.key}`, 'rejoin <room5> 3 <P\'s key>');
+await step('P2', P2, `rehost ${S.room} ${P.key}`, 'rehost <room5> <P\'s key>');
+await step('P2', P2, `rejoin ${S.room} 2 ${P.key}`, 'rejoin <room5> 2 <P\'s key>');
+await step('S', S, pkt(1, 2, 'host to P2'));
+await step('P2', P2, pkt(77, 1, 'P2 to host'));
+// Taking a seat back while its old socket is still open replaces that.
+const Q2 = await client('Q2'); await sleep(200);
+await step('Q2', Q2, `rejoin ${S.room} 3 ${Q.key}`, 'rejoin <room5> 3 <Q\'s key>');
+await step('S', S, pkt(1, 3, 'host to Q2'));
+// The host's socket closes: its clients hear host-lost, and nobody can find
+// or join the room until the host takes its seat back.
+await closes('S', S);
+const X = await client('X'); await sleep(200);
+await step('X', X, 'list');
+await step('X', X, 'join ' + S.room);
+const S2 = await client('S2'); await sleep(200);
+await step('S2', S2, `rehost ${S.room} ${S.key} 5ea8`, 'rehost <room5> <S\'s key> 5ea8');
+await step('X', X, 'list');
+await step('S2', S2, pkt(1, 2, 'host back to P2'));
+await step('Q2', Q2, pkt(77, 1, 'Q2 to host'));
+// Seats nobody takes back in time: a client's ends with peer-left, the
+// host's ends its room with host-left.
+const T = await client('T'); await sleep(200);
+await step('T', T, 'host 7e57');
+const U = await client('U'); await sleep(200);
+await step('U', U, 'join ' + T.room);
+await closes('Q2', Q2);
+await closes('T', T);
+await closes('D', D);
+flush(); log.push('wait for the held seats to run out'); await sleep(HOLD_MS + 3000); flush();
+await step('X', X, `rejoin ${S.room} 3 ${Q.key}`, 'rejoin <room5> 3 <Q\'s key>');
+await step('X', X, `rehost ${T.room} ${T.key}`, 'rehost <room6> <T\'s key>');
+await step('X', X, 'list');
+await step('P2', P2, 'leave');
+await step('S2', S2, 'leave');
 flush(); log.push('W closes'); W.close(); await sleep(300);
 flush(); log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
 // One at a time: over the internet, two closes can finish in either order.
-H.close(); await sleep(300);
-B.close(); await sleep(300);
+for (const ws of [H, B, P2, S2, U, X]) {
+  ws.close(); await sleep(300);
+}
 flush();
 if (!process.argv[3]) {
   console.log(log.join('\n'));

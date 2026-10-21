@@ -13,6 +13,15 @@
 // It also keeps the live counts the landing page shows: each running game
 // says its player's name (hello), and every page watching the lobby (watch)
 // gets a fresh status whenever someone comes, goes, hosts or joins.
+//
+// Game packets go over WebRTC once a player's link is up, so a socket that
+// drops mid-game (a network blip, or every socket when the lobby is updated)
+// doesn't end the match: each seat in a room has a key, sent to its player
+// with seat, and a seat whose socket closed without leave is held for HOLD_MS.
+// The room hears peer-lost or host-lost, and peer-back or host-back when the
+// player takes the seat back with rejoin or rehost. A seat nobody takes back
+// ends as before, with peer-left, or host-left for the whole room. Seats are
+// kept in storage, so they last through the lobby restarting.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -24,6 +33,7 @@ const LAST_PEER_ID = 64;
 const HEX_RE = /^[0-9a-fA-F]+$/;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const ID_RE = /^[0-9]{1,9}$/;
+const KEY_RE = /^[0-9a-f]{32}$/;
 // A jkMultiEntry (types.h in the OpenJKDF2 fork) in hex. Anything after it is
 // the host's mod tail (packaging/wasm/mods.js).
 const ENTRY_HEX = 240 * 2;
@@ -46,6 +56,10 @@ const STATS_MS = 60 * 1000;
 const QUIET_MS = 2 * 60 * 1000;
 // How often to look for them while anyone is connected.
 const SWEEP_MS = 60 * 1000;
+// How long a dropped player's seat waits for them to take it back. The game
+// reconnects after 1 s, then 2, 4 and every 5 s. The HOLD_MS var overrides
+// it, for tests.
+const HOLD_MS = 60 * 1000;
 
 export default {
     async fetch(request, env) {
@@ -151,6 +165,12 @@ function playerName(b64) {
     return cleanText(new TextDecoder().decode(Uint8Array.from(bin, ch => ch.charCodeAt(0))), MAX_NAME);
 }
 
+function newKey() {
+    const b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    return [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
 function base64Utf8(text) {
     const bytes = new TextEncoder().encode(text);
     let bin = "";
@@ -171,7 +191,11 @@ function iceMessage(env) {
 export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
-        this.rooms = new Map();   // room id -> {id, host, entry, peers: Map(id -> ws)}
+        // room id -> {id, host, entry, peers: Map(id -> ws), seats}, where
+        // seats is Map(id -> {key, until, name, game}) for the host (1) and
+        // each peer: until, name and game only while the seat is held.
+        this.rooms = new Map();
+        this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         // ws -> {room, id, name, game, watch, since}: the room id and player
         // id, the player's name and game from hello (name null until then),
         // whether it's a page watching the counts, and when it connected.
@@ -191,6 +215,9 @@ export class Lobby extends DurableObject {
         this.nextRoom = (await this.ctx.storage.get("nextRoom")) || 1;
         this.alarmAt = await this.ctx.storage.getAlarm();
         const entries = await this.ctx.storage.list({ prefix: "room:" });
+        const seats = await this.ctx.storage.list({ prefix: "seats:" });
+        for (const [key, entry] of entries)
+            this.rooms.set(Number(key.slice(5)), this.newRoom(Number(key.slice(5)), entry, seats.get("seats:" + key.slice(5))));
         for (const ws of this.ctx.getWebSockets()) {
             const att = ws.deserializeAttachment() || { room: 0, id: 0 };
             this.conns.set(ws, att);
@@ -198,7 +225,7 @@ export class Lobby extends DurableObject {
                 continue;
             let room = this.rooms.get(att.room);
             if (!room) {
-                room = { id: att.room, host: null, entry: entries.get("room:" + att.room) || "", peers: new Map() };
+                room = this.newRoom(att.room, "", null);
                 this.rooms.set(att.room, room);
             }
             if (att.id === 1)
@@ -206,23 +233,54 @@ export class Lobby extends DurableObject {
             else
                 room.peers.set(att.id, ws);
         }
-        // A room whose host is gone can't go on (its close should have ended
-        // it, but never leave players waiting on one).
-        for (const room of this.rooms.values()) {
-            if (!room.host) {
-                for (const peer of room.peers.values()) {
-                    this.setConn(peer, 0, 0);
-                    this.send(peer, "host-left");
+        const now = Date.now();
+        for (const room of [...this.rooms.values()]) {
+            // A seat whose socket went without a close (all of them, when the
+            // lobby restarts for an update) is held like any dropped one.
+            let changed = false;
+            for (const [id, seat] of room.seats) {
+                const live = id === 1 ? room.host : room.peers.get(id);
+                if (live && seat.until) {
+                    delete seat.until;
+                    changed = true;
+                } else if (!live && !seat.until) {
+                    seat.until = now + this.holdMs;
+                    changed = true;
                 }
-                this.rooms.delete(room.id);
             }
+            // A room whose host is gone with no seat to come back to can't go
+            // on (its close should have ended it, but never leave players
+            // waiting on one).
+            if (!room.host && !room.seats.has(1)) {
+                this.endRoom(room);
+                continue;
+            }
+            if (changed)
+                this.saveSeats(room);
         }
         for (const key of entries.keys()) {
             if (!this.rooms.has(Number(key.slice(5))))
                 this.ctx.storage.delete(key);
         }
+        for (const key of seats.keys()) {
+            if (!this.rooms.has(Number(key.slice(6))))
+                this.ctx.storage.delete(key);
+        }
         if (this.conns.size)
             this.sweepLater();
+        if (this.nextExpiry())
+            this.sweepLater(this.nextExpiry());
+    }
+
+    newRoom(id, entry, seats) {
+        return {
+            id, host: null, entry, peers: new Map(),
+            seats: new Map(Object.entries(seats || {}).map(([k, v]) => [Number(k), v])),
+        };
+    }
+
+    saveSeats(room) {
+        this.ctx.storage.put("seats:" + room.id, Object.fromEntries(room.seats));
     }
 
     async fetch(request) {
@@ -254,7 +312,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketClose(ws, code, reason, wasClean) {
-        this.leave(ws);
+        this.drop(ws);
         this.conns.delete(ws);
         this.heard.delete(ws);
         this.statusChanged();
@@ -262,7 +320,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketError(ws, error) {
-        this.leave(ws);
+        this.drop(ws);
         this.conns.delete(ws);
         this.heard.delete(ws);
         this.statusChanged();
@@ -273,18 +331,34 @@ export class Lobby extends DurableObject {
         this.sweep();
         if (this.conns.size)
             this.sweepLater();
+        if (this.nextExpiry())
+            this.sweepLater(this.nextExpiry());
     }
 
-    // Looks for quiet connections in SWEEP_MS, unless that's already set.
-    sweepLater() {
-        if (this.alarmAt)
+    // Looks for quiet connections and held seats that ran out at the time
+    // given (in SWEEP_MS by default), unless a look comes sooner.
+    sweepLater(at = Date.now() + SWEEP_MS) {
+        if (this.alarmAt && this.alarmAt <= at)
             return;
-        this.alarmAt = Date.now() + SWEEP_MS;
-        this.ctx.storage.setAlarm(this.alarmAt);
+        this.alarmAt = at;
+        this.ctx.storage.setAlarm(at);
+    }
+
+    // When the first held seat runs out, 0 for none.
+    nextExpiry() {
+        let at = 0;
+        for (const room of this.rooms.values()) {
+            for (const seat of room.seats.values()) {
+                if (seat.until && (!at || seat.until < at))
+                    at = seat.until;
+            }
+        }
+        return at;
     }
 
     // Ends the connections that have sent nothing, not even a ping, for
-    // QUIET_MS: as if they had closed, so a game whose host is gone ends.
+    // QUIET_MS: as if they had closed, so a game whose host is gone ends once
+    // its seat runs out. Then ends the held seats nobody took back in time.
     sweep() {
         const now = Date.now();
         let quiet = 0;
@@ -293,7 +367,7 @@ export class Lobby extends DurableObject {
             const last = Math.max(c.since || 0, ping ? ping.getTime() : 0, this.heard.get(ws) || 0);
             if (now - last < QUIET_MS)
                 continue;
-            this.leave(ws);
+            this.drop(ws);
             // Counted nowhere if the object wakes up before the socket is gone.
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
             this.conns.delete(ws);
@@ -301,10 +375,28 @@ export class Lobby extends DurableObject {
             try { ws.close(4000, "quiet"); } catch (e) {}
             quiet++;
         }
-        if (quiet) {
+        if (quiet)
             console.log(`relay: ended ${quiet} quiet connection(s)`);
-            this.statusChanged();
+        let ended = 0;
+        for (const room of [...this.rooms.values()]) {
+            for (const [id, seat] of [...room.seats]) {
+                if (!seat.until || seat.until > now)
+                    continue;
+                ended++;
+                if (id === 1) {
+                    console.log(`relay: room ${room.id}: the host didn't come back, room closed`);
+                    this.endRoom(room);
+                    break;
+                }
+                room.seats.delete(id);
+                this.saveSeats(room);
+                if (room.host)
+                    this.send(room.host, `peer-left ${id}`);
+                console.log(`relay: room ${room.id}: id ${id} didn't come back`);
+            }
         }
+        if (quiet || ended)
+            this.statusChanged();
     }
 
     conn(ws) {
@@ -369,16 +461,20 @@ export class Lobby extends DurableObject {
             // not those whose host said hello as the other one.
             const want = GAMES.includes(args[0]) ? args[0] : null;
             const games = [...this.rooms.values()]
-                .filter(r => !want || !this.conn(r.host).game || this.conn(r.host).game === want)
-                .map(r => `${r.id} ${1 + r.peers.size} ${r.entry}`);
+                .filter(r => r.host && (!want || !this.conn(r.host).game || this.conn(r.host).game === want))
+                .map(r => `${r.id} ${this.seated(r).length} ${r.entry}`);
             this.send(ws, ["list", ...games].join(" "));
         } else if (op === "host" && args.length === 1 && validEntry(args[0])) {
             this.leave(ws);
-            const room = { id: this.nextRoom++, host: ws, entry: args[0], peers: new Map() };
-            this.ctx.storage.put({ nextRoom: this.nextRoom, ["room:" + room.id]: room.entry });
+            const room = this.newRoom(this.nextRoom++, args[0], null);
+            room.host = ws;
+            room.seats.set(1, { key: newKey() });
+            this.ctx.storage.put({ nextRoom: this.nextRoom, ["room:" + room.id]: room.entry,
+                                   ["seats:" + room.id]: Object.fromEntries(room.seats) });
             this.rooms.set(room.id, room);
             this.setConn(ws, room.id, 1);
             this.send(ws, `hosted ${room.id}`);
+            this.send(ws, `seat ${room.id} 1 ${room.seats.get(1).key}`);
             console.log(`relay: room ${room.id} opened`);
             this.statusChanged();
         } else if (op === "update" && args.length === 1 && validEntry(args[0])) {
@@ -391,14 +487,15 @@ export class Lobby extends DurableObject {
         } else if (op === "join" && args.length === 1 && ID_RE.test(args[0])) {
             this.leave(ws);
             const room = this.rooms.get(Number(args[0]));
-            if (!room) {
+            // Not while its host is away: nobody would welcome them.
+            if (!room || !room.host) {
                 this.send(ws, "error no-room");
                 this.statusChanged();
                 return;
             }
             let peerId = 0;
             for (let i = FIRST_PEER_ID; i <= LAST_PEER_ID; i++) {
-                if (!room.peers.has(i)) {
+                if (!room.peers.has(i) && !room.seats.has(i)) {
                     peerId = i;
                     break;
                 }
@@ -409,8 +506,11 @@ export class Lobby extends DurableObject {
                 return;
             }
             room.peers.set(peerId, ws);
+            room.seats.set(peerId, { key: newKey() });
+            this.saveSeats(room);
             this.setConn(ws, room.id, peerId);
             this.send(room.host, `peer-joined ${peerId}`);
+            this.send(ws, `seat ${room.id} ${peerId} ${room.seats.get(peerId).key}`);
             console.log(`relay: room ${room.id}: player joined as id ${peerId}`);
             this.statusChanged();
         } else if (op === "welcome" && args.length === 2 && ID_RE.test(args[0]) && validEntry(args[1])) {
@@ -429,6 +529,11 @@ export class Lobby extends DurableObject {
                 if (target)
                     this.send(target, `signal ${c.id} ${args[1]}`);
             }
+        } else if (op === "rejoin" && args.length === 3 && ID_RE.test(args[0]) && ID_RE.test(args[1]) && KEY_RE.test(args[2])) {
+            this.takeSeat(ws, Number(args[0]), Number(args[1]), args[2], null);
+        } else if (op === "rehost" && (args.length === 2 || args.length === 3) && ID_RE.test(args[0]) && KEY_RE.test(args[1]) &&
+                   (args.length === 2 || validEntry(args[2]))) {
+            this.takeSeat(ws, Number(args[0]), 1, args[1], args[2] || "");
         } else if (op === "leave") {
             this.leave(ws);
             this.statusChanged();
@@ -481,9 +586,8 @@ export class Lobby extends DurableObject {
             const info = readEntry(room.entry);
             if (!info)
                 continue;
-            const host = this.conn(room.host);
-            const peers = [...room.peers.entries()].sort((a, b) => a[0] - b[0]);
-            const names = [host.name || "", ...peers.map(([, ws]) => this.conn(ws).name || "")];
+            const host = room.host ? this.conn(room.host) : room.seats.get(1);
+            const names = this.seated(room).map(([id, ws, seat]) => (ws ? (id === 1 ? host : this.conn(ws)) : seat).name || "");
             const game = host.game || guessGame(info.episode);
             online += names.length;
             byGame[game].online += names.length;
@@ -535,6 +639,20 @@ export class Lobby extends DurableObject {
             this.send(w, status);
     }
 
+    // The room's players by id, the host first, held seats too: [id, ws or
+    // null, seat].
+    seated(room) {
+        const all = new Map();
+        all.set(1, [1, room.host, room.seats.get(1)]);
+        for (const [id, ws] of room.peers)
+            all.set(id, [id, ws, room.seats.get(id)]);
+        for (const [id, seat] of room.seats) {
+            if (seat.until && !all.has(id))
+                all.set(id, [id, null, seat]);
+        }
+        return [...all.values()].sort((a, b) => a[0] - b[0]);
+    }
+
     leave(ws) {
         const c = this.conn(ws);
         const room = this.rooms.get(c.room);
@@ -544,18 +662,96 @@ export class Lobby extends DurableObject {
             return;
         }
         if (room.host === ws) {
-            this.rooms.delete(room.id);
-            this.ctx.storage.delete("room:" + room.id);
-            for (const peer of room.peers.values()) {
-                this.setConn(peer, 0, 0);
-                this.send(peer, "host-left");
-            }
+            this.endRoom(room);
             console.log(`relay: room ${room.id} closed`);
         } else if (room.peers.get(c.id) === ws) {
             room.peers.delete(c.id);
-            this.send(room.host, `peer-left ${c.id}`);
+            room.seats.delete(c.id);
+            this.saveSeats(room);
+            if (room.host)
+                this.send(room.host, `peer-left ${c.id}`);
             console.log(`relay: room ${room.id}: id ${c.id} left`);
         }
         this.setConn(ws, 0, 0);
+    }
+
+    // A socket that closed without leave, errored or went quiet: its seat is
+    // held for its player to take back (takeSeat).
+    drop(ws) {
+        const c = this.conn(ws);
+        const room = this.rooms.get(c.room);
+        const seat = room && room.seats.get(c.id);
+        if (!seat || ws !== (c.id === 1 ? room.host : room.peers.get(c.id))) {
+            this.leave(ws);
+            return;
+        }
+        Object.assign(seat, { until: Date.now() + this.holdMs, name: c.name || null, game: c.game || "" });
+        if (c.id === 1) {
+            room.host = null;
+            for (const peer of room.peers.values())
+                this.send(peer, "host-lost");
+        } else {
+            room.peers.delete(c.id);
+            if (room.host)
+                this.send(room.host, `peer-lost ${c.id}`);
+        }
+        this.saveSeats(room);
+        this.setConn(ws, 0, 0);
+        this.sweepLater(seat.until);
+        console.log(`relay: room ${room.id}: id ${c.id} dropped, seat held`);
+    }
+
+    // rejoin and rehost: a player takes its seat back with its key, held or
+    // not (the old socket may not have closed yet, and is replaced). A
+    // rehost may bring the room's entry, in case it changed meanwhile.
+    takeSeat(ws, roomId, id, key, entry) {
+        const room = this.rooms.get(roomId);
+        const seat = room && room.seats.get(id);
+        if (!seat || seat.key !== key || (id === 1) !== (entry !== null)) {
+            this.send(ws, "error no-seat");
+            return;
+        }
+        const old = id === 1 ? room.host : room.peers.get(id);
+        if (old !== ws) {
+            this.leave(ws);
+            if (old) {
+                this.setConn(old, 0, 0);
+                try { old.close(4001, "replaced"); } catch (e) {}
+            }
+        }
+        const wasHeld = !!seat.until;
+        delete seat.until;
+        delete seat.name;
+        delete seat.game;
+        if (id === 1) {
+            room.host = ws;
+            if (entry && entry !== room.entry) {
+                room.entry = entry;
+                this.ctx.storage.put("room:" + room.id, entry);
+            }
+        } else {
+            room.peers.set(id, ws);
+        }
+        this.setConn(ws, room.id, id);
+        this.saveSeats(room);
+        this.send(ws, id === 1 ? `rehosted ${room.id}` : `rejoined ${room.id} ${id}`);
+        if (wasHeld && id === 1) {
+            for (const peer of room.peers.values())
+                this.send(peer, "host-back");
+        } else if (wasHeld && room.host) {
+            this.send(room.host, `peer-back ${id}`);
+        }
+        console.log(`relay: room ${room.id}: id ${id} took its seat back`);
+        this.statusChanged();
+    }
+
+    // Ends a room: its players are told the host left.
+    endRoom(room) {
+        this.rooms.delete(room.id);
+        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id]);
+        for (const peer of room.peers.values()) {
+            this.setConn(peer, 0, 0);
+            this.send(peer, "host-left");
+        }
     }
 }
