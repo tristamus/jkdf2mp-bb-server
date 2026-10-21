@@ -39,6 +39,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-32/`: `cloudflare-31` with Play in fullscreen asked in the window shown before every start, mods or not, so it can be changed after the first upload.
 - `cloudflare-33/`: `cloudflare-32` with joiners staying in the match when their lobby connection drops or the lobby restarts, seats held for a minute, and a network log to save when the network ends a match.
 - `cloudflare-34/`: `cloudflare-33` with controls saved in one tab no longer put back by an older tab of the game, and Esc keeping new binds on the Keyboard, Mouse and Joystick screens.
+- `cloudflare-35/`: `cloudflare-34` with "Check my folder for new mods and maps", which names what's new and saves only what changed, and "Keep my mods and maps up to date", a folder the browser keeps and the page reads again at every start.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
