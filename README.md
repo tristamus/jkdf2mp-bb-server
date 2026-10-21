@@ -38,6 +38,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-31/`: `cloudflare-30` with Insert, Num Lock and the Menu key bindable, a held Page Up or \ that stays held, browser shortcuts kept out of game keys, the console only on Ctrl+Shift+`, MotS sabers showing their blade to other players, and Force Pulled weapons flying to the puller again.
 - `cloudflare-32/`: `cloudflare-31` with Play in fullscreen asked in the window shown before every start, mods or not, so it can be changed after the first upload.
 - `cloudflare-33/`: `cloudflare-32` with joiners staying in the match when their lobby connection drops or the lobby restarts, seats held for a minute, and a network log to save when the network ends a match.
+- `cloudflare-34/`: `cloudflare-33` with controls saved in one tab no longer put back by an older tab of the game, and Esc keeping new binds on the Keyboard, Mouse and Joystick screens.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
