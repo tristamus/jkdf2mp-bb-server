@@ -41,6 +41,7 @@ change once they're here; a new build gets a new folder.
 - `cloudflare-34/`: `cloudflare-33` with controls saved in one tab no longer put back by an older tab of the game, and Esc keeping new binds on the Keyboard, Mouse and Joystick screens.
 - `cloudflare-35/`: `cloudflare-34` with "Check my folder for new mods and maps", which names what's new and saves only what changed, and "Keep my mods and maps up to date", a folder the browser keeps and the page reads again at every start.
 - `cloudflare-36/`: `cloudflare-35` with hosts starting at a 16 ms tick rate for smoother matches, a saved 180 moving to 16 once, and no extra lobby traffic from it: a host no longer sends packets to itself through the lobby, and positions through the lobby stay at the old rate.
+- `cloudflare-37/`: `cloudflare-36` with the game folder's JK_.CD found wherever it is, such as next to JK.EXE, and the game's standard key used when the folder has none, so those players no longer get the missing resource/jk_.cd error.
 
 **No game files are here.** Each player picks their own Jedi Knight install in the browser, and it
 stays in that browser.
