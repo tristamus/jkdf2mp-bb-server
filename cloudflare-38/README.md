@@ -1,7 +1,7 @@
 # cloudflare-38
 
-`cloudflare-37` with the page and engine from OpenJKDF2's `web-mp` with tristamus/OpenJKDF2#50
-merged on top of f32a316 (the source of `cloudflare-37`). The lobby is `cloudflare-37`'s, unchanged.
+`cloudflare-37` with the page and engine from OpenJKDF2 commit a7c0211 (`web-mp` with
+tristamus/OpenJKDF2#50 merged on top of f32a316, the source of `cloudflare-37`). The lobby is `cloudflare-37`'s, unchanged.
 
 - **Saved mod sets are a pick of one:** in "Choose your mods", the folder's mods keep their
   checkboxes and Select all. Mods saved from online games move to their own group, "Saved from
