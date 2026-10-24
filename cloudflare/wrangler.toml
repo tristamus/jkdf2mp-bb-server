@@ -1,4 +1,4 @@
-# The always-on lobby on Cloudflare's free Workers plan. See README.md.
+# The always-on lobby on Cloudflare Workers. See README.md.
 name = "jkdf2mp"
 main = "src/lobby.js"
 compatibility_date = "2026-09-01"
@@ -9,6 +9,17 @@ compatibility_date = "2026-09-01"
 directory = "./public"
 binding = "ASSETS"
 run_worker_first = ["/relay"]
+
+# Keeps the lobby's own log lines (console.log) in Workers Logs in the
+# Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
+# that ran out can be looked at afterwards. Without the log Cloudflare writes
+# for each invocation: if that's one per incoming message, a match through the
+# lobby (~50,000 a minute) would go past the free plan's 200,000 a day.
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = false
 
 [[durable_objects.bindings]]
 name = "LOBBY"

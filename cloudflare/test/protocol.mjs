@@ -17,10 +17,14 @@
 // Each step waits STEP_MS (400 by default) for what it sets off.
 // Seat keys print as <key>. The test waits once for held seats to run out:
 // set HOLD_MS to the lobby's (60000 by default), e.g. HOLD_MS=3000 for
-// `wrangler dev --var HOLD_MS:3000`, which made protocol.expected.txt.
+// `wrangler dev --var HOLD_MS:3000`. It also sends packets that go nowhere for
+// longer than the lobby's NOTICE_MS (5000 by default): set NOTICE_MS the same
+// way. protocol.expected.txt was made with
+// `wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`.
 const url = process.argv[2];
 const STEP_MS = Number(process.env.STEP_MS) || 400;
 const HOLD_MS = Number(process.env.HOLD_MS) || 60000;
+const NOTICE_MS = Number(process.env.NOTICE_MS) || 5000;
 const log = [];
 let pending = [];  // what clients received since the last step: [client, line]
 const flush = () => {
@@ -112,6 +116,13 @@ const step = async (name, ws, data, shown) => {
 // A socket that closes without leave.
 const closes = async (name, ws) => {
   flush(); log.push(`${name} closes`); ws.close(); await sleep(STEP_MS); flush();
+};
+// Sends the same packet every 100 ms for half a second past NOTICE_MS.
+const keepsSending = async (name, ws, data, shown) => {
+  flush(); log.push(`${name} -> ${shown}, for longer than NOTICE_MS`);
+  for (const until = Date.now() + NOTICE_MS + 500; Date.now() < until; await sleep(100))
+    ws.send(data);
+  await sleep(STEP_MS); flush();
 };
 const WRONG_KEY = '0'.repeat(32);
 const H = await client('H'); await sleep(200);
@@ -236,9 +247,24 @@ await step('X', X, 'list');
 await step('P2', P2, 'leave');
 await step('S2', S2, 'leave');
 flush(); log.push('W closes'); W.close(); await sleep(300);
+// Packets that keep going nowhere: a game in no room hears host-left for its
+// packets to the host and peer-left for those to a player, and a host hears
+// peer-left for a player who isn't in its room. A client sending to a player
+// who isn't there hears nothing (its host tells it who's in the game), and
+// neither does a host sending to a held seat.
+await keepsSending('X', X, pkt(77, 1, 'to the host'), 'bin to the host, in no room');
+await keepsSending('X', X, pkt(77, 4, 'to id 4'), 'bin to id 4, in no room');
+const R = await client('R'); await sleep(200);
+await step('R', R, 'host 4e57');
+await step('U', U, 'join ' + R.room);
+await keepsSending('R', R, pkt(1, 9, 'to id 9'), 'bin to id 9');
+await keepsSending('U', U, pkt(77, 9, 'to id 9'), 'bin to id 9');
+await closes('U', U);
+await keepsSending('R', R, pkt(1, 2, 'to id 2'), 'bin to id 2, whose seat is held');
+await step('R', R, 'leave');
 flush(); log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
 // One at a time: over the internet, two closes can finish in either order.
-for (const ws of [H, B, P2, S2, U, X]) {
+for (const ws of [H, B, P2, S2, X, R]) {
   ws.close(); await sleep(300);
 }
 flush();

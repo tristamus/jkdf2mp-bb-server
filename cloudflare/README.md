@@ -32,12 +32,26 @@ running at home. It speaks the same protocol, so the same browser build works wi
 The free plan doesn't charge: past a daily limit, requests fail until the limit resets at 00:00 UTC.
 For the lobby, the one that matters is 100,000 Durable Object requests a day, where 20 incoming
 WebSocket messages count as one request. Game packets between players who link directly don't
-count at all. The lobby logs its message count every minute while players are connected
-(`npx wrangler tail` shows it live), and the Cloudflare dashboard shows the day's requests.
+count at all, but a match going through the lobby does: on 2026-10-24 one sent about 50,000
+messages a minute, which uses the whole day in about 40 minutes, and the lobby went down at 06:00
+UTC. Workers Paid ($5 a month) has no daily limit: it includes 1 million requests a month, then
+$0.15 a million.
+
+Game packets that can't go anywhere count too: those from a game that isn't in a room, or for a
+player who isn't in the room. A game that keeps sending them for 5 seconds (`NOTICE_MS`) hears
+`host-left` (for its packets to the host, from a game in no room) or `peer-left <id>` (for its
+packets to a player), the messages it would have had in the room, so it stops. A held seat's
+player may come back, so packets for one don't set this off.
+
+The lobby logs its message count every minute while players are connected, and then the five
+busiest connections by player name and room, with how many of their packets went nowhere and why,
+and each time it tells a game to stop. `npx wrangler tail` shows these live, and Workers Logs in
+the Cloudflare dashboard keeps them for a few days (`[observability]` in `wrangler.toml`). The
+dashboard also shows the day's requests.
 
 ## Deploy
 
-Needs Node.js 22 or newer and a Cloudflare account (the free plan is enough).
+Needs Node.js 22 or newer and a Cloudflare account (the free plan runs it, within the limits above).
 
 ```
 npm ci                 # installs the pinned wrangler
@@ -51,5 +65,6 @@ To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/p
 while nobody is hosting. It plays out hosting, joining, signaling, packet routing, leaving, and
 seats being held, taken back and running out, with plain WebSocket clients, and compares the
 transcript with the one `wrangler dev` gives. It waits once for held seats to run out, about a
-minute against a deployed lobby. Against `npx wrangler dev --var HOLD_MS:3000`, run it with
-`HOLD_MS=3000` to make that wait short.
+minute against a deployed lobby, and sends packets that go nowhere for a little over 5 seconds a
+few times. Against `npx wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`, which made
+`protocol.expected.txt`, run it with `HOLD_MS=3000 NOTICE_MS=1000` to make those waits short.
