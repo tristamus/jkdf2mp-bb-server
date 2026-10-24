@@ -60,6 +60,20 @@ const SWEEP_MS = 60 * 1000;
 // reconnects after 1 s, then 2, 4 and every 5 s. The HOLD_MS var overrides
 // it, for tests.
 const HOLD_MS = 60 * 1000;
+// A game packet the lobby can't pass on (its sender isn't in a room, or the
+// player it's for isn't in the room) still counts against the daily limit,
+// and a game that's lost track of its room can send ~1,400 a minute for
+// hours. Once they've kept coming for NOTICE_MS, the lobby tells the game
+// what it would have heard had it been in the room: host-left for a game
+// sending to its host, peer-left for a host sending to a player. Again every
+// NOTICE_AGAIN_MS while they don't stop, and they start over after a gap of
+// UNSENT_GAP_MS. Not for a held seat: that player may yet come back. The
+// NOTICE_MS var overrides it, for tests.
+const NOTICE_MS = 5 * 1000;
+const NOTICE_AGAIN_MS = 30 * 1000;
+const UNSENT_GAP_MS = 10 * 1000;
+// How many connections the minute's log names, busiest first.
+const LOG_TOP = 5;
 
 export default {
     async fetch(request, env) {
@@ -196,15 +210,19 @@ export class Lobby extends DurableObject {
         // each peer: until, name and game only while the seat is held.
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
+        this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
         // ws -> {room, id, name, game, watch, since}: the room id and player
         // id, the player's name and game from hello (name null until then),
         // whether it's a page watching the counts, and when it connected.
         this.conns = new Map();
         this.heard = new Map();   // ws -> when its last message came (not its pings)
+        // ws -> Map(notice -> {first, last, told}): packets it sends that go
+        // nowhere, by what it would be told about them (see NOTICE_MS).
+        this.unsent = new Map();
         this.alarmAt = null;      // when the next sweep for quiet connections runs
         this.nextRoom = 1;
         this.lastStatus = null;   // the status the watchers have
-        this.stats = { since: Date.now(), text: 0, packets: 0, bytes: 0 };
+        this.stats = this.newStats(Date.now());
         // Pages send "ping" every 25 s so proxies keep the socket open. Cloudflare
         // answers it without waking the object; the page ignores the "pong".
         ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -304,7 +322,7 @@ export class Lobby extends DurableObject {
             this.statusChanged();
             return;
         }
-        this.count(typeof message === "string", size);
+        this.count(ws, typeof message === "string", size);
         if (typeof message === "string")
             this.onText(ws, message);
         else
@@ -315,6 +333,7 @@ export class Lobby extends DurableObject {
         this.drop(ws);
         this.conns.delete(ws);
         this.heard.delete(ws);
+        this.unsent.delete(ws);
         this.statusChanged();
         try { ws.close(1000, "bye"); } catch (e) {}
     }
@@ -323,6 +342,7 @@ export class Lobby extends DurableObject {
         this.drop(ws);
         this.conns.delete(ws);
         this.heard.delete(ws);
+        this.unsent.delete(ws);
         this.statusChanged();
     }
 
@@ -372,6 +392,7 @@ export class Lobby extends DurableObject {
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
             this.conns.delete(ws);
             this.heard.delete(ws);
+            this.unsent.delete(ws);
             try { ws.close(4000, "quiet"); } catch (e) {}
             quiet++;
         }
@@ -429,13 +450,35 @@ export class Lobby extends DurableObject {
         }
     }
 
-    count(isText, size) {
+    // A minute's message counts, in all and by connection (ws -> {n, unsent,
+    // why: Map(reason -> how many)}).
+    newStats(now) {
+        return { since: now, text: 0, packets: 0, bytes: 0, by: new Map() };
+    }
+
+    connStats(ws) {
+        let b = this.stats.by.get(ws);
+        if (!b) {
+            b = { n: 0, unsent: 0, why: new Map() };
+            this.stats.by.set(ws, b);
+        }
+        return b;
+    }
+
+    // A connection as the logs name it: its player and where it is.
+    who(c) {
+        const name = c.name ? JSON.stringify(c.name) : c.watch ? "a watching page" : "a game with no name";
+        return c.room ? `${name} (room ${c.room}, id ${c.id})` : `${name} (in no room)`;
+    }
+
+    count(ws, isText, size) {
         const s = this.stats;
         if (isText)
             s.text++;
         else
             s.packets++;
         s.bytes += size;
+        this.connStats(ws).n++;
         const now = Date.now();
         if (now - s.since >= STATS_MS) {
             let watching = 0;
@@ -444,7 +487,19 @@ export class Lobby extends DurableObject {
             console.log(`relay: ${s.text + s.packets} messages in ${Math.round((now - s.since) / 1000)} s ` +
                 `(${s.packets} game packets, ${s.bytes} bytes), ${this.conns.size - watching} connected, ` +
                 `${watching} watching`);
-            this.stats = { since: now, text: 0, packets: 0, bytes: 0 };
+            // Who sent them, so a match going through the lobby, or a game
+            // whose packets go nowhere, can be told apart and named.
+            if (s.packets) {
+                const top = [...s.by].sort((a, b) => b[1].n - a[1].n).slice(0, LOG_TOP).map(([w, b]) => {
+                    const c = this.conns.get(w);
+                    let line = `${c ? this.who(c) : "a connection since closed"} ${b.n}`;
+                    if (b.unsent)
+                        line += `, ${b.unsent} went nowhere (${[...b.why].map(([why, n]) => `${n} ${why}`).join(", ")})`;
+                    return line;
+                });
+                console.log(`relay: busiest: ${top.join("; ")}`);
+            }
+            this.stats = this.newStats(now);
         }
     }
 
@@ -553,10 +608,12 @@ export class Lobby extends DurableObject {
             return;
         const c = this.conn(ws);
         const room = this.rooms.get(c.room);
-        if (!room)
-            return;
         const view = new DataView(data);
         const idTo = view.getUint32(4, true);
+        if (!room) {
+            this.unsentPacket(ws, c, null, idTo);
+            return;
+        }
         const target = (room.host === ws || (idTo !== 0 && idTo !== 1)) ? room.peers.get(idTo) : room.host;
         // The relay stamps a client's real id; the host's is kept, because a
         // host forwards packets for clients it reaches over WebRTC.
@@ -564,6 +621,52 @@ export class Lobby extends DurableObject {
             view.setUint32(0, c.id, true);
         if (target && target !== ws)
             this.send(target, data);
+        else
+            this.unsentPacket(ws, c, room, idTo);
+    }
+
+    // A game packet that went nowhere: counted for the minute's log, and once
+    // they've kept coming for NOTICE_MS, the sender hears that the player
+    // it's sending to is gone. A game in no room may be a host or a client,
+    // so it hears host-left only for packets to the host (a host never sends
+    // to itself, and host-left would cut a host's direct links), and
+    // peer-left for the others, which a client doesn't act on.
+    unsentPacket(ws, c, room, idTo) {
+        const host = !!room && room.host === ws;
+        // A client's packets to 0 are for the host.
+        const to = !host && idTo === 0 ? 1 : idTo;
+        const seat = room && room.seats.get(to);
+        const self = !!room && to === c.id;
+        const held = !self && !!(seat && seat.until);
+        const why = `to id ${to}: ${!room ? "sender in no room" : self ? "itself" : held ? "a held seat" : "not in the room"}`;
+        const b = this.connStats(ws);
+        b.unsent++;
+        b.why.set(why, (b.why.get(why) || 0) + 1);
+        let notice = null;
+        if (!room && to === 1)
+            notice = "host-left";
+        else if ((!room || host) && to > 1 && !held)
+            notice = `peer-left ${to}`;
+        if (!notice)
+            return;
+        const now = Date.now();
+        let mine = this.unsent.get(ws);
+        if (!mine) {
+            mine = new Map();
+            this.unsent.set(ws, mine);
+        }
+        let u = mine.get(notice);
+        if (!u || now - u.last > UNSENT_GAP_MS) {
+            u = { first: now, last: now, told: 0 };
+            mine.set(notice, u);
+        }
+        u.last = now;
+        if (now - u.first < this.noticeMs || now - u.told < NOTICE_AGAIN_MS)
+            return;
+        u.told = now;
+        this.send(ws, notice);
+        console.log(`relay: told ${this.who(c)} ${notice}, after ${Math.round((now - u.first) / 1000)} s of ` +
+            `packets that went nowhere (${why})`);
     }
 
     // The landing page's live counts: who's on and the games they're in, in

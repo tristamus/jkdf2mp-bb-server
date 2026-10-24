@@ -215,11 +215,30 @@ S2 <- peer-left 2
 S2 -> leave
 W closes
 W closed 1000
+X -> bin to the host, in no room, for longer than NOTICE_MS
+X <- host-left
+X -> bin to id 4, in no room, for longer than NOTICE_MS
+X <- peer-left 4
+R <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+R -> host 4e57
+R <- hosted <room7>
+R <- seat <room7> 1 <key>
+U -> join <room7>
+R <- peer-joined 2
+U <- seat <room7> 2 <key>
+R -> bin to id 9, for longer than NOTICE_MS
+R <- peer-left 9
+U -> bin to id 9, for longer than NOTICE_MS
+U closes
+R <- peer-lost 2
+U closed 1000
+R -> bin to id 2, whose seat is held, for longer than NOTICE_MS
+R -> leave
 big message
 A closed 1009
 B closed 1000
 H closed 1000
 P2 closed 1000
+R closed 1000
 S2 closed 1000
-U closed 1000
 X closed 1000
