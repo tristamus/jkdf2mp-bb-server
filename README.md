@@ -23,8 +23,8 @@ relays network traffic between players.
 
 - **`relay/relay.py`**: the lobby, WebRTC signaling server and fallback relay in one plain Python 3
   script, no installs needed. It serves the browser build, lists the games hosted on it, sets up
-  WebRTC data channels between each host and its players, and relays game packets for anyone whose
-  direct link doesn't come up.
+  WebRTC data channels between each host and its players, and between players in the same game,
+  and relays game packets for anyone whose direct link doesn't come up.
 
   ```
   python3 relay/relay.py --dir path/to/web-build
@@ -47,8 +47,8 @@ relays network traffic between players.
   ```
 
   With a secret, each page gets its own TURN login that expires after 12 hours (`--turn-ttl`), the
-  scheme coturn checks with `use-auth-secret`. `--turn-user` and `--turn-pass` send one fixed login
-  instead.
+  scheme coturn checks with `use-auth-secret`, and a game in a match gets a fresh one when it asks.
+  `--turn-user` and `--turn-pass` send one fixed login instead.
 
 - **`cloudflare/`**: the same lobby on Cloudflare Workers, so it can run all the time on Cloudflare's
   free plan with nothing running at home. See [cloudflare/README.md](cloudflare/README.md).

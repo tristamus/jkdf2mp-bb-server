@@ -22,6 +22,14 @@
 // player takes the seat back with rejoin or rehost. A seat nobody takes back
 // ends as before, with peer-left, or host-left for the whole room. Seats are
 // kept in storage, so they last through the lobby restarting.
+//
+// Players in a room also link to each other, not only to their host: the
+// lobby passes signal between any two of them, and says so on connect
+// (lobby links). And with a TURN key set (see TURN_API), it says turn too, and
+// a game in a room that asks (turn) gets short-lived credentials for
+// Cloudflare's TURN service, so two players who can't link directly still
+// get a WebRTC link, through the Cloudflare cities nearest them, instead of
+// sending everything through this one lobby.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -74,6 +82,25 @@ const NOTICE_AGAIN_MS = 30 * 1000;
 const UNSENT_GAP_MS = 10 * 1000;
 // How many connections the minute's log names, busiest first.
 const LOG_TOP = 5;
+// TURN credentials come from Cloudflare's Realtime API, with a TURN key made
+// in the dashboard under Realtime: its id in the TURN_KEY_ID secret and its
+// API token in TURN_KEY_API_TOKEN (see README.md). Without both, there's no
+// TURN. The TURN_API var overrides the address, for tests.
+const TURN_API = "https://rtc.live.cloudflare.com/v1/turn/keys/";
+// How long credentials last. A game asks again for links it sets up once half
+// of that is up; a link already up through TURN when they run out drops, and
+// is set up again with new ones.
+const TURN_TTL_S = 24 * 60 * 60;
+// Cloudflare asks that more than half of the credentials made get used, so
+// only a game in a room gets them, when it's about to link, and a connection
+// gets them at most this often. The game asks at most every 10 s.
+const TURN_EVERY_MS = 5 * 1000;
+// After Cloudflare couldn't make credentials, how long games get none before
+// the lobby tries again.
+const TURN_RETRY_MS = 60 * 1000;
+// Browsers can't reach TURN on port 53 (Cloudflare's docs say so), and a
+// link would wait for it to time out.
+const PORT_53_RE = /:53(\?|$)/;
 
 export default {
     async fetch(request, env) {
@@ -202,6 +229,35 @@ function iceMessage(env) {
     return "ice " + btoa(JSON.stringify([{ urls: stun }]));
 }
 
+function turnOn(env) {
+    return !!(env.TURN_KEY_ID && env.TURN_KEY_API_TOKEN);
+}
+
+// What the lobby can do beyond the basics, for the game to know on connect.
+function lobbyMessage(env) {
+    return turnOn(env) ? "lobby links turn" : "lobby links";
+}
+
+// The iceServers list for a game from Cloudflare's answer: its STUN and TURN
+// servers, without the addresses on port 53.
+function turnServers(answer) {
+    const servers = [];
+    for (const s of (answer && Array.isArray(answer.iceServers)) ? answer.iceServers : []) {
+        const urls = [].concat(s.urls || []).filter(u => typeof u === "string" && !PORT_53_RE.test(u));
+        if (!urls.length)
+            continue;
+        const server = { urls };
+        if (typeof s.username === "string" && typeof s.credential === "string") {
+            server.username = s.username;
+            server.credential = s.credential;
+        }
+        servers.push(server);
+    }
+    if (!servers.some(s => s.username))
+        throw new Error("no TURN server in the answer");
+    return servers;
+}
+
 export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
@@ -219,6 +275,8 @@ export class Lobby extends DurableObject {
         // ws -> Map(notice -> {first, last, told}): packets it sends that go
         // nowhere, by what it would be told about them (see NOTICE_MS).
         this.unsent = new Map();
+        this.turnAt = new Map();  // ws -> when it last got TURN credentials
+        this.turnDownUntil = 0;   // no TURN credentials until then (TURN_RETRY_MS)
         this.alarmAt = null;      // when the next sweep for quiet connections runs
         this.nextRoom = 1;
         this.lastStatus = null;   // the status the watchers have
@@ -310,6 +368,7 @@ export class Lobby extends DurableObject {
         const ice = iceMessage(this.env);
         if (ice)
             this.send(server, ice);
+        this.send(server, lobbyMessage(this.env));
         return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -323,27 +382,31 @@ export class Lobby extends DurableObject {
             return;
         }
         this.count(ws, typeof message === "string", size);
-        if (typeof message === "string")
-            this.onText(ws, message);
-        else
-            this.onBinary(ws, message);
+        // Only turn waits for anything (Cloudflare's answer), and only after
+        // everything else it does: other messages are handled meanwhile.
+        const later = typeof message === "string" ? this.onText(ws, message) : this.onBinary(ws, message);
+        if (later)
+            await later;
     }
 
     async webSocketClose(ws, code, reason, wasClean) {
         this.drop(ws);
-        this.conns.delete(ws);
-        this.heard.delete(ws);
-        this.unsent.delete(ws);
+        this.forget(ws);
         this.statusChanged();
         try { ws.close(1000, "bye"); } catch (e) {}
     }
 
     async webSocketError(ws, error) {
         this.drop(ws);
+        this.forget(ws);
+        this.statusChanged();
+    }
+
+    forget(ws) {
         this.conns.delete(ws);
         this.heard.delete(ws);
         this.unsent.delete(ws);
-        this.statusChanged();
+        this.turnAt.delete(ws);
     }
 
     async alarm() {
@@ -390,9 +453,7 @@ export class Lobby extends DurableObject {
             this.drop(ws);
             // Counted nowhere if the object wakes up before the socket is gone.
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
-            this.conns.delete(ws);
-            this.heard.delete(ws);
-            this.unsent.delete(ws);
+            this.forget(ws);
             try { ws.close(4000, "quiet"); } catch (e) {}
             quiet++;
         }
@@ -450,16 +511,16 @@ export class Lobby extends DurableObject {
         }
     }
 
-    // A minute's message counts, in all and by connection (ws -> {n, unsent,
-    // why: Map(reason -> how many)}).
+    // A minute's message counts, in all and by connection (ws -> {n, packets,
+    // unsent, why: Map(reason -> how many)}), and the TURN credentials made.
     newStats(now) {
-        return { since: now, text: 0, packets: 0, bytes: 0, by: new Map() };
+        return { since: now, text: 0, packets: 0, bytes: 0, by: new Map(), turn: 0, turnFailed: 0 };
     }
 
     connStats(ws) {
         let b = this.stats.by.get(ws);
         if (!b) {
-            b = { n: 0, unsent: 0, why: new Map() };
+            b = { n: 0, packets: 0, unsent: 0, why: new Map() };
             this.stats.by.set(ws, b);
         }
         return b;
@@ -478,15 +539,24 @@ export class Lobby extends DurableObject {
         else
             s.packets++;
         s.bytes += size;
-        this.connStats(ws).n++;
+        const b = this.connStats(ws);
+        b.n++;
+        if (!isText)
+            b.packets++;
         const now = Date.now();
         if (now - s.since >= STATS_MS) {
             let watching = 0;
             for (const c of this.conns.values())
                 watching += c.watch ? 1 : 0;
+            // Players whose game packets went through the lobby: those
+            // without a WebRTC link (or not yet, or no longer).
+            let relayed = 0;
+            for (const c of s.by.values())
+                relayed += c.packets ? 1 : 0;
             console.log(`relay: ${s.text + s.packets} messages in ${Math.round((now - s.since) / 1000)} s ` +
                 `(${s.packets} game packets, ${s.bytes} bytes), ${this.conns.size - watching} connected, ` +
-                `${watching} watching`);
+                `${watching} watching, ${relayed} sending game packets through the lobby` +
+                (turnOn(this.env) ? `, ${s.turn} TURN credentials made (${s.turnFailed} failed)` : ""));
             // Who sent them, so a match going through the lobby, or a game
             // whose packets go nowhere, can be told apart and named.
             if (s.packets) {
@@ -576,14 +646,17 @@ export class Lobby extends DurableObject {
                     this.send(peer, `welcome ${args[0]} ${args[1]}`);
             }
         } else if (op === "signal" && args.length === 2 && ID_RE.test(args[0]) && validSignal(args[1])) {
-            // Signaling only runs between a host and its own clients.
+            // Between any two players in the same room: a host and its
+            // clients, and two clients linking to each other.
             const room = this.rooms.get(c.room);
-            if (room) {
+            if (room && ws === (c.id === 1 ? room.host : room.peers.get(c.id))) {
                 const to = Number(args[0]);
-                const target = room.host === ws ? room.peers.get(to) : (to === 1 ? room.host : null);
-                if (target)
+                const target = to === 1 ? room.host : room.peers.get(to);
+                if (target && target !== ws)
                     this.send(target, `signal ${c.id} ${args[1]}`);
             }
+        } else if (op === "turn" && !args.length) {
+            return this.turn(ws, c);
         } else if (op === "rejoin" && args.length === 3 && ID_RE.test(args[0]) && ID_RE.test(args[1]) && KEY_RE.test(args[2])) {
             this.takeSeat(ws, Number(args[0]), Number(args[1]), args[2], null);
         } else if (op === "rehost" && (args.length === 2 || args.length === 3) && ID_RE.test(args[0]) && KEY_RE.test(args[1]) &&
@@ -601,6 +674,46 @@ export class Lobby extends DurableObject {
         } else {
             this.send(ws, "error bad-request");
         }
+    }
+
+    // TURN credentials for a game in a room, as ice with how many seconds
+    // they last. Without them (no TURN key, a game in no room or asking too
+    // often, or Cloudflare couldn't make them), the ice every game gets on
+    // connect, so a game waiting for them goes on at once.
+    async turn(ws, c) {
+        const now = Date.now();
+        const room = this.rooms.get(c.room);
+        const seated = !!room && ws === (c.id === 1 ? room.host : room.peers.get(c.id));
+        if (!turnOn(this.env) || !seated || now - (this.turnAt.get(ws) || 0) < TURN_EVERY_MS || now < this.turnDownUntil) {
+            const ice = iceMessage(this.env);
+            if (ice)
+                this.send(ws, ice);
+            return;
+        }
+        this.turnAt.set(ws, now);
+        let servers;
+        try {
+            const answer = await fetch((this.env.TURN_API || TURN_API) + encodeURIComponent(this.env.TURN_KEY_ID) +
+                                       "/credentials/generate-ice-servers", {
+                method: "POST",
+                headers: { "Authorization": "Bearer " + this.env.TURN_KEY_API_TOKEN, "Content-Type": "application/json" },
+                body: JSON.stringify({ ttl: TURN_TTL_S }),
+            });
+            if (answer.status !== 201)
+                throw new Error(`HTTP ${answer.status}`);
+            servers = turnServers(await answer.json());
+        } catch (e) {
+            this.stats.turnFailed++;
+            if (Date.now() >= this.turnDownUntil)
+                console.log(`relay: Cloudflare didn't make TURN credentials (${e.message}); none for a minute`);
+            this.turnDownUntil = Date.now() + TURN_RETRY_MS;
+            const ice = iceMessage(this.env);
+            if (ice)
+                this.send(ws, ice);
+            return;
+        }
+        this.stats.turn++;
+        this.send(ws, `ice ${btoa(JSON.stringify(servers))} ${TURN_TTL_S}`);
     }
 
     onBinary(ws, data) {

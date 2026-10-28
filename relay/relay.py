@@ -13,21 +13,27 @@ binary frames are game packets:
   client -> relay   list [<game>] | host <entry> | update <entry> | join <room>
                     welcome <id> <entry> | leave | signal <id> <data> | ping
                     hello <game> <name> | watch | rejoin <room> <id> <key>
-                    rehost <room> <key> [<entry>]
+                    rehost <room> <key> [<entry>] | turn
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
-                    host-left | error <code> | signal <id> <data> | ice <data>
-                    status <data> | seat <room> <id> <key> | rejoined <room> <id>
+                    host-left | error <code> | signal <id> <data>
+                    ice <data> [<seconds>] | lobby <what>* | status <data>
+                    seat <room> <id> <key> | rejoined <room> <id>
                     rehosted <room> | peer-lost <id> | peer-back <id>
                     host-lost | host-back
 
 list jk1 or list mots lists only the games that game can join: it leaves out
 those whose host said hello as the other one. <entry> is the host's
 hex-encoded session description, passed through as is.
-signal carries base64 SDP or ICE candidates between a host and one of its
-clients; the relay only checks the sender is in that room and swaps the target
-id for the sender's. ice is sent once on connect when --stun or --turn is set:
-base64 JSON for RTCPeerConnection's iceServers.
+signal carries base64 SDP or ICE candidates between two players in the same
+room, a host and one of its clients or two clients linking to each other; the
+relay only checks the sender is in that room and swaps the target id for the
+sender's. ice is sent once on connect when --stun or --turn is set: base64
+JSON for RTCPeerConnection's iceServers. Then lobby says what this relay can do
+beyond the basics: links (signal between clients), and turn with --turn. A game
+in a room that sends turn then gets fresh TURN credentials, as ice with how
+many seconds they last (--turn-ttl); a game in no room, or without --turn, gets
+the ice it got on connect.
 
 The landing page's live counts: each running game sends hello with its game
 (jk1 or mots) and its player's name in base64 UTF-8, again when it changes. A
@@ -177,8 +183,9 @@ class Room:
 
 
 class Relay:
-    def __init__(self, hold=HOLD_S):
+    def __init__(self, hold=HOLD_S, ice=None):
         self.hold = hold
+        self.ice = ice
         self.lock = threading.Lock()
         self.rooms = {}
         self.next_room = 1
@@ -245,15 +252,18 @@ class Relay:
                     if peer:
                         outbox.append((peer, OP_TEXT, ("welcome %s %s" % (args[0], args[1])).encode()))
             elif op == "signal" and len(args) == 2 and args[0].isdigit() and valid_signal(args[1]):
-                # Signaling only runs between a host and its own clients.
+                # Between any two players in the same room: a host and its
+                # clients, and two clients linking to each other.
                 room, to = conn.room, int(args[0])
-                if room:
-                    if room.host is conn:
-                        target = room.peers.get(to)
-                    else:
-                        target = room.host if to == 1 else None
-                    if target:
+                if room and conn is (room.host if conn.id == 1 else room.peers.get(conn.id)):
+                    target = room.host if to == 1 else room.peers.get(to)
+                    if target and target is not conn:
                         outbox.append((target, OP_TEXT, ("signal %d %s" % (conn.id, args[1])).encode()))
+            elif op == "turn" and not args:
+                if self.ice and self.ice.turn and conn.room:
+                    outbox.append((conn, OP_TEXT, self.ice.message(with_ttl=True).encode()))
+                elif self.ice and self.ice.enabled():
+                    outbox.append((conn, OP_TEXT, self.ice.message().encode()))
             elif op == "rejoin" and len(args) == 3 and args[0].isdigit() and args[1].isdigit() and KEY_RE.match(args[2]):
                 self._take_seat(conn, int(args[0]), int(args[1]), args[2], None, outbox)
             elif op == "rehost" and len(args) in (2, 3) and args[0].isdigit() and KEY_RE.match(args[1]) and \
@@ -551,8 +561,12 @@ class IceConfig:
             servers.append(entry)
         return servers
 
-    def message(self):
-        return "ice " + base64.b64encode(json.dumps(self.servers()).encode()).decode()
+    def message(self, with_ttl=False):
+        line = "ice " + base64.b64encode(json.dumps(self.servers()).encode()).decode()
+        return line + " %d" % self.ttl if with_ttl else line
+
+    def lobby_message(self):
+        return "lobby links turn" if self.turn else "lobby links"
 
 
 def log(text):
@@ -642,6 +656,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())
+        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links")
         try:
             self.websocket_loop(conn)
         finally:
@@ -704,8 +719,8 @@ def main():
                         help="seconds a dropped player's seat waits for them to come back")
     args = parser.parse_args()
 
-    Handler.relay = Relay(args.hold)
     Handler.ice = IceConfig(args.stun, args.turn, args.turn_secret, args.turn_user, args.turn_pass, args.turn_ttl)
+    Handler.relay = Relay(args.hold, Handler.ice)
     server = http.server.ThreadingHTTPServer((args.host, args.port), functools.partial(Handler, directory=args.dir))
     server.daemon_threads = True
     log("serving %s at http://%s:%d/index.html, relay at ws://%s:%d/relay"
