@@ -1,6 +1,7 @@
 // Drives the lobby protocol with plain WebSocket clients and prints a
 // transcript, to check a deployed lobby against protocol.expected.txt (made
-// with `wrangler dev`). Needs Node.js 22 or newer.
+// with `wrangler dev`). Needs Node.js 22 or newer. TURN credentials are
+// turn.mjs's to check.
 //
 //   node protocol.mjs wss://<host>/relay [protocol.expected.txt]
 //
@@ -89,7 +90,9 @@ function client(name) {
     ws.onmessage = ev => {
       let s;
       if (typeof ev.data === 'string') {
-        s = ev.data.startsWith('ice ') ? 'ice ' + Buffer.from(ev.data.slice(4), 'base64').toString() : ev.data;
+        s = ev.data.startsWith('ice ') ? 'ice ' + Buffer.from(ev.data.split(' ')[1], 'base64').toString() : ev.data;
+        // A lobby with a TURN key says so too.
+        if (s === 'lobby links turn') s = 'lobby links';
         if (s.startsWith('hosted ')) ws.room = s.split(' ')[1];
         if (s.startsWith('seat ')) ws.key = s.split(' ')[3];
         s = named(s);
@@ -140,8 +143,13 @@ const B = await client('B'); await sleep(200);
 await step('B', B, 'join ' + H.room);
 await step('H', H, 'welcome 3 ab12');
 await step('A', A, 'signal 1 c2RwYQ==');
+// Two clients link to each other too.
 await step('A', A, 'signal 3 c2RwYQ==');
+await step('B', B, 'signal 2 c2RwQg==');
+await step('A', A, 'signal 2 c2RwYQ==');
+await step('A', A, 'signal 9 c2RwYQ==');
 await step('H', H, 'signal 3 c2RwSA==');
+await step('H', H, 'signal 1 c2RwSA==');
 await step('H', H, 'signal 2 bad!');
 await step('A', A, pkt(77, 1, 'A to host'));
 await step('A', A, pkt(77, 0, 'A to host via 0'));
@@ -154,6 +162,7 @@ await step('A', A, 'ping');
 await step('A', A, 'list');
 await step('A', A, 'leave');
 await step('A', A, pkt(2, 1, 'after leave'));
+await step('A', A, 'signal 3 c2RwYQ==', 'signal 3 c2RwYQ== (after leave)');
 // leave ends the seat at once: its key doesn't take it back.
 await step('A', A, `rejoin ${H.room} 2 ${A.key}`, 'rejoin <room1> 2 <A\'s key>');
 await step('A', A, 'join ' + H.room);

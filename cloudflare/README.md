@@ -24,8 +24,10 @@ running at home. It speaks the same protocol, so the same browser build works wi
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.
 - Pages get Cloudflare's STUN server (`STUN` in `wrangler.toml`), so most players link directly over
-  WebRTC and their game packets never touch the lobby. There's no TURN server: players who can't
-  link directly have their packets relayed by the lobby, as with `relay.py`.
+  WebRTC and their game packets never touch the lobby. Players in the same game link to each other
+  too, not only to the host. Players who can't link directly get a link through Cloudflare's TURN
+  service once it's set up (see TURN below); until then, or if that fails too, the lobby relays
+  their packets, as `relay.py` does.
 
 ## Free plan limits
 
@@ -49,6 +51,46 @@ and each time it tells a game to stop. `npx wrangler tail` shows these live, and
 the Cloudflare dashboard keeps them for a few days (`[observability]` in `wrangler.toml`). The
 dashboard also shows the day's requests.
 
+## TURN
+
+Some home routers and networks can't make WebRTC links with STUN alone. Players behind them send
+every packet through the lobby, which is one Durable Object in one city and passes each player's
+position on at most every 200 ms. With a TURN key, the lobby hands those players short-lived
+credentials for Cloudflare's TURN service instead, which answers at the Cloudflare city nearest
+each player, so they get a full-speed WebRTC link like everyone else.
+
+To turn it on:
+
+1. Make a TURN key in the Cloudflare dashboard, under Realtime
+   (https://dash.cloudflare.com/?to=/:account/calls). It has an id and an API token.
+2. Store them as two secrets on the Worker, either in the dashboard (Workers & Pages, `jkdf2mp`,
+   Settings, Variables and Secrets, type Secret) or with wrangler, which asks for each value:
+
+   ```
+   npx wrangler secret put TURN_KEY_ID
+   npx wrangler secret put TURN_KEY_API_TOKEN
+   ```
+
+Without both, the lobby works as before. With them, it tells games it has TURN (`lobby links turn`
+on connect), and a game in a room that asks (`turn`) gets credentials that last 24 hours
+(`TURN_TTL_S` in `src/lobby.js`). A joiner asks as it joins, a host when someone joins it, so a
+host waiting alone doesn't use any. Cloudflare asks that more than half of the credentials made get
+used. If Cloudflare can't make them, the lobby logs it and hands out none for a minute; games then
+link as they did without TURN.
+
+Cost: Cloudflare charges $0.05 per GB it delivers from TURN to players, after 1,000 GB free a month
+(shared with its SFU). A link only goes through TURN when the two computers can't reach each other
+directly. By my estimate from packet sizes, one player on TURN in an 8-player match is about 0.2 GB
+an hour, so the free allowance is a few thousand player-hours a month.
+
+Risk: anyone who joins a game gets credentials, and could take them out of the browser and use
+Cloudflare's TURN for something else for up to 24 hours, at the account's cost. The lobby only gives
+them to games in a room, at most one set every 5 seconds per connection. Deleting the TURN key in
+the dashboard stops every credential made with it. The dashboard shows how much TURN is used.
+
+The lobby's minute log counts the players sending game packets through the lobby and the
+credentials made, so you can see how many players still need the relay.
+
 ## Deploy
 
 Needs Node.js 22 or newer and a Cloudflare account (the free plan runs it, within the limits above).
@@ -62,9 +104,18 @@ npx wrangler deploy
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/index.html instead.
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
-while nobody is hosting. It plays out hosting, joining, signaling, packet routing, leaving, and
-seats being held, taken back and running out, with plain WebSocket clients, and compares the
-transcript with the one `wrangler dev` gives. It waits once for held seats to run out, about a
-minute against a deployed lobby, and sends packets that go nowhere for a little over 5 seconds a
-few times. Against `npx wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`, which made
+while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,
+and between two players), packet routing, leaving, and seats being held, taken back and running
+out, with plain WebSocket clients, and compares the transcript with the one `wrangler dev` gives.
+It waits once for held seats to run out, about a minute against a deployed lobby, and sends packets
+that go nowhere for a little over 5 seconds a few times. Against `npx wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`, which made
 `protocol.expected.txt`, run it with `HOLD_MS=3000 NOTICE_MS=1000` to make those waits short.
+
+`test/turn.mjs` checks the TURN credentials against a made-up Cloudflare API that it starts itself,
+with `wrangler dev` pointed at it:
+
+```
+npx wrangler dev --port 8797 --var TURN_KEY_ID:key1 --var TURN_KEY_API_TOKEN:token1 \
+    --var TURN_API:http://127.0.0.1:8798/
+node test/turn.mjs ws://localhost:8797/relay 8798
+```
