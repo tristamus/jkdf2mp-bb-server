@@ -20,6 +20,11 @@ see Address below), with nothing running at home. It speaks the same protocol, s
   player's seat for 60 seconds (`HOLD_MS`) in storage, and the game reconnects and takes it back
   with the key the lobby gave it. A seat nobody takes back ends as before. This needs a game built
   with the seat protocol; older builds still leave the match when their connection drops.
+- Each game says which netcode its build speaks when it connects (`/relay?net=<n>`), and the
+  lobby only lists games, and lets it join them, whose host speaks the same: a join to another
+  gets `error version newer` or `error version older`. Builds that can play a match together
+  share a number, so it only goes up with a change older builds can't play with. Until then
+  every game, whether or not it says, is 0.
 - The landing page's live counts come from the lobby too: each running game sends its player's name
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.

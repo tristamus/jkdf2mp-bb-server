@@ -257,6 +257,71 @@ R <- peer-lost 2
 U closed 1000
 R -> bin to id 2, whose seat is held, for longer than NOTICE_MS
 R -> leave
+W2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+W2 <- lobby links
+W2 -> watch
+N1 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+N1 <- lobby links
+N1 -> host <t_Net1 entry>, connected with net=1
+N1 <- hosted <room8>
+N1 <- seat <room8> 1 <key>
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1]
+N0 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+N0 <- lobby links
+N0 -> host <t_Net0 entry>, connected with net=0
+N0 <- hosted <room9>
+N0 <- seat <room9> 1 <key>
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1, <room9> "t_Net0" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""]]
+X -> list
+X <- list <room9> 1 00000000000000000000000000000000040000000100000074005f004e00650074003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+X -> join <room8>
+X <- error version newer
+X -> join <room9>
+N0 <- peer-joined 2
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1, <room9> "t_Net0" jk1 01narshadda.jkl JK1MP mod="" open 2/4 ["",""]]
+X <- seat <room9> 2 <key>
+Y <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+Y <- lobby links
+Y -> list jk1
+Y <- list <room8> 1 00000000000000000000000000000000040000000100000074005f004e00650074003100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+Y -> join <room9>
+Y <- error version older
+Y -> join <room8>
+N1 <- peer-joined 2
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 2/4 ["",""] net=1, <room9> "t_Net0" jk1 01narshadda.jkl JK1MP mod="" open 2/4 ["",""]]
+Y <- seat <room8> 2 <key>
+Z <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+Z <- lobby links
+Z -> list
+Z <- list <room9> 2 00000000000000000000000000000000040000000100000074005f004e00650074003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+Z2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+Z2 <- lobby links
+Z2 -> join <room8>
+Z2 <- error version newer
+N1 closes
+N1 closed 1000
+Y <- host-lost
+N1b <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
+N1b <- lobby links
+N1b -> rehost <room8> <N1's key>
+N1b <- rehosted <room8>
+Y <- host-back
+Z -> join <room8>
+Z <- error version newer
+X -> leave
+N0 <- peer-left 2
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 2/4 ["",""] net=1, <room9> "t_Net0" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""]]
+Y -> leave
+N1b <- peer-left 2
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1, <room9> "t_Net0" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""]]
+N0 -> leave
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1]
+N1b -> leave
+W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[]
+W2 closes
+W2 closed 1000
+Z closed 1000
+Z2 closed 1000
 big message
 A closed 1009
 B closed 1000

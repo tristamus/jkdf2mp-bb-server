@@ -30,6 +30,13 @@
 // Cloudflare's TURN service, so two players who can't link directly still
 // get a WebRTC link, through the Cloudflare cities nearest them, instead of
 // sending everything through this one lobby.
+//
+// Each game says which netcode its build speaks, in the address it connects
+// with (/relay?net=<n>), and only lists and joins games whose host speaks the
+// same: list leaves the others out, and join answers "error version newer"
+// or "error version older", whichever the room's is. Builds that can play a
+// match together share a number (they agree on the rest through their own
+// hellos), so it only goes up with a change older builds can't play with.
 
 import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
@@ -43,6 +50,9 @@ const HEX_RE = /^[0-9a-fA-F]+$/;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const ID_RE = /^[0-9]{1,9}$/;
 const KEY_RE = /^[0-9a-f]{32}$/;
+// The netcode number in a game's address. A game that doesn't say is 0, as
+// is every build until the first change older builds can't play with.
+const NET_RE = /^[0-9]{1,3}$/;
 // A jkMultiEntry (types.h in the OpenJKDF2 fork) in hex. Anything after it is
 // the host's mod tail (packaging/wasm/mods.js).
 const ENTRY_HEX = 240 * 2;
@@ -210,6 +220,11 @@ function playerName(b64) {
     return cleanText(new TextDecoder().decode(Uint8Array.from(bin, ch => ch.charCodeAt(0))), MAX_NAME);
 }
 
+// The netcode number a game connected with, 0 if it didn't say.
+function netcode(text) {
+    return text && NET_RE.test(text) ? Number(text) : 0;
+}
+
 function newKey() {
     const b = new Uint8Array(16);
     crypto.getRandomValues(b);
@@ -266,14 +281,16 @@ export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         // room id -> {id, host, entry, peers: Map(id -> ws), seats}, where
-        // seats is Map(id -> {key, until, name, game}) for the host (1) and
-        // each peer: until, name and game only while the seat is held.
+        // seats is Map(id -> {key, until, name, game, net}) for the host (1)
+        // and each peer: until, name, game and net only while the seat is
+        // held.
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
-        // ws -> {room, id, name, game, watch, since}: the room id and player
-        // id, the player's name and game from hello (name null until then),
-        // whether it's a page watching the counts, and when it connected.
+        // ws -> {room, id, name, game, watch, since, net}: the room id and
+        // player id, the player's name and game from hello (name null until
+        // then), whether it's a page watching the counts, when it connected,
+        // and the netcode it connected with.
         this.conns = new Map();
         this.heard = new Map();   // ws -> when its last message came (not its pings)
         // ws -> Map(notice -> {first, last, told}): packets it sends that go
@@ -367,7 +384,8 @@ export class Lobby extends DurableObject {
         const pair = new WebSocketPair();
         const [client, server] = Object.values(pair);
         this.ctx.acceptWebSocket(server);
-        this.saveConn(server, { room: 0, id: 0, name: null, game: "", watch: false, since: Date.now() });
+        this.saveConn(server, { room: 0, id: 0, name: null, game: "", watch: false, since: Date.now(),
+                                net: netcode(new URL(request.url).searchParams.get("net")) });
         this.sweepLater();
         const ice = iceMessage(this.env);
         if (ice)
@@ -587,10 +605,12 @@ export class Lobby extends DurableObject {
         const c = this.conn(ws);
         if (op === "list") {
             // list jk1 or list mots: only the games that game can join, so
-            // not those whose host said hello as the other one.
+            // not those whose host said hello as the other one, or speaks
+            // another netcode.
             const want = GAMES.includes(args[0]) ? args[0] : null;
             const games = [...this.rooms.values()]
-                .filter(r => r.host && (!want || !this.conn(r.host).game || this.conn(r.host).game === want))
+                .filter(r => r.host && (!want || !this.conn(r.host).game || this.conn(r.host).game === want) &&
+                             this.roomNet(r) === (c.net || 0))
                 .map(r => `${r.id} ${this.seated(r).length} ${r.entry}`);
             this.send(ws, ["list", ...games].join(" "));
         } else if (op === "host" && args.length === 1 && validEntry(args[0])) {
@@ -619,6 +639,15 @@ export class Lobby extends DurableObject {
             // Not while its host is away: nobody would welcome them.
             if (!room || !room.host) {
                 this.send(ws, "error no-room");
+                this.statusChanged();
+                return;
+            }
+            // Another netcode, from a list that's out of date or a landing
+            // page with another build: says whose is newer, so the game can
+            // say whose page to reload.
+            const net = this.roomNet(room);
+            if (net !== (c.net || 0)) {
+                this.send(ws, `error version ${net > (c.net || 0) ? "newer" : "older"}`);
                 this.statusChanged();
                 return;
             }
@@ -815,6 +844,7 @@ export class Lobby extends DurableObject {
                 id: room.id, name: info.name, game,
                 map: info.map, episode: info.episode, mod: info.mod, locked: info.locked,
                 players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
+                net: this.roomNet(room),
             });
         }
         for (const g of Object.values(byGame)) {
@@ -857,6 +887,13 @@ export class Lobby extends DurableObject {
         this.lastStatus = status;
         for (const w of this.watchers())
             this.send(w, status);
+    }
+
+    // The netcode a room's games speak: its host's, also while the host's
+    // seat is held.
+    roomNet(room) {
+        const host = room.host ? this.conn(room.host) : room.seats.get(1);
+        return (host && host.net) || 0;
     }
 
     // The room's players by id, the host first, held seats too: [id, ws or
@@ -905,7 +942,7 @@ export class Lobby extends DurableObject {
             this.leave(ws);
             return;
         }
-        Object.assign(seat, { until: Date.now() + this.holdMs, name: c.name || null, game: c.game || "" });
+        Object.assign(seat, { until: Date.now() + this.holdMs, name: c.name || null, game: c.game || "", net: c.net || 0 });
         if (c.id === 1) {
             room.host = null;
             for (const peer of room.peers.values())
@@ -943,6 +980,7 @@ export class Lobby extends DurableObject {
         delete seat.until;
         delete seat.name;
         delete seat.game;
+        delete seat.net;
         if (id === 1) {
             room.host = ws;
             if (entry && entry !== room.entry) {
