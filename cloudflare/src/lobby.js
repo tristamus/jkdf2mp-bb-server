@@ -32,6 +32,7 @@
 // sending everything through this one lobby.
 
 import { DurableObject } from "cloudflare:workers";
+import { movedTo, movedStatus } from "./moved.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -111,6 +112,9 @@ export default {
             const lobby = env.LOBBY.get(env.LOBBY.idFromName("lobby"));
             return lobby.fetch(request);
         }
+        const to = movedTo(url, env.SITE, env.MOVED_FROM);
+        if (to)
+            return Response.redirect(to, movedStatus(env.MOVED_STATUS));
         return env.ASSETS.fetch(request);
     },
 };
