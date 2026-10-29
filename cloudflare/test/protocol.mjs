@@ -76,15 +76,16 @@ function status(b64data) {
   const ours = n => n.startsWith('t_');
   const games = s.games.filter(g => ours(g.name)).map(g => `<room ${g.id}> ${JSON.stringify(g.name)} ` +
     `${g.game} ${g.map} ${g.episode} mod=${JSON.stringify(g.mod)} ${g.locked ? 'locked' : 'open'} ` +
-    `${g.players}/${g.max} ${JSON.stringify(g.names)}`);
+    `${g.players}/${g.max} ${JSON.stringify(g.names)}${g.net ? ` net=${g.net}` : ''}`);
   const lobby = kinds.map(k => `${k}=${JSON.stringify(s.byGame[k].lobby.filter(ours))}`).join(' ');
   const line = `status ${ok ? 'ok' : 'WRONG'} lobby ${lobby} games=[${games.join(', ')}]`;
   if (line === lastStatus) return null;
   return lastStatus = line;
 }
-function client(name) {
+// query: what the game adds to the address, ?net=<n> for its netcode.
+function client(name, query = '') {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(url + query);
     ws.binaryType = 'arraybuffer';
     ws.got = [];
     ws.onmessage = ev => {
@@ -271,6 +272,41 @@ await keepsSending('U', U, pkt(77, 9, 'to id 9'), 'bin to id 9');
 await closes('U', U);
 await keepsSending('R', R, pkt(1, 2, 'to id 2'), 'bin to id 2, whose seat is held');
 await step('R', R, 'leave');
+// Netcode numbers: a game says its build's in its address (0 when it
+// doesn't), lists only show games whose host speaks the same, and a join to
+// another gets error version, newer or older for the room's. The status
+// says each game's (net=, when it isn't 0).
+const W2 = await client('W2'); await sleep(200);
+await step('W2', W2, 'watch');
+const N1 = await client('N1', '?net=1'); await sleep(200);
+await step('N1', N1, 'host ' + entry({ ...duel, name: 't_Net1' }), 'host <t_Net1 entry>, connected with net=1');
+const N0 = await client('N0', '?net=0'); await sleep(200);
+await step('N0', N0, 'host ' + entry({ ...duel, name: 't_Net0' }), 'host <t_Net0 entry>, connected with net=0');
+// X connected without one.
+await step('X', X, 'list');
+await step('X', X, 'join ' + N1.room);
+await step('X', X, 'join ' + N0.room);
+const Y = await client('Y', '?net=1'); await sleep(200);
+await step('Y', Y, 'list jk1');
+await step('Y', Y, 'join ' + N0.room);
+await step('Y', Y, 'join ' + N1.room);
+// Anything but 1 to 3 digits counts as 0.
+const Z = await client('Z', '?net=1x'); await sleep(200);
+await step('Z', Z, 'list');
+const Z2 = await client('Z2', '?net=1000'); await sleep(200);
+await step('Z2', Z2, 'join ' + N1.room);
+// A held seat keeps its room's number, and a joiner with another still gets
+// turned down once the host is back.
+await closes('N1', N1);
+const N1b = await client('N1b', '?net=1'); await sleep(200);
+await step('N1b', N1b, `rehost ${N1.room} ${N1.key}`, 'rehost <room8> <N1\'s key>');
+await step('Z', Z, 'join ' + N1.room);
+for (const [name, ws] of [['X', X], ['Y', Y], ['N0', N0], ['N1b', N1b]])
+  await step(name, ws, 'leave');
+flush(); log.push('W2 closes'); W2.close(); await sleep(300);
+for (const ws of [Z, Z2]) {
+  ws.close(); await sleep(300);
+}
 flush(); log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
 // One at a time: over the internet, two closes can finish in either order.
 for (const ws of [H, B, P2, S2, X, R]) {

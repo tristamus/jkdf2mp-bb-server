@@ -20,6 +20,11 @@ see Address below), with nothing running at home. It speaks the same protocol, s
   player's seat for 60 seconds (`HOLD_MS`) in storage, and the game reconnects and takes it back
   with the key the lobby gave it. A seat nobody takes back ends as before. This needs a game built
   with the seat protocol; older builds still leave the match when their connection drops.
+- Each game says which netcode its build speaks when it connects (`/relay?net=<n>`), and the
+  lobby only lists games, and lets it join them, whose host speaks the same: a join to another
+  gets `error version newer` or `error version older`. Builds that can play a match together
+  share a number, so it only goes up with a change older builds can't play with. Until then
+  every game, whether or not it says, is 0.
 - The landing page's live counts come from the lobby too: each running game sends its player's name
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.
@@ -127,12 +132,13 @@ The domain in `routes` has to be an active zone in that account first, or the de
 a domain of your own, take `routes` out and set `SITE` to `""`.
 
 ```
-npm ci                 # installs the pinned wrangler
-npx wrangler login     # opens the browser to allow wrangler into the account
-npx wrangler deploy
+npm ci                       # installs the pinned wrangler
+npx wrangler login           # opens the browser to allow wrangler into the account
+npx wrangler deploy --env="" # the site; --env beta for the test address (below)
 ```
 
-`npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead.
+`npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead. A plain `npx wrangler deploy`
+deploys the site too, with a warning that there's more than one environment; `--env=""` names the site's.
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,
@@ -150,3 +156,21 @@ npx wrangler dev --port 8797 --var TURN_KEY_ID:key1 --var TURN_KEY_API_TOKEN:tok
     --var TURN_API:http://127.0.0.1:8798/
 node test/turn.mjs ws://localhost:8797/relay 8798
 ```
+
+## Test address
+
+`[env.beta]` in `wrangler.toml` is a second Worker, `jkdf2mp-beta`, at https://beta.jediknight.zone,
+with its own lobby. A change to netcode or the lobby goes there first, for a few players to try both hit
+rules, and then the same files go to the site:
+
+```
+npx wrangler deploy --env beta    # the test address
+npx wrangler deploy --env=""      # the site, once it's checked
+```
+
+Nobody lands in a test match from the site, since the lobbies are apart. Nothing moves there (`SITE`
+is empty). Wrangler doesn't carry variables, bindings or secrets over to an environment, so
+`[env.beta]` repeats the first two, and TURN needs its two secrets set on `jkdf2mp-beta` as well
+(`npx wrangler secret put TURN_KEY_ID --env beta`, and the same for `TURN_KEY_API_TOKEN`); without them,
+its players who can't link directly go through its lobby. Its requests count toward the same account.
+`npx wrangler dev --env beta` runs it locally.

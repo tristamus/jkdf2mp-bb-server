@@ -7,8 +7,9 @@ clients, and relays game packets for players whose direct WebRTC link isn't up.
 Python 3 standard library only.
 
 The page's network backend (src/Platform/Networking/WSRelay in the OpenJKDF2
-fork) connects to ws://<this server>/relay. Text frames are control lines,
-binary frames are game packets:
+fork) connects to ws://<this server>/relay?net=<n>, where n is the netcode its
+build speaks (0 if it doesn't say). Text frames are control lines, binary
+frames are game packets:
 
   client -> relay   list [<game>] | host <entry> | update <entry> | join <room>
                     welcome <id> <entry> | leave | signal <id> <data> | ping
@@ -23,8 +24,12 @@ binary frames are game packets:
                     host-lost | host-back
 
 list jk1 or list mots lists only the games that game can join: it leaves out
-those whose host said hello as the other one. <entry> is the host's
-hex-encoded session description, passed through as is.
+those whose host said hello as the other one, or speaks another netcode. A
+join to a game with another netcode gets error version newer, or error version
+older, whichever the room's is. Builds that can play a match together share a
+number (they agree on the rest through their own hellos), so it only goes up
+with a change older builds can't play with. <entry> is the host's hex-encoded
+session description, passed through as is.
 signal carries base64 SDP or ICE candidates between two players in the same
 room, a host and one of its clients or two clients linking to each other; the
 relay only checks the sender is in that room and swaps the target id for the
@@ -40,8 +45,9 @@ The landing page's live counts: each running game sends hello with its game
 page that sends watch gets status, base64 UTF-8 JSON, then again whenever it
 changes: {"online": n, "lobby": [names], "byGame": {"jk1": {"online": n,
 "lobby": [names]}, "mots": {...}}, "games": [{"id", "name", "game", "map",
-"episode", "mod", "locked", "players", "max", "names"}]}, the host's name
-first and "" for a player whose game didn't say hello. byGame splits the
+"episode", "mod", "locked", "players", "max", "names", "net"}]}, the host's
+name first and "" for a player whose game didn't say hello, and net the
+netcode the game's host speaks. byGame splits the
 counts and the lobby by the game players run, for the page's rooms. The relay reads a
 game's details from its entry (a jkMultiEntry, then the mod tail from mods.js),
 and never sends its password, only whether it has one. A player is a
@@ -88,6 +94,7 @@ import struct
 import threading
 import time
 import unicodedata
+import urllib.parse
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_MESSAGE = 64 * 1024
@@ -114,6 +121,9 @@ QUIET_S = 120
 # cloudflare/src/lobby.js.
 HOLD_S = 60
 KEY_RE = re.compile(r"^[0-9a-f]{32}$")
+# The netcode number in a game's address. A game that doesn't say is 0, as is
+# every build until the first change older builds can't play with.
+NET_RE = re.compile(r"^[0-9]{1,3}$")
 # Control and invisible characters (bidi overrides among them) never reach a page.
 HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 
@@ -121,9 +131,10 @@ OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x
 
 
 class Conn:
-    def __init__(self, sock, addr):
+    def __init__(self, sock, addr, net=0):
         self.sock = sock
         self.addr = addr
+        self.net = net  # the netcode it connected with
         self.send_lock = threading.Lock()
         self.room = None
         self.id = 0
@@ -156,14 +167,15 @@ class Conn:
 
 
 class Seat:
-    """A player's place in a room, which its key takes back. until, name and
-    game are only set while it's held."""
+    """A player's place in a room, which its key takes back. until, name,
+    game and net are only set while it's held."""
 
     def __init__(self):
         self.key = secrets.token_hex(16)
         self.until = None
         self.name = None
         self.game = ""
+        self.net = 0
 
 
 class Room:
@@ -173,6 +185,10 @@ class Room:
         self.entry = entry
         self.peers = {}
         self.seats = {1: Seat()}
+
+    def net(self):
+        """The netcode the room's games speak: its host's, also while the host's seat is held."""
+        return (self.host or self.seats[1]).net
 
     def seated(self):
         """The room's players by id, the host first, held seats too: (id, conn or None, seat)."""
@@ -210,7 +226,7 @@ class Relay:
             if op == "list":
                 want = args[0] if args and args[0] in GAMES else None
                 games = ["%d %d %s" % (r.id, len(r.seated()), r.entry) for r in self.rooms.values()
-                         if r.host and (not want or not r.host.game or r.host.game == want)]
+                         if r.host and (not want or not r.host.game or r.host.game == want) and r.net() == conn.net]
                 outbox.append((conn, OP_TEXT, " ".join(["list"] + games).encode()))
             elif op == "host" and len(args) == 1 and valid_entry(args[0]):
                 self._leave(conn, outbox)
@@ -232,6 +248,12 @@ class Relay:
                 # Not while its host is away: nobody would welcome them.
                 if not room or not room.host:
                     outbox.append((conn, OP_TEXT, b"error no-room"))
+                # Another netcode, from a list that's out of date or a landing
+                # page with another build: says whose is newer, so the game can
+                # say whose page to reload.
+                elif room.net() != conn.net:
+                    outbox.append((conn, OP_TEXT, b"error version newer" if room.net() > conn.net
+                                   else b"error version older"))
                 else:
                     peer_id = next((i for i in range(FIRST_PEER_ID, LAST_PEER_ID + 1)
                                     if i not in room.peers and i not in room.seats), None)
@@ -330,7 +352,7 @@ class Relay:
             by_game[game]["online"] += len(names)
             games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
                               mod=info["mod"], locked=info["locked"], players=len(names), max=info["max"],
-                              names=names[:MAX_STATUS_NAMES]))
+                              names=names[:MAX_STATUS_NAMES], net=room.net()))
         for g in by_game.values():
             g["online"] += len(g["lobby"])
             g["lobby"] = g["lobby"][:MAX_STATUS_NAMES]
@@ -383,7 +405,7 @@ class Relay:
         if not seat or conn is not (room.host if conn.id == 1 else room.peers.get(conn.id)):
             self._leave(conn, outbox)
             return
-        seat.until, seat.name, seat.game = time.monotonic() + self.hold, conn.name, conn.game
+        seat.until, seat.name, seat.game, seat.net = time.monotonic() + self.hold, conn.name, conn.game, conn.net
         if conn.id == 1:
             room.host = None
             outbox.extend((peer, OP_TEXT, b"host-lost") for peer in room.peers.values())
@@ -430,7 +452,7 @@ class Relay:
                 old.room, old.id = None, 0
                 outbox.append((old, OP_CLOSE, struct.pack("!H", 4001) + b"replaced"))
         was_held = bool(seat.until)
-        seat.until, seat.name, seat.game = None, None, ""
+        seat.until, seat.name, seat.game, seat.net = None, None, "", 0
         if seat_id == 1:
             room.host = conn
             if entry:
@@ -453,6 +475,12 @@ class Relay:
         for peer in room.peers.values():
             peer.room, peer.id = None, 0
             outbox.append((peer, OP_TEXT, b"host-left"))
+
+
+def netcode(path):
+    """The netcode number a game connected with, from its address, 0 if it didn't say."""
+    net = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("net", [""])[0]
+    return int(net) if NET_RE.match(net) else 0
 
 
 def valid_entry(text):
@@ -652,7 +680,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.settimeout(QUIET_S)
-        conn = Conn(sock, self.client_address)
+        conn = Conn(sock, self.client_address, netcode(self.path))
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())

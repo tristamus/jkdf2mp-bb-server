@@ -55,3 +55,29 @@ MOVED_FROM = "https://jkdf2mp.jkdf2mp-lobby.workers.dev"
 # 301 since 2026-10-29, after the move was checked with 302. Browsers keep a
 # 301 for good, so jediknight.zone has to stay.
 MOVED_STATUS = "301"
+
+# A test address with its own lobby: `npx wrangler deploy --env beta` makes a
+# separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
+# change goes there first, for a few players to try, and then the same files go
+# to the site with `npx wrangler deploy --env=""`. Its lobby is its own, so
+# nobody lands in a test match from the site. Bindings and variables aren't
+# carried over to an environment, so they're here again. TURN needs its two
+# secrets set on jkdf2mp-beta too (`--env beta` after `npx wrangler secret put
+# TURN_KEY_ID`, and the same for TURN_KEY_API_TOKEN); without them, its players
+# who can't link directly go through its lobby.
+[env.beta]
+routes = [
+  { pattern = "beta.jediknight.zone", custom_domain = true },
+]
+workers_dev = false
+
+[[env.beta.durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+[env.beta.vars]
+STUN = "stun:stun.cloudflare.com:3478"
+# Nothing moves: every page load is served where it is.
+SITE = ""
+MOVED_FROM = ""
+MOVED_STATUS = "302"
