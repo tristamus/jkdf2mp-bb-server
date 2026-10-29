@@ -52,5 +52,6 @@ STUN = "stun:stun.cloudflare.com:3478"
 # "moved" (src/moved.js). Leave SITE empty to serve every address as it is.
 SITE = "https://jediknight.zone"
 MOVED_FROM = "https://jkdf2mp.jkdf2mp-lobby.workers.dev"
-# 302 while the move is checked; 301 once it's right, which browsers keep for good.
-MOVED_STATUS = "302"
+# 301 since 2026-10-29, after the move was checked with 302. Browsers keep a
+# 301 for good, so jediknight.zone has to stay.
+MOVED_STATUS = "301"

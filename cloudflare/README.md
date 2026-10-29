@@ -106,8 +106,8 @@ once there are routes, unless it's written out). `src/moved.js` decides what goe
 - `/relay` stays on every address: a browser fails a WebSocket that gets a redirect, and it's the
   same Worker, so a tab opened on the old address keeps playing in the same lobby. So does
   `move-out.html`.
-- `MOVED_STATUS` is 302 while the move is checked, then 301, which browsers keep for good: from
-  then on the domain has to stay.
+- `MOVED_STATUS` is 301 since 2026-10-29, after a 302 while the move was checked. Browsers keep
+  a 301 for good, so the domain has to stay.
 
 Only `/relay`, `/` and `/index.html` run the Worker (`run_worker_first`); everything else is served
 straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
