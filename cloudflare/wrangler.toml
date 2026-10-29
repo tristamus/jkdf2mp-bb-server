@@ -16,13 +16,13 @@ routes = [
 workers_dev = true
 
 # index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches,
-# and move-out.html. Only /relay and the page itself run the Worker (the page
-# so it can be sent on from an old address); the rest is served straight from
-# Cloudflare.
+# and move-out.html. Only /relay, /summary and the page itself run the Worker
+# (the page so it can be sent on from an old address); the rest is served
+# straight from Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/", "/index.html"]
+run_worker_first = ["/relay", "/summary", "/", "/index.html"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -38,6 +38,13 @@ invocation_logs = false
 [[durable_objects.bindings]]
 name = "LOBBY"
 class_name = "Lobby"
+
+# Match summaries (src/summary.js), kept three months. Workers Analytics Engine
+# makes the dataset the first time one is written. README.md says how to read
+# them back.
+[[analytics_engine_datasets]]
+binding = "SUMMARIES"
+dataset = "jkdf2mp_summaries"
 
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
@@ -74,6 +81,11 @@ workers_dev = false
 [[env.beta.durable_objects.bindings]]
 name = "LOBBY"
 class_name = "Lobby"
+
+# Its own, so test matches stay out of the site's.
+[[env.beta.analytics_engine_datasets]]
+binding = "SUMMARIES"
+dataset = "jkdf2mp_beta_summaries"
 
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"

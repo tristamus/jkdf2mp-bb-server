@@ -37,9 +37,13 @@
 // or "error version older", whichever the room's is. Builds that can play a
 // match together share a number (they agree on the rest through their own
 // hellos), so it only goes up with a change older builds can't play with.
+//
+// When a game leaves a match, its page posts a summary of it to /summary:
+// counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 
 import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
+import { takeSummary } from "./summary.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -122,6 +126,8 @@ export default {
             const lobby = env.LOBBY.get(env.LOBBY.idFromName("lobby"));
             return lobby.fetch(request);
         }
+        if (url.pathname === "/summary")
+            return takeSummary(request, env);
         const to = movedTo(url, env.SITE, env.MOVED_FROM);
         if (to)
             return Response.redirect(to, movedStatus(env.MOVED_STATUS));
