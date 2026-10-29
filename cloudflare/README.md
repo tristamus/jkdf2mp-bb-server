@@ -33,6 +33,8 @@ see Address below), with nothing running at home. It speaks the same protocol, s
   too, not only to the host. Players who can't link directly get a link through Cloudflare's TURN
   service once it's set up (see TURN below); until then, or if that fails too, the lobby relays
   their packets, as `relay.py` does.
+- When a game leaves a match, its page posts a summary of it to `/summary`: counts only, with no
+  names, kept for three months (see Match summaries below).
 
 ## Free plan limits
 
@@ -114,8 +116,8 @@ once there are routes, unless it's written out). `src/moved.js` decides what goe
 - `MOVED_STATUS` is 301 since 2026-10-29, after a 302 while the move was checked. Browsers keep
   a 301 for good, so the domain has to stay.
 
-Only `/relay`, `/` and `/index.html` run the Worker (`run_worker_first`); everything else is served
-straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
+Only `/relay`, `/summary`, `/` and `/index.html` run the Worker (`run_worker_first`); everything else
+is served straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
 nothing moves. To try the moves locally, run it with a copy of `wrangler.toml` without `routes`:
 
 ```
@@ -124,6 +126,52 @@ npx wrangler dev -c wrangler.local.toml --var SITE:http://localhost:8787 --var M
 
 Then http://127.0.0.1:8787/ goes to http://localhost:8787/?moved. `node test/moved.mjs` checks
 `src/moved.js` on its own.
+
+## Match summaries
+
+When a game leaves a match, or its tab closes in one, the page posts a summary of it to `/summary`
+(`summary()` in OpenJKDF2's `packaging/wasm/netstats.js`), so the hit rules' defaults can be set from
+real matches. Counts only, with no names, player numbers or addresses: the game and its build, the
+hit rules and reach, how long that game was in the match and at what frame rate, and for each other
+player in it, the link (direct, TURN, through the lobby or through the host) and its ping, how far
+behind they were drawn, and the hits each way, shown, counted, blocked, missed or turned down and
+why, with how far back each claim on that game's player reached. There's none for a match a game was
+in for under 30 s.
+
+`src/summary.js` rebuilds each summary from the fields it knows, checks every number and drops
+anything else. It keeps it in Workers Analytics Engine (`SUMMARIES` in `wrangler.toml`), which keeps
+data for three months and makes the dataset the first time one is written, as one row for each other
+player in the match, and writes it to the log. The test address has a dataset of its own.
+`node test/summary.mjs` checks it; with an address, `node test/summary.mjs http://127.0.0.1:8787`
+also posts to a running lobby.
+
+To read them back, use Analytics Engine's SQL API with an API token that has Account Analytics Read:
+
+```
+curl "https://api.cloudflare.com/client/v4/accounts/<account id>/analytics_engine/sql" \
+    --header "Authorization: Bearer <token>" \
+    --data "SELECT timestamp, blob9 AS summary, blob10 AS player, blob11 AS rest FROM jkdf2mp_summaries
+            WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob8 = '' ORDER BY timestamp"
+```
+
+Analytics Engine samples when one index (here, the game) gets data points too quickly. Each row's
+`_sample_interval` says how many data points it stands for, so count with `SUM(_sample_interval)`
+rather than `COUNT()` ([sampling](https://developers.cloudflare.com/analytics/analytics-engine/sampling/)).
+
+Each row's text fields: `blob1` the summary's version (1), `blob2` the game (`jk` or `mots`), `blob3`
+the rules (`classic` or `hwys`), `blob4` the build, `blob5` `host` or `joiner`, `blob6` the link,
+`blob7` the hello version the two games agreed on (0 for a build from before Hit what you see, -1
+unknown), `blob8` any of `sim`, `test` and `netstats` (a slowed, scripted or measured match; empty for
+an ordinary one), `blob9` an id the rows of one summary share, `blob10` that other player's part as
+JSON, and `blob11` the rest of the summary as JSON. Its numbers: `double1` the reach, `double2` the
+game's time in the match (s), `double3` players, `double4` and `double5` its frame rate (the middle,
+and the lowest tenth), `double6` the other player's time in the match with it, `double7` the ping,
+`double8` the round trip the browser measured on their link, `double9` how far behind they were drawn
+(ms) and `double10` the buffer; the game's hits on them: `double11` shown, `double12` counted,
+`double13` turned down, `double14` claimed, `double15` claimed past the reach; their claims on the
+game's player: `double16` all, `double17` turned down, `double18` with a moment, `double19` reaching
+300 ms back or more; and `double20` its targeted Force powers that played on them. -1 for a number
+the game didn't know.
 
 ## Deploy
 

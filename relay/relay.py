@@ -75,6 +75,10 @@ that player isn't in the room, which is what the GNS host does when it
 forwards. The relay stamps idFrom with a client's real id. The host's idFrom is
 kept, because a host forwards packets for clients it reaches over WebRTC.
 
+When a game leaves a match, its page posts a summary of it to /summary
+(counts only, no names). The Cloudflare lobby keeps them; this one answers 204
+and logs a line saying one came in, and keeps nothing.
+
 This server never serves or stores game files: players pick their own install
 in the page, and it stays in their browser.
 """
@@ -126,6 +130,8 @@ KEY_RE = re.compile(r"^[0-9a-f]{32}$")
 NET_RE = re.compile(r"^[0-9]{1,3}$")
 # Control and invisible characters (bidi overrides among them) never reach a page.
 HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
+# A match summary's most, as cloudflare/src/summary.js takes.
+MAX_SUMMARY = 64 * 1024
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
@@ -659,6 +665,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.handle_websocket()
         else:
             super().do_GET()
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/summary":
+            self.send_error(404, "Not found")
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or "0")
+        except ValueError:
+            n = -1
+        if n < 0 or n > MAX_SUMMARY:
+            self.send_error(413, "Too long")
+            return
+        try:
+            s = json.loads(self.rfile.read(n))
+        except ValueError:
+            s = None
+        if (not isinstance(s, dict) or s.get("v") != 1 or s.get("game") not in ("jk", "mots")
+                or s.get("rules") not in ("classic", "hwys") or not isinstance(s.get("others"), list)):
+            self.send_error(400, "Not a match summary")
+            return
+        secs = s.get("secs") if isinstance(s.get("secs"), int) else "?"
+        log("match summary: %s, %s, %s s, %d other player(s)" % (s["game"], s["rules"], secs, len(s["others"])))
+        self.send_response(204)
+        self.end_headers()
 
     def handle_websocket(self):
         key = self.headers.get("Sec-WebSocket-Key")
