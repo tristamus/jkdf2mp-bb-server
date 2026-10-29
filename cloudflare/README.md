@@ -1,8 +1,8 @@
 # The lobby on Cloudflare
 
 `src/lobby.js` is `relay/relay.py` rebuilt for Cloudflare Workers, so the lobby runs all the time on
-Cloudflare's free plan at `https://jkdf2mp.<your-subdomain>.workers.dev/index.html`, with nothing
-running at home. It speaks the same protocol, so the same browser build works with either one.
+Cloudflare at https://jediknight.zone/ (before 2026-10-29, `https://jkdf2mp.jkdf2mp-lobby.workers.dev/`;
+see Address below), with nothing running at home. It speaks the same protocol, so the same browser build works with either one.
 
 - The page and engine (`index.html`, `openjkdf2.js`, `openjkdf2.wasm`) are static files in `public/`.
   They're not in this branch: take them from a folder in the `builds` branch, where `SHA256SUMS`
@@ -91,9 +91,40 @@ the dashboard stops every credential made with it. The dashboard shows how much 
 The lobby's minute log counts the players sending game packets through the lobby and the
 credentials made, so you can see how many players still need the relay.
 
+## Address
+
+The site lives at `SITE` in `wrangler.toml` (https://jediknight.zone), a domain on Cloudflare in the
+same account, which `routes` gives the Worker along with www. Its old address, `MOVED_FROM`
+(jkdf2mp.jkdf2mp-lobby.workers.dev), stays on (`workers_dev = true`: wrangler turns workers.dev off
+once there are routes, unless it's written out). `src/moved.js` decides what goes where:
+
+- A page load on the old address goes to the same path and options on `SITE`, with `moved` added.
+  The page there then offers to bring over what the browser saved under the old address
+  (characters, settings, saved game files, mods, screenshots), which it can't read by itself: it
+  opens `move-out.html` on the old address, which hands them over (OpenJKDF2's
+  `packaging/wasm/index.html`, `moveIn`). A page load on www goes to `SITE` as it is.
+- `/relay` stays on every address: a browser fails a WebSocket that gets a redirect, and it's the
+  same Worker, so a tab opened on the old address keeps playing in the same lobby. So does
+  `move-out.html`.
+- `MOVED_STATUS` is 302 while the move is checked, then 301, which browsers keep for good: from
+  then on the domain has to stay.
+
+Only `/relay`, `/` and `/index.html` run the Worker (`run_worker_first`); everything else is served
+straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
+nothing moves. To try the moves locally, run it with a copy of `wrangler.toml` without `routes`:
+
+```
+npx wrangler dev -c wrangler.local.toml --var SITE:http://localhost:8787 --var MOVED_FROM:http://127.0.0.1:8787
+```
+
+Then http://127.0.0.1:8787/ goes to http://localhost:8787/?moved. `node test/moved.mjs` checks
+`src/moved.js` on its own.
+
 ## Deploy
 
 Needs Node.js 22 or newer and a Cloudflare account (the free plan runs it, within the limits above).
+The domain in `routes` has to be an active zone in that account first, or the deploy fails; without
+a domain of your own, take `routes` out and set `SITE` to `""`.
 
 ```
 npm ci                 # installs the pinned wrangler
@@ -101,7 +132,7 @@ npx wrangler login     # opens the browser to allow wrangler into the account
 npx wrangler deploy
 ```
 
-`npx wrangler dev` runs it locally at http://127.0.0.1:8787/index.html instead.
+`npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead.
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,

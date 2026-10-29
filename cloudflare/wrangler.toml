@@ -3,12 +3,26 @@ name = "jkdf2mp"
 main = "src/lobby.js"
 compatibility_date = "2026-09-01"
 
-# index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches.
-# Only /relay runs the Worker; the files are served straight from Cloudflare.
+# The site's own domain, and www, which only sends page loads on to it.
+# Cloudflare makes their DNS records and certificates; the domain has to be
+# a zone in the same Cloudflare account, active before the first deploy.
+routes = [
+  { pattern = "jediknight.zone", custom_domain = true },
+  { pattern = "www.jediknight.zone", custom_domain = true },
+]
+# The old address stays on, so its links and the tabs still open there keep
+# working: page loads there are sent on to SITE (src/moved.js), the lobby
+# stays. Without this line, wrangler turns workers.dev off once routes are set.
+workers_dev = true
+
+# index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches,
+# and move-out.html. Only /relay and the page itself run the Worker (the page
+# so it can be sent on from an old address); the rest is served straight from
+# Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay"]
+run_worker_first = ["/relay", "/", "/index.html"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -34,3 +48,9 @@ new_sqlite_classes = ["Lobby"]
 # Handed to every page for WebRTC (Cloudflare's own STUN server, from its
 # Realtime docs). Leave it empty to send every game packet through the relay.
 STUN = "stun:stun.cloudflare.com:3478"
+# Where the site lives, and its old address, whose page loads go there with
+# "moved" (src/moved.js). Leave SITE empty to serve every address as it is.
+SITE = "https://jediknight.zone"
+MOVED_FROM = "https://jkdf2mp.jkdf2mp-lobby.workers.dev"
+# 302 while the move is checked; 301 once it's right, which browsers keep for good.
+MOVED_STATUS = "302"
