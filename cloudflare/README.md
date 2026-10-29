@@ -132,12 +132,13 @@ The domain in `routes` has to be an active zone in that account first, or the de
 a domain of your own, take `routes` out and set `SITE` to `""`.
 
 ```
-npm ci                 # installs the pinned wrangler
-npx wrangler login     # opens the browser to allow wrangler into the account
-npx wrangler deploy
+npm ci                       # installs the pinned wrangler
+npx wrangler login           # opens the browser to allow wrangler into the account
+npx wrangler deploy --env="" # the site; --env beta for the test address (below)
 ```
 
-`npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead.
+`npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead. A plain `npx wrangler deploy`
+deploys the site too, with a warning that there's more than one environment; `--env=""` names the site's.
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,
@@ -155,3 +156,21 @@ npx wrangler dev --port 8797 --var TURN_KEY_ID:key1 --var TURN_KEY_API_TOKEN:tok
     --var TURN_API:http://127.0.0.1:8798/
 node test/turn.mjs ws://localhost:8797/relay 8798
 ```
+
+## Test address
+
+`[env.beta]` in `wrangler.toml` is a second Worker, `jkdf2mp-beta`, at https://beta.jediknight.zone,
+with its own lobby. A change to netcode or the lobby goes there first, for a few players to try both hit
+rules, and then the same files go to the site:
+
+```
+npx wrangler deploy --env beta    # the test address
+npx wrangler deploy --env=""      # the site, once it's checked
+```
+
+Nobody lands in a test match from the site, since the lobbies are apart. Nothing moves there (`SITE`
+is empty). Wrangler doesn't carry variables, bindings or secrets over to an environment, so
+`[env.beta]` repeats the first two, and TURN needs its two secrets set on `jkdf2mp-beta` as well
+(`npx wrangler secret put TURN_KEY_ID --env beta`, and the same for `TURN_KEY_API_TOKEN`); without them,
+its players who can't link directly go through its lobby. Its requests count toward the same account.
+`npx wrangler dev --env beta` runs it locally.
