@@ -154,6 +154,10 @@ curl "https://api.cloudflare.com/client/v4/accounts/<account id>/analytics_engin
             WHERE timestamp > NOW() - INTERVAL '7' DAY AND blob8 = '' ORDER BY timestamp"
 ```
 
+Analytics Engine samples when one index (here, the game) gets data points too quickly. Each row's
+`_sample_interval` says how many data points it stands for, so count with `SUM(_sample_interval)`
+rather than `COUNT()` ([sampling](https://developers.cloudflare.com/analytics/analytics-engine/sampling/)).
+
 Each row's text fields: `blob1` the summary's version (1), `blob2` the game (`jk` or `mots`), `blob3`
 the rules (`classic` or `hwys`), `blob4` the build, `blob5` `host` or `joiner`, `blob6` the link,
 `blob7` the hello version the two games agreed on (0 for a build from before Hit what you see, -1
