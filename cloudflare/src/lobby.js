@@ -40,10 +40,15 @@
 //
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
+//
+// /imperial-games answers the Imperial Network Protocol relay's game list
+// (IMPERIAL_LIST), for the page to show beside this lobby's (src/imperial.js).
+// It never touches the lobby.
 
 import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
+import { imperialGames } from "./imperial.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -118,7 +123,7 @@ const TURN_RETRY_MS = 60 * 1000;
 const PORT_53_RE = /:53(\?|$)/;
 
 export default {
-    async fetch(request, env) {
+    async fetch(request, env, ctx) {
         const url = new URL(request.url);
         if (url.pathname === "/relay") {
             if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket")
@@ -128,6 +133,8 @@ export default {
         }
         if (url.pathname === "/summary")
             return takeSummary(request, env);
+        if (url.pathname === "/imperial-games")
+            return imperialGames(request, env, ctx);
         const to = movedTo(url, env.SITE, env.MOVED_FROM);
         if (to)
             return Response.redirect(to, movedStatus(env.MOVED_STATUS));

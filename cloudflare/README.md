@@ -35,6 +35,8 @@ see Address below), with nothing running at home. It speaks the same protocol, s
   their packets, as `relay.py` does.
 - When a game leaves a match, its page posts a summary of it to `/summary`: counts only, with no
   names, kept for three months (see Match summaries below).
+- `/imperial-games` gives the page the games on the Imperial Network Protocol relay (sithmartyr's),
+  to show beside the lobby's, outside the lobby itself (see Imperial relay games below).
 
 ## Free plan limits
 
@@ -172,6 +174,36 @@ and the lowest tenth), `double6` the other player's time in the match with it, `
 game's player: `double16` all, `double17` turned down, `double18` with a moment, `double19` reaching
 300 ms back or more; and `double20` its targeted Force powers that played on them. -1 for a number
 the game didn't know.
+
+## Imperial relay games
+
+`/imperial-games` (`src/imperial.js`) answers the game list of the Imperial Network Protocol relay
+named in `IMPERIAL_LIST` (sithmartyr's, `lobby.jkjunkie.com`), as JSON, for the page's room windows to
+show beside this lobby's games. The relay has no web API, so it asks the way the game's Multiplayer
+menu does: a WebSocket to the relay, HELLO, then LIST (`jkrelay_proto.h` in the OpenJKDF2 fork), with
+3 seconds to answer. It runs beside the lobby, never in it, so a relay that's down or answers garbage
+only greys out the page's Imperial games. Answers are cached for 15 seconds (30 when the relay didn't
+answer) in each Cloudflare data center, so the relay hears from us a few times a minute whatever the
+number of pages watching. The relay's address comes only from `IMPERIAL_LIST`; with it empty the
+route answers 404 and the page shows no Imperial games. The game's own Imperial connection doesn't
+depend on any of this.
+
+`IMPERIAL_PINNED` lists dedicated servers the page always shows first (`jk1 162.248.94.121:27960
+Coruscant`), matched by address, since anyone hosting on the relay can name a game anything. A pinned
+server the relay doesn't list, or a relay that doesn't answer, still gets a card, without Join. A
+dedicated server's player count has its own slot taken off.
+
+`node test/imperial.mjs` checks how it reads the relay's answers, from one the real relay sent and
+made-up ones. `test/imperial-route.mjs` checks the route against a made-up relay that it starts
+itself, with `wrangler dev` pointed at it:
+
+```
+npx wrangler dev --port 8797 --var IMPERIAL_LIST:127.0.0.1:8799 --var IMPERIAL_TIMEOUT_MS:1500 \
+    --var IMPERIAL_CACHE_S:2
+node test/imperial-route.mjs http://127.0.0.1:8797 8799
+```
+
+With the real relay: `npx wrangler dev`, then http://127.0.0.1:8787/imperial-games.
 
 ## Deploy
 

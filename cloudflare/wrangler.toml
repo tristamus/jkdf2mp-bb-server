@@ -16,13 +16,13 @@ routes = [
 workers_dev = true
 
 # index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches,
-# and move-out.html. Only /relay, /summary and the page itself run the Worker
-# (the page so it can be sent on from an old address); the rest is served
-# straight from Cloudflare.
+# and move-out.html. Only /relay, /summary, /imperial-games and the page itself
+# run the Worker (the page so it can be sent on from an old address); the rest
+# is served straight from Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/", "/index.html"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -62,6 +62,15 @@ MOVED_FROM = "https://jkdf2mp.jkdf2mp-lobby.workers.dev"
 # 301 since 2026-10-29, after the move was checked with 302. Browsers keep a
 # 301 for good, so jediknight.zone has to stay.
 MOVED_STATUS = "301"
+# The Imperial Network Protocol relay whose games the page lists beside the
+# lobby's (/imperial-games, src/imperial.js): sithmartyr's, which the page's
+# Multiplayer menu also uses (IMPERIAL_SERVER in index.html). Leave it empty to
+# turn the list off: the route answers 404 and the page shows no Imperial
+# games. The game's own Imperial connection doesn't depend on it.
+IMPERIAL_LIST = "lobby.jkjunkie.com"
+# Dedicated servers on it that the page always shows first, matched by
+# address: "<game> <address:port> <name>", several separated by commas.
+IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
@@ -93,3 +102,5 @@ STUN = "stun:stun.cloudflare.com:3478"
 SITE = ""
 MOVED_FROM = ""
 MOVED_STATUS = "302"
+IMPERIAL_LIST = "lobby.jkjunkie.com"
+IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
