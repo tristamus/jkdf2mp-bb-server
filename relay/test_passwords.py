@@ -514,6 +514,37 @@ def _():
         assert p.try_join(room, PASSWORD, "198.51.100.10") == "JOINED"
 
 
+@check("rate limit: a try looks only at its own address's count, and the others' old ones go once a minute")
+def _():
+    with InProcess() as p:
+        relay = p.relay
+        room = p.host(PASSWORD).room.id
+        p.now += 30
+        many = ["10.%d.%d.1" % (i >> 8, i & 0xFF) for i in range(2000)]
+        for addr in many:
+            assert p.try_join(room, "wrong", addr) == "error password"
+        counts = relay.tries[room]
+        assert len(counts) == 2000
+        # The once-a-minute look: theirs are 31 s old, so they stay.
+        p.now += 31
+        assert p.try_join(room, "wrong", "10.200.0.1") == "error password"
+        assert relay.tries[room] is counts and len(counts) == 2001
+        # Over a minute old now, but the next look is a minute after the
+        # last: a try doesn't go through every other address's.
+        p.now += 31
+        assert p.try_join(room, "wrong", "10.200.0.2") == "error password"
+        assert relay.tries[room] is counts and len(counts) == 2002
+        # One that's still counting only drops its own old ones.
+        for i in range(9):
+            assert p.try_join(room, "wrong", "10.200.0.2") == "error password"
+        assert p.try_join(room, PASSWORD, "10.200.0.2") == "error password wait"
+        assert p.try_join(room, PASSWORD, many[0]) == "JOINED"
+        p.now += 30
+        assert p.try_join(room, "wrong", "10.200.0.3") == "error password"
+        assert sorted(counts) == ["10.200.0.2", "10.200.0.3"], sorted(counts)[:5]
+        assert len(counts["10.200.0.2"]) == 10
+
+
 @check("update: a password added, changed and taken away")
 def _():
     for kind in ("new", "old"):

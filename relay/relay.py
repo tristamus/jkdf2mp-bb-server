@@ -268,8 +268,10 @@ class Relay:
         self.old_games_until = old_games_until
         # Rooms end when the relay does, so a key of its own does.
         self.pw_key = secrets.token_bytes(32)
-        # room id -> {address: [when each wrong password was tried]}
+        # room id -> {address (tries_key): [when each wrong password was tried]}. A try only looks at its own
+        # address's; the others' old ones go once a minute (_forget_old_tries).
         self.tries = {}
+        self.tries_swept = time.monotonic()
         self.lock = threading.Lock()
         self.rooms = {}
         self.next_room = 1
@@ -454,24 +456,44 @@ class Relay:
         """Checks the password a game sent with join; if it's wrong, missing or not checked (too many wrong
         ones from its address), says so in outbox."""
         now = time.monotonic()
-        tries = {who: [t for t in at if now - t < PW_TRIES_S] for who, at in self.tries.pop(room.id, {}).items()}
-        tries = {who: at for who, at in tries.items() if at}
+        self._forget_old_tries(now)
+        tries = self.tries.setdefault(room.id, {})
         who = tries_key(conn.addr[0])
+        at = [t for t in tries.get(who, ()) if now - t < PW_TRIES_S]
         ok = False
-        if len(tries.get(who, ())) >= PW_TRIES:
+        if len(at) >= PW_TRIES:
             outbox.append((conn, OP_TEXT, b"error password wait"))
         elif pw_hex and hmac.compare_digest(self._mac(room.pw.salt, pw_hex), room.pw.mac):
             ok = True
         else:
             # An empty box tells nobody anything, so it isn't counted.
             if pw_hex:
-                tries.setdefault(who, []).append(now)
-                if len(tries[who]) == PW_TRIES:
+                at.append(now)
+                if len(at) == PW_TRIES:
                     log("room %d: %d wrong passwords from %s, it waits" % (room.id, PW_TRIES, who))
             outbox.append((conn, OP_TEXT, b"error password"))
-        if tries:
-            self.tries[room.id] = tries
+        if at:
+            tries[who] = at
+        else:
+            tries.pop(who, None)
+        if not tries:
+            del self.tries[room.id]
         return ok
+
+    def _forget_old_tries(self, now):
+        """Once a minute, drops the wrong passwords over a minute old for every room and address."""
+        if now - self.tries_swept < PW_TRIES_S:
+            return
+        self.tries_swept = now
+        for room_id, by_who in list(self.tries.items()):
+            for who, at in list(by_who.items()):
+                at = [t for t in at if now - t < PW_TRIES_S]
+                if at:
+                    by_who[who] = at
+                else:
+                    del by_who[who]
+            if not by_who:
+                del self.tries[room_id]
 
     # The landing page's live counts. Same as status() in cloudflare/src/lobby.js.
     def _status(self):
