@@ -682,6 +682,32 @@ await check("PASSWORDS_FOR_OLD_GAMES_UNTIL passing while the lobby runs: older g
     assert.equal((await w.status()).data.games[0].locked, true);
 });
 
+await check("a rehost with a changed entry never shows its host twice to the landing page", async () => {
+    for (const password of ["", PASSWORD]) {
+        const w = await new World(Lobby, { HOLD_MS: "60000" }).start();
+        const W = await w.connect("old");
+        await w.say(W, "watch");
+        const H = await w.connect("new");
+        await w.say(H, "hello jk1 " + btoa("Hosty"));
+        await w.say(H, "host " + entry({ password }));
+        const [, , , key] = H.take().find(l => l.startsWith("seat ")).split(" ");
+        await w.close(H);
+        const back = await w.connect("new");
+        await w.say(back, "hello jk1 " + btoa("Hosty"));
+        W.take();
+        await w.say(back, `rehost 1 ${key} ` + entry({ name: "t_Renamed", password }));
+        assert.deepEqual(back.take(), ["rehosted 1"]);
+        const seen = W.take().map(l => JSON.parse(Buffer.from(l.slice(7), "base64").toString()));
+        assert.ok(seen.length >= 1, "a status");
+        for (const st of seen) {
+            assert.equal(st.online, 1, JSON.stringify(st));
+            assert.deepEqual(st.lobby, []);
+            assert.deepEqual(st.games.map(g => g.names), [["Hosty"]]);
+        }
+        assert.equal(seen.at(-1).games[0].name, "t_Renamed");
+    }
+});
+
 await check("a restart keeps a checked room's verifier, and its players", async () => {
     const w = await new World(Lobby, {}).start();
     const H = await w.host("new", { password: PASSWORD });

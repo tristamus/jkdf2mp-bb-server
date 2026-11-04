@@ -1392,16 +1392,17 @@ export class Lobby extends DurableObject {
         delete seat.name;
         delete seat.game;
         delete seat.net;
-        if (id === 1) {
+        if (id === 1)
             room.host = ws;
-            if (entry) {
-                room.entrySeq++;
-                this.setEntry(room, entry, pw);
-            }
-        } else {
+        else
             room.peers.set(id, ws);
-        }
         this.setConn(ws, room.id, id);
+        // Once the host's socket is in the room, so the status setEntry may
+        // send doesn't count it in the lobby too.
+        if (entry) {
+            room.entrySeq++;
+            this.setEntry(room, entry, pw);
+        }
         this.saveSeats(room);
         this.send(ws, id === 1 ? `rehosted ${room.id}` : `rejoined ${room.id} ${id}`);
         if (wasHeld && id === 1) {
