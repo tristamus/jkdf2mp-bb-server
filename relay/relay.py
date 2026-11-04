@@ -37,8 +37,8 @@ password.
 
 Room passwords are checked here. The host's entry has its password (32 UTF-16
 code units at byte 152) and sessionFlags 0x400 (byte 216), which makes the
-join screen show a password box. The relay keeps only a salted HMAC-SHA-256
-of the password, and a game that connected with pw=1 never gets a password: in
+join screen show a password box. The relay keeps a salted HMAC-SHA-256 of
+the password, and a game that connected with pw=1 never gets a password: in
 list, every entry has it zeroed, and 0x400 set exactly for a room with one;
 in welcome, which the relay passes on from the host, nobody gets it. Such a
 game sends join <room> <password>, the password in hex of its UTF-16LE code

@@ -39,16 +39,16 @@
 // hellos), so it only goes up with a change older builds can't play with.
 //
 // A room's password is checked here, not by the joining game: a game that
-// connects with pw=1 (/relay?net=<n>&pw=1) never gets a password in a list or
-// a welcome, and sends the one its player typed with join. The lobby keeps
-// only a salted HMAC of each password (room.pw), with the PASSWORD_KEY secret
-// when that's set. Older games, which check the password themselves against
-// the list and send a bare join, still can for a room an older game hosts
-// while PASSWORDS_FOR_OLD_GAMES is "host" (the default, until
-// PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set); any other room with a
-// password is listed to them without it, and their join hears "error version
-// newer", which tells their player to reload the page. See relay.py for the
-// lines.
+// connects with pw=1 (/relay?net=<n>&pw=1) never gets a password in a list,
+// and sends the one its player typed with join; no game gets one in a
+// welcome. The lobby keeps a salted HMAC of each password (room.pw), with the
+// PASSWORD_KEY secret when that's set. Older games, which check the password
+// themselves against the list and send a bare join, still can for a room an
+// older game hosts while PASSWORDS_FOR_OLD_GAMES is "host" (the default,
+// until PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set), so those rooms' entries
+// keep their passwords; any other room with a password is listed to them
+// without it, and their join hears "error version newer", which tells their
+// player to reload the page. See relay.py for the lines.
 //
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
@@ -283,8 +283,9 @@ function toHex(bytes) {
 
 // What the lobby keeps instead of a password: HMAC-SHA-256 of the room's salt
 // and the password's code units, keyed with the PASSWORD_KEY secret (no key
-// without it). Rooms keep theirs in storage, so a new PASSWORD_KEY turns
-// every open room's password down until its host hosts again.
+// without it). Rooms keep theirs in storage, so changing PASSWORD_KEY while
+// rooms with a password are open turns their passwords down until their
+// hosts' games send their entries again.
 async function passwordMac(saltHex, pwHex, secret) {
     const key = secret ? new TextEncoder().encode(secret) : NO_KEY;
     const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
