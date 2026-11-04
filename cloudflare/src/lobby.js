@@ -38,6 +38,18 @@
 // match together share a number (they agree on the rest through their own
 // hellos), so it only goes up with a change older builds can't play with.
 //
+// A room's password is checked here, not by the joining game: a game that
+// connects with pw=1 (/relay?net=<n>&pw=1) never gets a password in a list or
+// a welcome, and sends the one its player typed with join. The lobby keeps
+// only a salted HMAC of each password (room.pw), with the PASSWORD_KEY secret
+// when that's set. Older games, which check the password themselves against
+// the list and send a bare join, still can for a room an older game hosts
+// while PASSWORDS_FOR_OLD_GAMES is "host" (the default, until
+// PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set); any other room with a
+// password is listed to them without it, and their join hears "error version
+// newer", which tells their player to reload the page. See relay.py for the
+// lines.
+//
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
@@ -121,6 +133,22 @@ const TURN_RETRY_MS = 60 * 1000;
 // Browsers can't reach TURN on port 53 (Cloudflare's docs say so), and a
 // link would wait for it to time out.
 const PORT_53_RE = /:53(\?|$)/;
+// A room's password in its entry: 32 UTF-16 code units at byte 152, of which
+// the game uses 31, and sessionFlags at 216, whose 0x400 makes the join
+// screen show its password box.
+const PW_AT = 152;
+const PW_UNITS = 32;
+const FLAGS_AT = 216;
+const SESSIONFLAG_PASSWORD = 0x400;
+// The password a game sends with join: hex of 1 to 31 UTF-16LE code units.
+const PW_HEX_RE = /^(?:[0-9a-fA-F]{4}){1,31}$/;
+// Wrong passwords tried on one room from one address (CF-Connecting-IP) in
+// PW_TRIES_MS before every try from it gets "error password wait".
+const PW_TRIES = 10;
+const PW_TRIES_MS = 60 * 1000;
+// HMAC pads a key with zeros, so this is the same as no key, which
+// crypto.subtle won't take.
+const NO_KEY = new Uint8Array(64);
 
 export default {
     async fetch(request, env, ctx) {
@@ -213,6 +241,82 @@ function readEntry(hex) {
     };
 }
 
+// The password in an entry, as lowercase hex of its code units up to the
+// first 0, "" for none.
+function entryPassword(hex) {
+    if (hex.length < ENTRY_HEX)
+        return "";
+    let s = "";
+    for (let i = 0; i < PW_UNITS - 1; i++) {
+        const unit = hex.substr((PW_AT + i * 2) * 2, 4).toLowerCase();
+        if (unit === "0000")
+            break;
+        s += unit;
+    }
+    return s;
+}
+
+// The entry without its password, and with the password box flag set to box
+// unless that's undefined.
+function stripEntry(hex, box) {
+    if (hex.length < ENTRY_HEX)
+        return hex;
+    let out = hex.slice(0, PW_AT * 2) + "0".repeat(PW_UNITS * 4) + hex.slice((PW_AT + PW_UNITS * 2) * 2);
+    if (box !== undefined) {
+        // The flag is in sessionFlags' second byte.
+        const at = (FLAGS_AT + 1) * 2;
+        const bit = SESSIONFLAG_PASSWORD >> 8;
+        const was = parseInt(out.substr(at, 2), 16);
+        out = out.slice(0, at) + ((box ? was | bit : was & ~bit).toString(16).padStart(2, "0")) + out.slice(at + 2);
+    }
+    return out;
+}
+
+// join's password: 1 to 31 code units, none of them 0.
+function validPassword(hex) {
+    return PW_HEX_RE.test(hex) && !/^(?:.{4})*0000/.test(hex);
+}
+
+function toHex(bytes) {
+    return [...bytes].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+// What the lobby keeps instead of a password: HMAC-SHA-256 of the room's salt
+// and the password's code units, keyed with the PASSWORD_KEY secret (no key
+// without it). Rooms keep theirs in storage, so a new PASSWORD_KEY turns
+// every open room's password down until its host hosts again.
+async function passwordMac(saltHex, pwHex, secret) {
+    const key = secret ? new TextEncoder().encode(secret) : NO_KEY;
+    const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return toHex(new Uint8Array(await crypto.subtle.sign("HMAC", k, hexBytes(saltHex + pwHex))));
+}
+
+// A room's verifier: legacy when its host is an older game (no pw=1).
+async function newVerifier(pwHex, secret, legacy) {
+    const salt = newKey();
+    return { salt, mac: await passwordMac(salt, pwHex, secret), legacy };
+}
+
+// Compares two MACs in the same time wherever they differ.
+function sameMac(a, b) {
+    if (a.length !== b.length)
+        return false;
+    let d = 0;
+    for (let i = 0; i < a.length; i++)
+        d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return d === 0;
+}
+
+// Whether older games still check the password of a room an older game
+// hosts themselves: while PASSWORDS_FOR_OLD_GAMES is "host" (or unset), until
+// PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set; never with "none".
+function oldGamesKeepPasswords(env, now = Date.now()) {
+    if (String(env.PASSWORDS_FOR_OLD_GAMES || "").trim().toLowerCase() === "none")
+        return false;
+    const until = Date.parse(env.PASSWORDS_FOR_OLD_GAMES_UNTIL || "");
+    return isNaN(until) || now < until;
+}
+
 // hello's base64 UTF-8 name, cleaned, or null if it isn't one.
 // For a host that didn't say hello: the retail Mysteries of the Sith episodes
 // all start with JKM (JKM, JKM_KFY, JKM_MP, JKM_SABER). Episode names have no
@@ -267,7 +371,7 @@ function turnOn(env) {
 
 // What the lobby can do beyond the basics, for the game to know on connect.
 function lobbyMessage(env) {
-    return turnOn(env) ? "lobby links turn" : "lobby links";
+    return turnOn(env) ? "lobby links turn pw" : "lobby links pw";
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -293,23 +397,36 @@ function turnServers(answer) {
 export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
-        // room id -> {id, host, entry, peers: Map(id -> ws), seats}, where
-        // seats is Map(id -> {key, until, name, game, net}) for the host (1)
-        // and each peer: until, name, game and net only while the seat is
-        // held.
+        // room id -> {id, host, entry, peers: Map(id -> ws), seats, pw,
+        // entrySeq}, where seats is Map(id -> {key, until, name, game, net})
+        // for the host (1) and each peer: until, name, game and net only
+        // while the seat is held. pw is the password's verifier, {salt, mac,
+        // legacy}, null for a room without one. entrySeq counts the host's
+        // entries, so one that waited for its verifier doesn't undo a newer.
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
-        // ws -> {room, id, name, game, watch, since, net}: the room id and
-        // player id, the player's name and game from hello (name null until
-        // then), whether it's a page watching the counts, when it connected,
-        // and the netcode it connected with.
+        // ws -> {room, id, name, game, watch, since, net, pw, ip}: the room
+        // id and player id, the player's name and game from hello (name null
+        // until then), whether it's a page watching the counts, when it
+        // connected, the netcode it connected with, whether it sends
+        // passwords with join, and its address (CF-Connecting-IP).
         this.conns = new Map();
         this.heard = new Map();   // ws -> when its last message came (not its pings)
         // ws -> Map(notice -> {first, last, told}): packets it sends that go
         // nowhere, by what it would be told about them (see NOTICE_MS).
         this.unsent = new Map();
         this.turnAt = new Map();  // ws -> when it last got TURN credentials
+        // ws -> how many host, join, leave, rejoin and rehost it sent, so a
+        // host or join that waited for a password's HMAC is dropped once its
+        // game has asked for something else.
+        this.opSeq = new Map();
+        // room id -> Map(address, or ws without one -> {at, checking}): when
+        // the wrong passwords tried in the last PW_TRIES_MS were, and how
+        // many tries are being checked.
+        this.pwTries = new Map();
+        if (env.PASSWORDS_FOR_OLD_GAMES_UNTIL && isNaN(Date.parse(env.PASSWORDS_FOR_OLD_GAMES_UNTIL)))
+            console.log("relay: PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time, so it's left out");
         this.turnDownUntil = 0;   // no TURN credentials until then (TURN_RETRY_MS)
         this.alarmAt = null;      // when the next sweep for quiet connections runs
         this.nextRoom = 1;
@@ -326,8 +443,21 @@ export class Lobby extends DurableObject {
         this.alarmAt = await this.ctx.storage.getAlarm();
         const entries = await this.ctx.storage.list({ prefix: "room:" });
         const seats = await this.ctx.storage.list({ prefix: "seats:" });
-        for (const [key, entry] of entries)
-            this.rooms.set(Number(key.slice(5)), this.newRoom(Number(key.slice(5)), entry, seats.get("seats:" + key.slice(5))));
+        const pws = await this.ctx.storage.list({ prefix: "pw:" });
+        for (const [key, entry] of entries) {
+            const id = Number(key.slice(5));
+            let pw = pws.get("pw:" + id) || null;
+            // A password with no verifier for it is from a lobby that didn't
+            // check them (before this one, or one rolled back to): its host
+            // is taken for an older game.
+            const pwHex = entryPassword(entry);
+            if (pwHex && (!pw || !sameMac(await passwordMac(pw.salt, pwHex, this.env.PASSWORD_KEY), pw.mac))) {
+                pw = await newVerifier(pwHex, this.env.PASSWORD_KEY, pw ? pw.legacy : true);
+                this.ctx.storage.put("pw:" + id, pw);
+            }
+            this.rooms.set(id, this.newRoom(id, entry, seats.get("seats:" + id), pw));
+        }
+        this.stripPasswords();
         for (const ws of this.ctx.getWebSockets()) {
             const att = ws.deserializeAttachment() || { room: 0, id: 0 };
             this.conns.set(ws, att);
@@ -335,7 +465,8 @@ export class Lobby extends DurableObject {
                 continue;
             let room = this.rooms.get(att.room);
             if (!room) {
-                room = this.newRoom(att.room, "", null);
+                // Its entry wasn't kept, but a verifier still checks joins.
+                room = this.newRoom(att.room, "", null, pws.get("pw:" + att.room));
                 this.rooms.set(att.room, room);
             }
             if (att.id === 1)
@@ -376,16 +507,21 @@ export class Lobby extends DurableObject {
             if (!this.rooms.has(Number(key.slice(6))))
                 this.ctx.storage.delete(key);
         }
+        for (const key of pws.keys()) {
+            if (!this.rooms.has(Number(key.slice(3))))
+                this.ctx.storage.delete(key);
+        }
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
             this.sweepLater(this.nextExpiry());
     }
 
-    newRoom(id, entry, seats) {
+    newRoom(id, entry, seats, pw) {
         return {
             id, host: null, entry, peers: new Map(),
             seats: new Map(Object.entries(seats || {}).map(([k, v]) => [Number(k), v])),
+            pw: pw || null, entrySeq: 0,
         };
     }
 
@@ -397,8 +533,10 @@ export class Lobby extends DurableObject {
         const pair = new WebSocketPair();
         const [client, server] = Object.values(pair);
         this.ctx.acceptWebSocket(server);
+        const query = new URL(request.url).searchParams;
         this.saveConn(server, { room: 0, id: 0, name: null, game: "", watch: false, since: Date.now(),
-                                net: netcode(new URL(request.url).searchParams.get("net")) });
+                                net: netcode(query.get("net")), pw: query.get("pw") === "1",
+                                ip: request.headers.get("CF-Connecting-IP") || "" });
         this.sweepLater();
         const ice = iceMessage(this.env);
         if (ice)
@@ -417,8 +555,9 @@ export class Lobby extends DurableObject {
             return;
         }
         this.count(ws, typeof message === "string", size);
-        // Only turn waits for anything (Cloudflare's answer), and only after
-        // everything else it does: other messages are handled meanwhile.
+        // Only turn (for Cloudflare's answer), and a host, update, join or
+        // rehost with a password (for its HMAC), wait for anything: other
+        // messages are handled meanwhile.
         const later = typeof message === "string" ? this.onText(ws, message) : this.onBinary(ws, message);
         if (later)
             await later;
@@ -442,6 +581,7 @@ export class Lobby extends DurableObject {
         this.heard.delete(ws);
         this.unsent.delete(ws);
         this.turnAt.delete(ws);
+        this.opSeq.delete(ws);
     }
 
     async alarm() {
@@ -514,6 +654,32 @@ export class Lobby extends DurableObject {
         }
         if (quiet || ended)
             this.statusChanged();
+        for (const [roomId, tries] of this.pwTries) {
+            for (const [who, t] of tries) {
+                while (t.at.length && now - t.at[0] >= PW_TRIES_MS)
+                    t.at.shift();
+                if (!t.at.length && !t.checking)
+                    tries.delete(who);
+            }
+            if (!tries.size)
+                this.pwTries.delete(roomId);
+        }
+        this.stripPasswords();
+    }
+
+    // Once older games no longer check passwords themselves (with
+    // PASSWORDS_FOR_OLD_GAMES_UNTIL passed), the entries older games hosted
+    // lose theirs.
+    stripPasswords() {
+        for (const room of this.rooms.values()) {
+            if (!room.pw || this.keepsPassword(room.pw))
+                continue;
+            const entry = stripEntry(room.entry);
+            if (entry !== room.entry) {
+                room.entry = entry;
+                this.ctx.storage.put("room:" + room.id, entry);
+            }
+        }
     }
 
     conn(ws) {
@@ -615,6 +781,8 @@ export class Lobby extends DurableObject {
         const [op, ...args] = parts;
         if (op === "ping")
             return;
+        if (op === "host" || op === "join" || op === "leave" || op === "rejoin" || op === "rehost")
+            this.opSeq.set(ws, (this.opSeq.get(ws) || 0) + 1);
         const c = this.conn(ws);
         if (op === "list") {
             // list jk1 or list mots: only the games that game can join, so
@@ -624,72 +792,21 @@ export class Lobby extends DurableObject {
             const games = [...this.rooms.values()]
                 .filter(r => r.host && (!want || !this.conn(r.host).game || this.conn(r.host).game === want) &&
                              this.roomNet(r) === (c.net || 0))
-                .map(r => `${r.id} ${this.seated(r).length} ${r.entry}`);
+                .map(r => `${r.id} ${this.seated(r).length} ${this.listedEntry(r, c)}`);
             this.send(ws, ["list", ...games].join(" "));
         } else if (op === "host" && args.length === 1 && validEntry(args[0])) {
-            this.leave(ws);
-            const room = this.newRoom(this.nextRoom++, args[0], null);
-            room.host = ws;
-            room.seats.set(1, { key: newKey() });
-            this.ctx.storage.put({ nextRoom: this.nextRoom, ["room:" + room.id]: room.entry,
-                                   ["seats:" + room.id]: Object.fromEntries(room.seats) });
-            this.rooms.set(room.id, room);
-            this.setConn(ws, room.id, 1);
-            this.send(ws, `hosted ${room.id}`);
-            this.send(ws, `seat ${room.id} 1 ${room.seats.get(1).key}`);
-            console.log(`relay: room ${room.id} opened`);
-            this.statusChanged();
+            return this.host(ws, c, args[0]);
         } else if (op === "update" && args.length === 1 && validEntry(args[0])) {
-            const room = this.rooms.get(c.room);
-            if (room && room.host === ws && room.entry !== args[0]) {
-                room.entry = args[0];
-                this.ctx.storage.put("room:" + room.id, room.entry);
-                this.statusChanged();
-            }
-        } else if (op === "join" && args.length === 1 && ID_RE.test(args[0])) {
-            this.leave(ws);
-            const room = this.rooms.get(Number(args[0]));
-            // Not while its host is away: nobody would welcome them.
-            if (!room || !room.host) {
-                this.send(ws, "error no-room");
-                this.statusChanged();
-                return;
-            }
-            // Another netcode, from a list that's out of date or a landing
-            // page with another build: says whose is newer, so the game can
-            // say whose page to reload.
-            const net = this.roomNet(room);
-            if (net !== (c.net || 0)) {
-                this.send(ws, `error version ${net > (c.net || 0) ? "newer" : "older"}`);
-                this.statusChanged();
-                return;
-            }
-            let peerId = 0;
-            for (let i = FIRST_PEER_ID; i <= LAST_PEER_ID; i++) {
-                if (!room.peers.has(i) && !room.seats.has(i)) {
-                    peerId = i;
-                    break;
-                }
-            }
-            if (!peerId) {
-                this.send(ws, "error full");
-                this.statusChanged();
-                return;
-            }
-            room.peers.set(peerId, ws);
-            room.seats.set(peerId, { key: newKey() });
-            this.saveSeats(room);
-            this.setConn(ws, room.id, peerId);
-            this.send(room.host, `peer-joined ${peerId}`);
-            this.send(ws, `seat ${room.id} ${peerId} ${room.seats.get(peerId).key}`);
-            console.log(`relay: room ${room.id}: player joined as id ${peerId}`);
-            this.statusChanged();
+            return this.update(ws, c, args[0]);
+        } else if (op === "join" && (args.length === 1 || args.length === 2) && ID_RE.test(args[0]) &&
+                   (args.length === 1 || validPassword(args[1]))) {
+            return this.join(ws, c, Number(args[0]), (args[1] || "").toLowerCase());
         } else if (op === "welcome" && args.length === 2 && ID_RE.test(args[0]) && validEntry(args[1])) {
             const room = this.rooms.get(c.room);
             if (room && room.host === ws) {
                 const peer = room.peers.get(Number(args[0]));
                 if (peer)
-                    this.send(peer, `welcome ${args[0]} ${args[1]}`);
+                    this.send(peer, `welcome ${args[0]} ${stripEntry(args[1])}`);
             }
         } else if (op === "signal" && args.length === 2 && ID_RE.test(args[0]) && validSignal(args[1])) {
             // Between any two players in the same room: a host and its
@@ -707,7 +824,7 @@ export class Lobby extends DurableObject {
             this.takeSeat(ws, Number(args[0]), Number(args[1]), args[2], null);
         } else if (op === "rehost" && (args.length === 2 || args.length === 3) && ID_RE.test(args[0]) && KEY_RE.test(args[1]) &&
                    (args.length === 2 || validEntry(args[2]))) {
-            this.takeSeat(ws, Number(args[0]), 1, args[1], args[2] || "");
+            return this.takeSeat(ws, Number(args[0]), 1, args[1], args[2] || "");
         } else if (op === "leave") {
             this.leave(ws);
             this.statusChanged();
@@ -720,6 +837,227 @@ export class Lobby extends DurableObject {
         } else {
             this.send(ws, "error bad-request");
         }
+    }
+
+    // Whether the lobby keeps this password in its room's entry, for older
+    // games to check themselves: a room an older game hosts, while
+    // PASSWORDS_FOR_OLD_GAMES lets them.
+    keepsPassword(pw) {
+        return !!pw && pw.legacy && oldGamesKeepPasswords(this.env);
+    }
+
+    // Whether older games join this room as they always have, checking its
+    // password against the one in their list.
+    oldGamesCheck(room) {
+        return this.keepsPassword(room.pw) && !!entryPassword(room.entry);
+    }
+
+    // A room's entry as a game gets it in list. One that sends passwords with
+    // join never gets the password, and gets the password box only for a
+    // room that has one (not for one whose host's box was left on). An older
+    // game gets a room whose password the lobby checks without either, so
+    // its own check passes and its join hears "error version newer".
+    listedEntry(room, c) {
+        if (c.pw)
+            return stripEntry(room.entry, !!room.pw);
+        if (!room.pw || this.oldGamesCheck(room))
+            return room.entry;
+        return stripEntry(room.entry, false);
+    }
+
+    // A host's new room. With a password, once its verifier is made, unless
+    // its game has asked for something else meanwhile.
+    host(ws, c, entry) {
+        const pwHex = entryPassword(entry);
+        if (!pwHex) {
+            this.openRoom(ws, entry, null);
+            return;
+        }
+        const seq = this.opSeq.get(ws);
+        return newVerifier(pwHex, this.env.PASSWORD_KEY, !c.pw).then(pw => {
+            if (this.opSeq.get(ws) === seq && this.conns.has(ws))
+                this.openRoom(ws, entry, pw);
+        });
+    }
+
+    openRoom(ws, entry, pw) {
+        this.leave(ws);
+        const room = this.newRoom(this.nextRoom++, this.keepsPassword(pw) ? entry : stripEntry(entry), null, pw);
+        room.host = ws;
+        room.seats.set(1, { key: newKey() });
+        const put = { nextRoom: this.nextRoom, ["room:" + room.id]: room.entry,
+                      ["seats:" + room.id]: Object.fromEntries(room.seats) };
+        if (pw)
+            put["pw:" + room.id] = pw;
+        this.ctx.storage.put(put);
+        this.rooms.set(room.id, room);
+        this.setConn(ws, room.id, 1);
+        this.send(ws, `hosted ${room.id}`);
+        this.send(ws, `seat ${room.id} 1 ${room.seats.get(1).key}`);
+        console.log(`relay: room ${room.id} opened${pw ? " with a password" : ""}`);
+        this.statusChanged();
+    }
+
+    update(ws, c, entry) {
+        const room = this.rooms.get(c.room);
+        if (!room || room.host !== ws)
+            return;
+        const seq = ++room.entrySeq;
+        if (!entryPassword(entry)) {
+            this.setEntry(room, entry, null);
+            return;
+        }
+        return this.verifierFor(room.pw, entry, c).then(pw => {
+            if (room.entrySeq === seq && this.rooms.get(room.id) === room && room.host === ws)
+                this.setEntry(room, entry, pw);
+        });
+    }
+
+    // The verifier for a host's entry with a password: the room's own while
+    // the password is the same, else a new one. A room stops being an older
+    // game's once its host sends pw=1.
+    async verifierFor(pw, entry, c) {
+        const pwHex = entryPassword(entry);
+        if (pw && sameMac(await passwordMac(pw.salt, pwHex, this.env.PASSWORD_KEY), pw.mac))
+            return pw.legacy && c.pw ? { ...pw, legacy: false } : pw;
+        return newVerifier(pwHex, this.env.PASSWORD_KEY, !c.pw);
+    }
+
+    // A host's new entry (update or rehost) and its verifier, null without a
+    // password: the room keeps the entry without its password unless older
+    // games still check it themselves.
+    setEntry(room, entry, pw) {
+        const kept = this.keepsPassword(pw) ? entry : stripEntry(entry);
+        let changed = false;
+        if (pw !== room.pw) {
+            changed = !pw !== !room.pw;
+            room.pw = pw;
+            if (pw)
+                this.ctx.storage.put("pw:" + room.id, pw);
+            else
+                this.ctx.storage.delete("pw:" + room.id);
+        }
+        if (kept !== room.entry) {
+            room.entry = kept;
+            this.ctx.storage.put("room:" + room.id, kept);
+            changed = true;
+        }
+        if (changed)
+            this.statusChanged();
+    }
+
+    // join <room> [<password>]: the password, hex of its UTF-16LE code units,
+    // is checked here for a game that sent pw=1; an older game checked it
+    // itself against its list, which only has it while oldGamesCheck.
+    async join(ws, c, roomId, pwHex) {
+        const seq = this.opSeq.get(ws);
+        this.leave(ws);
+        for (;;) {
+            const room = this.rooms.get(roomId);
+            // Not while its host is away: nobody would welcome them.
+            if (!room || !room.host) {
+                this.send(ws, "error no-room");
+                this.statusChanged();
+                return;
+            }
+            // Another netcode, from a list that's out of date or a landing
+            // page with another build: says whose is newer, so the game can
+            // say whose page to reload.
+            const net = this.roomNet(room);
+            if (net !== (c.net || 0)) {
+                this.send(ws, `error version ${net > (c.net || 0) ? "newer" : "older"}`);
+                this.statusChanged();
+                return;
+            }
+            const pw = room.pw;
+            if (pw && !c.pw && !this.oldGamesCheck(room)) {
+                this.send(ws, "error version newer");
+                this.statusChanged();
+                return;
+            }
+            if (pw && c.pw) {
+                // Too many wrong ones: not even checked, so a right one isn't
+                // called wrong.
+                const tries = this.triesFor(room.id, c, ws);
+                if (tries.at.length + tries.checking >= PW_TRIES) {
+                    this.send(ws, "error password wait");
+                    this.statusChanged();
+                    return;
+                }
+                // An empty box tells nobody anything, so it isn't counted.
+                if (!pwHex) {
+                    this.send(ws, "error password");
+                    this.statusChanged();
+                    return;
+                }
+                tries.checking++;
+                let mac;
+                try {
+                    mac = await passwordMac(pw.salt, pwHex, this.env.PASSWORD_KEY);
+                } finally {
+                    tries.checking--;
+                }
+                // Its game asked for something else, or is gone.
+                if (this.opSeq.get(ws) !== seq || !this.conns.has(ws))
+                    return;
+                // The room, its host or its password changed meanwhile.
+                if (this.rooms.get(roomId) !== room || !room.host || room.pw !== pw)
+                    continue;
+                if (!sameMac(mac, pw.mac)) {
+                    tries.at.push(Date.now());
+                    if (tries.at.length === PW_TRIES)
+                        console.log(`relay: room ${room.id}: ${PW_TRIES} wrong passwords from one address, it waits`);
+                    this.send(ws, "error password");
+                    this.statusChanged();
+                    return;
+                }
+            }
+            this.seatPlayer(ws, room);
+            return;
+        }
+    }
+
+    // The wrong passwords tried on a room from c's address (from ws alone,
+    // without one) in the last PW_TRIES_MS.
+    triesFor(roomId, c, ws) {
+        let byWho = this.pwTries.get(roomId);
+        if (!byWho) {
+            byWho = new Map();
+            this.pwTries.set(roomId, byWho);
+        }
+        const who = c.ip || ws;
+        let t = byWho.get(who);
+        if (!t) {
+            t = { at: [], checking: 0 };
+            byWho.set(who, t);
+        }
+        const now = Date.now();
+        while (t.at.length && now - t.at[0] >= PW_TRIES_MS)
+            t.at.shift();
+        return t;
+    }
+
+    seatPlayer(ws, room) {
+        let peerId = 0;
+        for (let i = FIRST_PEER_ID; i <= LAST_PEER_ID; i++) {
+            if (!room.peers.has(i) && !room.seats.has(i)) {
+                peerId = i;
+                break;
+            }
+        }
+        if (!peerId) {
+            this.send(ws, "error full");
+            this.statusChanged();
+            return;
+        }
+        room.peers.set(peerId, ws);
+        room.seats.set(peerId, { key: newKey() });
+        this.saveSeats(room);
+        this.setConn(ws, room.id, peerId);
+        this.send(room.host, `peer-joined ${peerId}`);
+        this.send(ws, `seat ${room.id} ${peerId} ${room.seats.get(peerId).key}`);
+        console.log(`relay: room ${room.id}: player joined as id ${peerId}`);
+        this.statusChanged();
     }
 
     // TURN credentials for a game in a room, as ice with how many seconds
@@ -855,7 +1193,7 @@ export class Lobby extends DurableObject {
             byGame[game].online += names.length;
             games.push({
                 id: room.id, name: info.name, game,
-                map: info.map, episode: info.episode, mod: info.mod, locked: info.locked,
+                map: info.map, episode: info.episode, mod: info.mod, locked: info.locked || !!room.pw,
                 players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room),
             });
@@ -973,7 +1311,9 @@ export class Lobby extends DurableObject {
 
     // rejoin and rehost: a player takes its seat back with its key, held or
     // not (the old socket may not have closed yet, and is replaced). A
-    // rehost may bring the room's entry, in case it changed meanwhile.
+    // rehost may bring the room's entry, in case it changed meanwhile; one
+    // with a password takes the seat once its verifier is made, so the room
+    // is never open to anyone meanwhile.
     takeSeat(ws, roomId, id, key, entry) {
         const room = this.rooms.get(roomId);
         const seat = room && room.seats.get(id);
@@ -981,6 +1321,23 @@ export class Lobby extends DurableObject {
             this.send(ws, "error no-seat");
             return;
         }
+        if (!entry || !entryPassword(entry)) {
+            this.seatTaken(ws, room, id, seat, entry, null);
+            return;
+        }
+        const seq = this.opSeq.get(ws);
+        return this.verifierFor(room.pw, entry, this.conn(ws)).then(pw => {
+            if (this.opSeq.get(ws) !== seq || !this.conns.has(ws))
+                return;
+            if (this.rooms.get(roomId) !== room || room.seats.get(id) !== seat) {
+                this.send(ws, "error no-seat");
+                return;
+            }
+            this.seatTaken(ws, room, id, seat, entry, pw);
+        });
+    }
+
+    seatTaken(ws, room, id, seat, entry, pw) {
         const old = id === 1 ? room.host : room.peers.get(id);
         if (old !== ws) {
             this.leave(ws);
@@ -996,9 +1353,9 @@ export class Lobby extends DurableObject {
         delete seat.net;
         if (id === 1) {
             room.host = ws;
-            if (entry && entry !== room.entry) {
-                room.entry = entry;
-                this.ctx.storage.put("room:" + room.id, entry);
+            if (entry) {
+                room.entrySeq++;
+                this.setEntry(room, entry, pw);
             }
         } else {
             room.peers.set(id, ws);
@@ -1019,7 +1376,8 @@ export class Lobby extends DurableObject {
     // Ends a room: its players are told the host left.
     endRoom(room) {
         this.rooms.delete(room.id);
-        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id]);
+        this.pwTries.delete(room.id);
+        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id]);
         for (const peer of room.peers.values()) {
             this.setConn(peer, 0, 0);
             this.send(peer, "host-left");
