@@ -137,11 +137,14 @@ are only kept in memory.
     screen shows as "That game runs a newer version. Reload this page, then join again." Open rooms
     and matches already playing aren't affected.
 
-  Either way, a room a newer build hosts is listed to older builds the `none` way.
+  Either way, a room a newer build hosts is listed to older builds the `none` way. Any other value
+  (`off`, `false`, a typo) is taken as `none`, and the lobby logs that, so a mistake never hands
+  passwords out.
 - `PASSWORDS_FOR_OLD_GAMES_UNTIL` is an ISO 8601 UTC time, such as `2026-11-06T12:00:00Z`, after
   which `host` acts as `none`, so the switch needn't wait for a deploy. Then the lobby also takes
   the passwords out of those rooms' entries in storage, within a minute while anyone is connected. A
-  value that isn't a time is left out (the lobby logs that).
+  value that isn't a time is taken as one that has passed, so `host` acts as `none` (the lobby logs
+  that).
 
 Set the two variables under `[vars]` (and `[env.beta.vars]`) in `wrangler.toml` and deploy: one set
 only in the dashboard goes at the next `wrangler deploy`, which replaces the variables with those in

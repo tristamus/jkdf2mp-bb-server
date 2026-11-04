@@ -224,6 +224,9 @@ const MODES = [
     ["host until a time past", { PASSWORDS_FOR_OLD_GAMES: "host", PASSWORDS_FOR_OLD_GAMES_UNTIL: iso(realNow() - HOUR) }, false],
     ["unset until a time to come", { PASSWORDS_FOR_OLD_GAMES_UNTIL: iso(realNow() + HOUR) }, true],
     ["none until a time to come", { PASSWORDS_FOR_OLD_GAMES: "none", PASSWORDS_FOR_OLD_GAMES_UNTIL: iso(realNow() + HOUR) }, false],
+    // Settings it doesn't know keep passwords from older games.
+    ["a setting that isn't host or none", { PASSWORDS_FOR_OLD_GAMES: "off" }, false],
+    ["host until something that isn't a time", { PASSWORDS_FOR_OLD_GAMES: "host", PASSWORDS_FOR_OLD_GAMES_UNTIL: "tomorrow" }, false],
 ];
 const TYPED = [PASSWORD, "wrong", ""];
 
@@ -286,6 +289,26 @@ for (const withKey of [false, true]) {
         });
     }
 }
+
+await check("settings that aren't host, none or a time are taken as none, and logged", async () => {
+    for (const mode of ["off", "no", "false", "0", "disabled", "hots"]) {
+        const at = logged.length;
+        const w = await new World(Lobby, { PASSWORDS_FOR_OLD_GAMES: mode }).start();
+        const H = await w.host("old", { password: PASSWORD });
+        assert.equal((await w.listed(await w.connect("old"), H.room)).pw, "", mode);
+        assert.ok(logged.slice(at).some(l => l.includes("PASSWORDS_FOR_OLD_GAMES isn't host or none")), mode);
+    }
+    for (const mode of [undefined, "", " Host ", "NONE"]) {
+        const at = logged.length;
+        await new World(Lobby, { PASSWORDS_FOR_OLD_GAMES: mode }).start();
+        assert.ok(!logged.slice(at).some(l => l.includes("PASSWORDS_FOR_OLD_GAMES")), String(mode));
+    }
+    const at = logged.length;
+    const w = await new World(Lobby, { PASSWORDS_FOR_OLD_GAMES_UNTIL: "next week" }).start();
+    const H = await w.host("old", { password: PASSWORD });
+    assert.equal(await w.tryJoin("old", H.room, PASSWORD), "error version newer");
+    assert.ok(logged.slice(at).some(l => l.includes("PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time")));
+});
 
 await check("the lobby says pw on connect, after links and turn", async () => {
     let w = await new World(Lobby, {}).start();

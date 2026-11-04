@@ -331,14 +331,27 @@ function triesKey(ip) {
     return n.slice(0, 4).map(x => x.toString(16)).join(":") + "::/64";
 }
 
+// PASSWORDS_FOR_OLD_GAMES as the lobby takes it: "host" (or unset) or
+// "none". Anything else is taken as "none", which keeps passwords from older
+// games rather than handing them out.
+function oldGamesMode(env) {
+    const mode = String(env.PASSWORDS_FOR_OLD_GAMES || "").trim().toLowerCase();
+    return !mode || mode === "host" ? "host" : "none";
+}
+
+// PASSWORDS_FOR_OLD_GAMES_UNTIL in ms, Infinity when unset, NaN when it isn't
+// a time.
+function oldGamesUntil(env) {
+    const text = String(env.PASSWORDS_FOR_OLD_GAMES_UNTIL || "").trim();
+    return text ? Date.parse(text) : Infinity;
+}
+
 // Whether older games still check the password of a room an older game
 // hosts themselves: while PASSWORDS_FOR_OLD_GAMES is "host" (or unset), until
-// PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set; never with "none".
+// PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set; never with "none", nor with
+// an UNTIL that isn't a time.
 function oldGamesKeepPasswords(env, now = Date.now()) {
-    if (String(env.PASSWORDS_FOR_OLD_GAMES || "").trim().toLowerCase() === "none")
-        return false;
-    const until = Date.parse(env.PASSWORDS_FOR_OLD_GAMES_UNTIL || "");
-    return isNaN(until) || now < until;
+    return oldGamesMode(env) === "host" && now < oldGamesUntil(env);
 }
 
 // hello's base64 UTF-8 name, cleaned, or null if it isn't one.
@@ -450,8 +463,11 @@ export class Lobby extends DurableObject {
         // were, and how many tries are being checked. In memory only, so
         // they start over when the object is evicted.
         this.pwTries = new Map();
-        if (env.PASSWORDS_FOR_OLD_GAMES_UNTIL && isNaN(Date.parse(env.PASSWORDS_FOR_OLD_GAMES_UNTIL)))
-            console.log("relay: PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time, so it's left out");
+        const mode = String(env.PASSWORDS_FOR_OLD_GAMES || "").trim().toLowerCase();
+        if (mode && mode !== oldGamesMode(env))
+            console.log("relay: PASSWORDS_FOR_OLD_GAMES isn't host or none, so it's taken as none");
+        if (isNaN(oldGamesUntil(env)))
+            console.log("relay: PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time, so it's taken as passed (none)");
         this.turnDownUntil = 0;   // no TURN credentials until then (TURN_RETRY_MS)
         this.alarmAt = null;      // when the next sweep for quiet connections runs
         this.nextRoom = 1;
