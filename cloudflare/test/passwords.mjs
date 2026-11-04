@@ -482,6 +482,25 @@ await check("rate limit: without an address, it's counted by connection", async 
     assert.equal(await w.tryJoin("new", H.room, PASSWORD), "JOINED");
 });
 
+await check("rate limit: an IPv6 address counts by its /64, so changing address within it doesn't help", async () => {
+    const w = await new World(Lobby, {}).start();
+    const H = await w.host("new", { password: PASSWORD });
+    // Ten addresses in one /64, written every which way.
+    const in64 = ["2001:db8:1:2::1", "2001:DB8:1:2::2", "2001:db8:1:2:0:0:0:3", "2001:0db8:0001:0002::4",
+                  "2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2:1::", "2001:db8:1:2::7%eth0",
+                  "2001:db8:1:2:abcd::8", "2001:db8:1:2::9", "2001:db8:1:2::a"];
+    for (const [i, ip] of in64.entries())
+        assert.equal(await w.tryJoin("new", H.room, "guess" + i, ip), "error password", ip);
+    assert.equal(await w.tryJoin("new", H.room, PASSWORD, "2001:db8:1:2::b"), "error password wait");
+    // The next /64 over isn't held up.
+    assert.equal(await w.tryJoin("new", H.room, PASSWORD, "2001:db8:1:3::1"), "JOINED");
+    // An IPv4 address mapped into IPv6 is that IPv4 address.
+    for (let i = 0; i < 10; i++)
+        assert.equal(await w.tryJoin("new", H.room, "guess" + i, i % 2 ? "198.51.100.9" : "::ffff:198.51.100.9"), "error password");
+    assert.equal(await w.tryJoin("new", H.room, PASSWORD, "::ffff:c633:6409"), "error password wait");
+    assert.equal(await w.tryJoin("new", H.room, PASSWORD, "198.51.100.10"), "JOINED");
+});
+
 await check("a room or its host gone while a password is checked: error no-room", async () => {
     const w = await new World(Lobby, {}).start();
     // The host leaves.

@@ -116,6 +116,7 @@ import functools
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -168,8 +169,9 @@ FLAGS_AT = 216
 SESSIONFLAG_PASSWORD = 0x400
 # The password a game sends with join: hex of 1 to 31 UTF-16LE code units.
 PW_HEX_RE = re.compile(r"(?:[0-9a-fA-F]{4}){1,31}")
-# Wrong passwords tried on one room from one address in PW_TRIES_S before
-# every try from it gets error password wait. Same as in cloudflare/src/lobby.js.
+# Wrong passwords tried on one room from one address (an IPv6 one by its /64)
+# in PW_TRIES_S before every try from it gets error password wait. Same as in
+# cloudflare/src/lobby.js.
 PW_TRIES = 10
 PW_TRIES_S = 60
 
@@ -454,7 +456,7 @@ class Relay:
         now = time.monotonic()
         tries = {who: [t for t in at if now - t < PW_TRIES_S] for who, at in self.tries.pop(room.id, {}).items()}
         tries = {who: at for who, at in tries.items() if at}
-        who = conn.addr[0]
+        who = tries_key(conn.addr[0])
         ok = False
         if len(tries.get(who, ())) >= PW_TRIES:
             outbox.append((conn, OP_TEXT, b"error password wait"))
@@ -626,6 +628,20 @@ def netcode(path):
 def sends_passwords(path):
     """Whether a game sends passwords with join (pw=1 in its address)."""
     return urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("pw", [""])[0] == "1"
+
+
+def tries_key(addr):
+    """The address wrong passwords are counted by: an IPv6 one by its first 64 bits, as a home line or a
+    server usually has a whole /64 to pick from. An IPv4 address, or one mapped into IPv6, as it is."""
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return addr
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.ip_network((ip, 64), strict=False))
 
 
 def valid_entry(text):

@@ -142,8 +142,9 @@ const FLAGS_AT = 216;
 const SESSIONFLAG_PASSWORD = 0x400;
 // The password a game sends with join: hex of 1 to 31 UTF-16LE code units.
 const PW_HEX_RE = /^(?:[0-9a-fA-F]{4}){1,31}$/;
-// Wrong passwords tried on one room from one address (CF-Connecting-IP) in
-// PW_TRIES_MS before every try from it gets "error password wait".
+// Wrong passwords tried on one room from one address (CF-Connecting-IP, an
+// IPv6 one by its /64) in PW_TRIES_MS before every try from it gets
+// "error password wait".
 const PW_TRIES = 10;
 const PW_TRIES_MS = 60 * 1000;
 // HMAC pads a key with zeros, so this is the same as no key, which
@@ -308,6 +309,28 @@ function sameMac(a, b) {
     return d === 0;
 }
 
+// The address wrong passwords are counted by: an IPv6 one by its first 64
+// bits, as a home line or a server usually has a whole /64 to pick from.
+// An IPv4 address, or one mapped into IPv6, as it is.
+function triesKey(ip) {
+    if (!ip.includes(":"))
+        return ip;
+    let text = ip.toLowerCase().replace(/%.*$/, "");
+    const v4 = text.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (v4)
+        text = text.slice(0, -v4[0].length) + ((v4[1] << 8) | v4[2]).toString(16) + ":" + ((v4[3] << 8) | v4[4]).toString(16);
+    const halves = text.split("::");
+    const head = halves[0] ? halves[0].split(":") : [];
+    const tail = halves[1] ? halves[1].split(":") : [];
+    const groups = halves.length === 2 ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail] : head;
+    if (halves.length > 2 || groups.length !== 8 || !groups.every(g => /^[0-9a-f]{1,4}$/.test(g)))
+        return ip;
+    const n = groups.map(g => parseInt(g, 16));
+    if (n.slice(0, 5).every(x => !x) && n[5] === 0xffff)
+        return [n[6] >> 8, n[6] & 0xff, n[7] >> 8, n[7] & 0xff].join(".");
+    return n.slice(0, 4).map(x => x.toString(16)).join(":") + "::/64";
+}
+
 // Whether older games still check the password of a room an older game
 // hosts themselves: while PASSWORDS_FOR_OLD_GAMES is "host" (or unset), until
 // PASSWORDS_FOR_OLD_GAMES_UNTIL if that's set; never with "none".
@@ -422,9 +445,10 @@ export class Lobby extends DurableObject {
         // host or join that waited for a password's HMAC is dropped once its
         // game has asked for something else.
         this.opSeq = new Map();
-        // room id -> Map(address, or ws without one -> {at, checking}): when
-        // the wrong passwords tried in the last PW_TRIES_MS were, and how
-        // many tries are being checked.
+        // room id -> Map(address (triesKey), or ws without one -> {at,
+        // checking}): when the wrong passwords tried in the last PW_TRIES_MS
+        // were, and how many tries are being checked. In memory only, so
+        // they start over when the object is evicted.
         this.pwTries = new Map();
         if (env.PASSWORDS_FOR_OLD_GAMES_UNTIL && isNaN(Date.parse(env.PASSWORDS_FOR_OLD_GAMES_UNTIL)))
             console.log("relay: PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time, so it's left out");
@@ -1018,15 +1042,15 @@ export class Lobby extends DurableObject {
         }
     }
 
-    // The wrong passwords tried on a room from c's address (from ws alone,
-    // without one) in the last PW_TRIES_MS.
+    // The wrong passwords tried on a room from c's address (an IPv6 one's
+    // /64; ws alone without one) in the last PW_TRIES_MS.
     triesFor(roomId, c, ws) {
         let byWho = this.pwTries.get(roomId);
         if (!byWho) {
             byWho = new Map();
             this.pwTries.set(roomId, byWho);
         }
-        const who = c.ip || ws;
+        const who = c.ip ? triesKey(c.ip) : ws;
         let t = byWho.get(who);
         if (!t) {
             t = { at: [], checking: 0 };

@@ -413,65 +413,105 @@ def _():
         assert r.try_join("old", legacy.room, PASSWORD) == "JOINED"
 
 
-@check("rate limit: the minute runs from each wrong try, and a room that ends takes its counts with it")
-def _():
-    # In this process, with time.monotonic moved on by hand.
-    spec = importlib.util.spec_from_file_location("relay_under_test", RELAY)
-    sys.dont_write_bytecode = True
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.log = lambda text: None
+class InProcess:
+    """relay.py's Relay in this process, with made-up sockets and time.monotonic moved on by hand (now)."""
 
-    class Sock:
-        def __init__(self):
-            self.sent = []
+    def __enter__(self):
+        spec = importlib.util.spec_from_file_location("relay_under_test", RELAY)
+        sys.dont_write_bytecode = True
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        self.mod.log = lambda text: None
+        self.real = time.monotonic
+        self.now = self.real()
+        self.mod.time.monotonic = lambda: self.now
+        self.relay = self.mod.Relay()
+        return self
 
-        def sendall(self, data):
-            self.sent.append(data)
+    def __exit__(self, *exc):
+        self.mod.time.monotonic = self.real
 
-    def conn(kind, addr="203.0.113.1"):
-        c = mod.Conn(Sock(), (addr, 1), 0, kind == "new")
-        relay.connect(c)
+    def conn(self, kind, addr="203.0.113.1"):
+        class Sock:
+            def __init__(self):
+                self.sent = []
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+        c = self.mod.Conn(Sock(), (addr, 1), 0, kind == "new")
+        self.relay.connect(c)
         return c
 
+    @staticmethod
     def said(c):
         out = [d[2:].decode() for d in c.sock.sent if d[0] == 0x81 and d[1] < 126]
         c.sock.sent = []
         return out
 
-    real = time.monotonic
-    now = [real()]
-    mod.time.monotonic = lambda: now[0]
-    try:
-        relay = mod.Relay()
-        h = conn("new")
-        relay.on_text(h, "host " + entry(password=PASSWORD))
+    def host(self, password):
+        h = self.conn("new", "192.0.2.1")
+        self.relay.on_text(h, "host " + entry(password=password))
+        self.said(h)
+        return h
+
+    def try_join(self, room, typed, addr):
+        c = self.conn("new", addr)
+        self.relay.on_text(c, "join %d %s" % (room, hex_pw(typed)))
+        got = seen(self.said(c))
+        self.relay.on_text(c, "leave")
+        return got
+
+
+@check("rate limit: the minute runs from each wrong try, and a room that ends takes its counts with it")
+def _():
+    with InProcess() as p:
+        relay = p.relay
+        h = p.host(PASSWORD)
         room = h.room.id
-        a = conn("new")
+        a = p.conn("new")
         for i in range(10):
-            now[0] += 3
+            p.now += 3
             relay.on_text(a, "join %d %s" % (room, hex_pw("guess%d" % i)))
-        assert said(a) == ["error password"] * 10
-        now[0] += 30
+        assert p.said(a) == ["error password"] * 10
+        p.now += 30
         relay.on_text(a, "join %d %s" % (room, hex_pw(PASSWORD)))
-        assert said(a) == ["error password wait"]
+        assert p.said(a) == ["error password wait"]
         # A minute after the first wrong one, one more try.
-        now[0] += 3
+        p.now += 3
         relay.on_text(a, "join %d %s" % (room, hex_pw("wrong")))
-        assert said(a) == ["error password"]
+        assert p.said(a) == ["error password"]
         relay.on_text(a, "join %d %s" % (room, hex_pw(PASSWORD)))
-        assert said(a) == ["error password wait"]
-        now[0] += 60
+        assert p.said(a) == ["error password wait"]
+        p.now += 60
         relay.on_text(a, "join %d %s" % (room, hex_pw(PASSWORD)))
-        assert any(line.startswith("seat ") for line in said(a))
+        assert any(line.startswith("seat ") for line in p.said(a))
         assert relay.tries == {}
         relay.on_text(a, "leave")
         relay.on_text(a, "join %d %s" % (room, hex_pw("wrong")))
         assert room in relay.tries
         relay.on_text(h, "leave")
         assert room not in relay.tries
-    finally:
-        mod.time.monotonic = real
+
+
+@check("rate limit: an IPv6 address counts by its /64, so changing address within it doesn't help")
+def _():
+    with InProcess() as p:
+        room = p.host(PASSWORD).room.id
+        in64 = ["2001:db8:1:2::1", "2001:DB8:1:2::2", "2001:db8:1:2:0:0:0:3", "2001:0db8:0001:0002::4",
+                "2001:db8:1:2:ffff:ffff:ffff:ffff", "2001:db8:1:2:1::", "2001:db8:1:2::7%eth0",
+                "2001:db8:1:2:abcd::8", "2001:db8:1:2::9", "2001:db8:1:2::a"]
+        for i, addr in enumerate(in64):
+            assert p.try_join(room, "guess%d" % i, addr) == "error password", addr
+        assert p.try_join(room, PASSWORD, "2001:db8:1:2::b") == "error password wait"
+        # The next /64 over isn't held up.
+        assert p.try_join(room, PASSWORD, "2001:db8:1:3::1") == "JOINED"
+        # An IPv4 address mapped into IPv6 is that IPv4 address.
+        for i in range(10):
+            assert p.try_join(room, "guess%d" % i, "198.51.100.9" if i % 2 else "::ffff:198.51.100.9") == \
+                "error password"
+        assert p.try_join(room, PASSWORD, "::ffff:c633:6409") == "error password wait"
+        assert p.try_join(room, PASSWORD, "198.51.100.10") == "JOINED"
 
 
 @check("update: a password added, changed and taken away")
