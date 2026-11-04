@@ -25,6 +25,10 @@ see Address below), with nothing running at home. It speaks the same protocol, s
   gets `error version newer` or `error version older`. Builds that can play a match together
   share a number, so it only goes up with a change older builds can't play with. Until then
   every game, whether or not it says, is 0.
+- Room passwords are checked by the lobby, which keeps only a salted HMAC of each and never sends a
+  password to a game built for that, in a list or anywhere else (see Room passwords below). Older
+  builds still check the password themselves, for rooms older builds host, while
+  `PASSWORDS_FOR_OLD_GAMES` lets them.
 - The landing page's live counts come from the lobby too: each running game sends its player's name
   once, and the page gets the player count, the games and who's in them whenever they change. These
   messages from the lobby to pages don't count toward the free plan's requests.
@@ -80,7 +84,7 @@ To turn it on:
    npx wrangler secret put TURN_KEY_API_TOKEN
    ```
 
-Without both, the lobby works as before. With them, it tells games it has TURN (`lobby links turn`
+Without both, the lobby works as before. With them, it tells games it has TURN (`lobby links turn pw`
 on connect), and a game in a room that asks (`turn`) gets credentials that last 24 hours
 (`TURN_TTL_S` in `src/lobby.js`). A joiner asks as it joins, a host when someone joins it, so a
 host waiting alone doesn't use any. Cloudflare asks that more than half of the credentials made get
@@ -99,6 +103,57 @@ the dashboard stops every credential made with it. The dashboard shows how much 
 
 The lobby's minute log counts the players sending game packets through the lobby and the
 credentials made, so you can see how many players still need the relay.
+
+## Room passwords
+
+A host's game puts its password in every entry it sends the lobby (host, update, rehost and the
+welcome for each joiner), as it always has. The lobby doesn't pass it on. A game built for this
+connects with `pw=1` (`/relay?net=<n>&pw=1`) and the lobby says `pw` on its `lobby` line, so the game
+knows to send the password its player typed with `join <room> <hex>` (the UTF-16LE code units in
+hex). Such a game gets every room in `list` without a password, with the password box flag
+(sessionFlags 0x400) set just for a room that has one, and the lobby answers a wrong or missing
+password with `error password`. No game gets a password in `welcome`, and the landing page's
+status says only `locked`.
+
+For those rooms the lobby keeps no password, only a verifier: HMAC-SHA-256 of a random salt and the
+password, in storage under `pw:<room>`. After 10 wrong passwords on one room from one address
+(`CF-Connecting-IP`) within a minute, every try from that address on that room hears
+`error password wait`, without being checked, until the oldest of them is a minute old. The counts
+are only kept in memory.
+
+- `PASSWORD_KEY` (optional secret) keys the HMAC, so the verifiers in storage are no use without it:
+  `npx wrangler secret put PASSWORD_KEY` (and the same with `--env beta`). Don't change or remove it
+  while rooms with a password are open: their verifiers stop matching, and every join to them hears
+  `error password` until their host's game sends the room's entry again.
+- `PASSWORDS_FOR_OLD_GAMES` says what older builds get: tabs opened before the update, which connect
+  without `pw=1`, check the password against the list themselves and send a bare `join`.
+  - `host` (the default, when it's unset): a room an older build hosts (`legacy` in its verifier,
+    and every room open when this lobby was deployed) is listed to older builds as before, password
+    and all, and their bare join gets in as before. The lobby still checks the password of every
+    game that sends `pw=1`. For these rooms the old weakness stays: the password is in storage, and
+    anyone who connects without `pw=1` can read it in the list and join without it.
+  - `none`: every room with a password is checked by the lobby. Older builds get it in the list
+    without its password or the box, and their join hears `error version newer`, which their join
+    screen shows as "That game runs a newer version. Reload this page, then join again." Open rooms
+    and matches already playing aren't affected.
+
+  Either way, a room a newer build hosts is listed to older builds the `none` way.
+- `PASSWORDS_FOR_OLD_GAMES_UNTIL` is an ISO 8601 UTC time, such as `2026-11-06T12:00:00Z`, after
+  which `host` acts as `none`, so the switch needn't wait for a deploy. Then the lobby also takes
+  the passwords out of those rooms' entries in storage, within a minute while anyone is connected. A
+  value that isn't a time is left out (the lobby logs that).
+
+Set the two variables under `[vars]` (and `[env.beta.vars]`) in `wrangler.toml` and deploy: one set
+only in the dashboard goes at the next `wrangler deploy`, which replaces the variables with those in
+`wrangler.toml`.
+
+The deploy itself needs nothing else, and neither does a rollback. The lobby takes the rooms open at
+the deploy for older builds' rooms, and makes their verifiers when it starts. A rollback to a lobby
+from before this closes every connection, as any deploy does, so a room isn't listed until its host's
+game rehosts, which brings its whole entry, password and all, for the games' own check again; a game
+that connected with `pw=1` sees no `pw` on that lobby's `lobby` line and checks the password itself.
+`node test/passwords.mjs` checks all of this, with the lobby from before it taken from git for the
+deploy and the rollback.
 
 ## Address
 
@@ -222,8 +277,8 @@ deploys the site too, with a warning that there's more than one environment; `--
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,
-and between two players), packet routing, leaving, and seats being held, taken back and running
-out, with plain WebSocket clients, and compares the transcript with the one `wrangler dev` gives.
+and between two players), packet routing, leaving, seats being held, taken back and running out,
+and room passwords, with plain WebSocket clients, and compares the transcript with the one `wrangler dev` gives.
 It waits once for held seats to run out, about a minute against a deployed lobby, and sends packets
 that go nowhere for a little over 5 seconds a few times. Against `npx wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`, which made
 `protocol.expected.txt`, run it with `HOLD_MS=3000 NOTICE_MS=1000` to make those waits short.
