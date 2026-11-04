@@ -111,15 +111,21 @@ welcome for each joiner), as it always has. The lobby doesn't pass it on. A game
 connects with `pw=1` (`/relay?net=<n>&pw=1`) and the lobby says `pw` on its `lobby` line, so the game
 knows to send the password its player typed with `join <room> <hex>` (the UTF-16LE code units in
 hex). Such a game gets every room in `list` without a password, with the password box flag
-(sessionFlags 0x400) set just for a room that has one, and the lobby answers a wrong or missing
+(sessionFlags 0x400) set just for a room that has one, and it sends the password only to a room
+listed with the box, and only when something was typed; otherwise its `join` is bare, so text left
+in the box from another room never leaves the browser. The lobby answers a wrong or missing
 password with `error password`. No game gets a password in `welcome`, and the landing page's
 status says only `locked`.
 
 For those rooms the lobby keeps no password, only a verifier: HMAC-SHA-256 of a random salt and the
 password, in storage under `pw:<room>`. After 10 wrong passwords on one room from one address
-(`CF-Connecting-IP`) within a minute, every try from that address on that room hears
+(`CF-Connecting-IP`; an IPv6 address counts by its /64, as a home line or a server usually has a
+whole /64 to pick from) within a minute, every try from that address on that room hears
 `error password wait`, without being checked, until the oldest of them is a minute old. The counts
-are only kept in memory.
+are only kept in memory, so they start over whenever the lobby's Durable Object is evicted: at every
+deploy, and whenever it has been idle a short while (pings don't wake it, so a lobby where players
+only wait is idle). Someone who pauses between bursts of guesses can therefore get more than 10 a
+minute; a password of more than a few characters is what keeps a room private.
 
 - `PASSWORD_KEY` (optional secret) keys the HMAC, so the verifiers in storage are no use without it:
   `npx wrangler secret put PASSWORD_KEY` (and the same with `--env beta`). Don't change or remove it
@@ -137,7 +143,10 @@ are only kept in memory.
     screen shows as "That game runs a newer version. Reload this page, then join again." Open rooms
     and matches already playing aren't affected.
 
-  Either way, a room a newer build hosts is listed to older builds the `none` way. Any other value
+  Either way, a room a newer build hosts is listed to older builds the `none` way: from the deploy
+  on, a tab opened before it can't join a room with a password that a newer tab hosts until its
+  player reloads the page, which its join screen tells them. Open rooms aren't affected. Listing
+  those rooms' passwords to older builds would hand them to anyone who leaves `pw=1` out. Any other value
   (`off`, `false`, a typo) is taken as `none`, and the lobby logs that, so a mistake never hands
   passwords out.
 - `PASSWORDS_FOR_OLD_GAMES_UNTIL` is an ISO 8601 UTC time, such as `2026-11-06T12:00:00Z`, after
@@ -157,6 +166,15 @@ game rehosts, which brings its whole entry, password and all, for the games' own
 that connected with `pw=1` sees no `pw` on that lobby's `lobby` line and checks the password itself.
 `node test/passwords.mjs` checks all of this, with the lobby from before it taken from git for the
 deploy and the rollback.
+
+Once, around the deploy that turns this on: a newer tab whose join list came from the old lobby
+checked the password itself and sends a bare `join`. If that `join` reaches the new lobby before the
+list is refreshed (within about 2 s of the deploy, or when the player was on the Load Character
+screen, which doesn't refresh it, across the deploy), the lobby answers `error password` and the
+player sees "Wrong password" although they typed the right one. Joining again works. The same
+happens the other way at a rollback: a `join` with a password, from a list the new lobby made,
+reaches the old one, which doesn't take it (`error bad-request`), and the player sees that the game
+couldn't connect, once.
 
 ## Address
 
@@ -277,6 +295,9 @@ npx wrangler deploy --env="" # the site; --env beta for the test address (below)
 
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead. A plain `npx wrangler deploy`
 deploys the site too, with a warning that there's more than one environment; `--env=""` names the site's.
+
+The deploy that brings room passwords, and a rollback from it, can show a player joining a room with
+a password a wrong "Wrong password", or a "couldn't connect", once (see Room passwords).
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,

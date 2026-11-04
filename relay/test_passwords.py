@@ -9,9 +9,10 @@ clients act as the engine does. Python 3 standard library only.
 An "old" game (cloudflare-89) checks the listed password itself, with the box
 shown only for sessionFlags 0x400, and sends a bare join. A "new" one connects
 with pw=1 and, when the lobby said pw, sends join <room> <hex of the typed
-password> instead (bare when the box is empty). Hosts of both send their
-password in every entry. It prints a line for each check and exits 1 if one
-fails.
+password> instead (bare when the box is empty). The engine sends it only to a
+room listed with the box; these games send it to any, to check the relay leaves
+it out where there's no password. Hosts of both send their password in every
+entry. It prints a line for each check and exits 1 if one fails.
 """
 
 import base64

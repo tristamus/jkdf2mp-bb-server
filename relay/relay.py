@@ -41,17 +41,19 @@ join screen show a password box. The relay keeps a salted HMAC-SHA-256 of
 the password, and a game that connected with pw=1 never gets a password: in
 list, every entry has it zeroed, and 0x400 set exactly for a room with one;
 in welcome, which the relay passes on from the host, nobody gets it. Such a
-game sends join <room> <password>, the password in hex of its UTF-16LE code
-units (1 to 31, none 0; anything else gets error bad-request), or a bare join
-when its box is empty. A join to a room with a password then gets error
-password for a wrong or missing one, and error password wait, without the
-password being checked, after 10 wrong ones on that room from that address in
-a minute, until the minute is up. A password sent to a room without one is
-left out. An older game (no pw=1) checks the password itself against its
-list and sends a bare join. It still can for a room whose host is an older
-game, while --passwords-for-old-games is host (the default, until
---passwords-for-old-games-until if that's given): those rooms are listed to it
-as they are, password and all. Any other room with a password is listed to it
+game sends join <room> <password> to a room listed with 0x400 when its
+player typed one, the password in hex of its UTF-16LE code units (1 to 31,
+none 0; anything else gets error bad-request), and a bare join otherwise. A
+join to a room with a password then gets error password for a wrong or
+missing one, and error password wait, without the password being checked,
+after 10 wrong ones on that room from that address in a minute, until the
+minute is up. The address is the TCP peer's (an IPv6 one by its /64), so
+behind a reverse proxy every player has the proxy's and they share one count.
+A password sent to a room without one is left out. An older game (no pw=1)
+checks the password itself against its list and sends a bare join. It still
+can for a room whose host is an older game, while --passwords-for-old-games is
+host (the default, until --passwords-for-old-games-until if that's given):
+those rooms are listed to it as they are, password and all. Any other room with a password is listed to it
 without the password or 0x400, so its own check passes, and its join gets
 error version newer, which tells its player to reload the page. With none, or
 once the time given has passed, that goes for every room with a password.

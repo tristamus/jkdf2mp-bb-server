@@ -40,7 +40,10 @@ relays network traffic between players.
   Room passwords are checked by the relay, which keeps only a salted HMAC of each.
   `--passwords-for-old-games none` stops builds from before that check (which check the password
   themselves) from joining any room with a password until they reload; the default, `host`, still
-  lets them into rooms such builds host.
+  lets them into rooms such builds host. After 10 wrong passwords in a minute on one room from one
+  address (the TCP connection's; an IPv6 address by its /64), that address waits a minute. Behind a
+  reverse proxy every player comes from the proxy's address and shares that count, so one player's
+  wrong tries make everyone wait for that room.
 
   Players on different networks need a STUN server, and the ones behind strict NATs a TURN server
   (such as [coturn](https://github.com/coturn/coturn)). The relay hands their addresses to every

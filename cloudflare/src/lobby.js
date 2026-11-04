@@ -40,8 +40,8 @@
 //
 // A room's password is checked here, not by the joining game: a game that
 // connects with pw=1 (/relay?net=<n>&pw=1) never gets a password in a list,
-// and sends the one its player typed with join; no game gets one in a
-// welcome. The lobby keeps a salted HMAC of each password (room.pw), with the
+// and sends the one its player typed with join, to a room listed with the
+// password box; no game gets one in a welcome. The lobby keeps a salted HMAC of each password (room.pw), with the
 // PASSWORD_KEY secret when that's set. Older games, which check the password
 // themselves against the list and send a bare join, still can for a room an
 // older game hosts while PASSWORDS_FOR_OLD_GAMES is "host" (the default,
