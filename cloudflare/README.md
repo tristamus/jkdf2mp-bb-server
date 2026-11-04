@@ -146,9 +146,10 @@ minute; a password of more than a few characters is what keeps a room private.
   Either way, a room a newer build hosts is listed to older builds the `none` way: from the deploy
   on, a tab opened before it can't join a room with a password that a newer tab hosts until its
   player reloads the page, which its join screen tells them. Open rooms aren't affected. Listing
-  those rooms' passwords to older builds would hand them to anyone who leaves `pw=1` out. Any other value
-  (`off`, `false`, a typo) is taken as `none`, and the lobby logs that, so a mistake never hands
-  passwords out.
+  those rooms' passwords to older builds would hand them to anyone who leaves `pw=1` out.
+
+  Any value other than `host` or `none` (`off`, `false`, a typo) is taken as `none`, and the lobby
+  logs that, so a mistake never hands passwords out.
 - `PASSWORDS_FOR_OLD_GAMES_UNTIL` is an ISO 8601 UTC time, such as `2026-11-06T12:00:00Z`, after
   which `host` acts as `none`, so the switch needn't wait for a deploy. Then the lobby also takes
   the passwords out of those rooms' entries in storage, within a minute while anyone is connected. A
@@ -296,8 +297,9 @@ npx wrangler deploy --env="" # the site; --env beta for the test address (below)
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead. A plain `npx wrangler deploy`
 deploys the site too, with a warning that there's more than one environment; `--env=""` names the site's.
 
-The deploy that brings room passwords, and a rollback from it, can show a player joining a room with
-a password a wrong "Wrong password", or a "couldn't connect", once (see Room passwords).
+The deploy that brings room passwords, and a rollback from it, can tell a player joining a room with
+a password, once, "Wrong password" with the right one, or that the game couldn't connect; joining
+again works (see Room passwords).
 
 To check a deployed lobby, run `node test/protocol.mjs wss://<host>/relay test/protocol.expected.txt`
 while nobody is hosting. It plays out hosting, joining, signaling (between a host and its players,
