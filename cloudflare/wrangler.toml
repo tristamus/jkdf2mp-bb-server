@@ -71,6 +71,8 @@ IMPERIAL_LIST = "lobby.jkjunkie.com"
 # Dedicated servers on it that the page always shows first, matched by
 # address: "<game> <address:port> <name>", several separated by commas.
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
+# From this time, older games no longer get room passwords (kit 90 README, Settings).
+PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
