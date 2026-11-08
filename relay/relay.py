@@ -7,11 +7,13 @@ clients, and relays game packets for players whose direct WebRTC link isn't up.
 Python 3 standard library only.
 
 The page's network backend (src/Platform/Networking/WSRelay in the OpenJKDF2
-fork) connects to ws://<this server>/relay?net=<n>, where n is the netcode its
-build speaks (0 if it doesn't say). Text frames are control lines, binary
-frames are game packets:
+fork) connects to ws://<this server>/relay?net=<n>&pw=1, where n is the netcode
+its build speaks (0 if it doesn't say), and pw=1 says it sends passwords with
+join (older builds don't). Text frames are control lines, binary frames are
+game packets:
 
-  client -> relay   list [<game>] | host <entry> | update <entry> | join <room>
+  client -> relay   list [<game>] | host <entry> | update <entry>
+                    join <room> [<password>]
                     welcome <id> <entry> | leave | signal <id> <data> | ping
                     hello <game> <name> | watch | rejoin <room> <id> <key>
                     rehost <room> <key> [<entry>] | turn
@@ -29,16 +31,42 @@ join to a game with another netcode gets error version newer, or error version
 older, whichever the room's is. Builds that can play a match together share a
 number (they agree on the rest through their own hellos), so it only goes up
 with a change older builds can't play with. <entry> is the host's hex-encoded
-session description, passed through as is.
+session description (a jkMultiEntry, types.h in the OpenJKDF2 fork, then the
+mod tail from packaging/wasm/mods.js), passed through as is but for its
+password.
+
+Room passwords are checked here. The host's entry has its password (32 UTF-16
+code units at byte 152) and sessionFlags 0x400 (byte 216), which makes the
+join screen show a password box. The relay keeps a salted HMAC-SHA-256 of
+the password, and a game that connected with pw=1 never gets a password: in
+list, every entry has it zeroed, and 0x400 set exactly for a room with one;
+in welcome, which the relay passes on from the host, nobody gets it. Such a
+game sends join <room> <password> to a room listed with 0x400 when its
+player typed one, the password in hex of its UTF-16LE code units (1 to 31,
+none 0; anything else gets error bad-request), and a bare join otherwise. A
+join to a room with a password then gets error password for a wrong or
+missing one, and error password wait, without the password being checked,
+after 10 wrong ones on that room from that address in a minute, until the
+minute is up. The address is the TCP peer's (an IPv6 one by its /64), so
+behind a reverse proxy every player has the proxy's and they share one count.
+A password sent to a room without one is left out. An older game (no pw=1)
+checks the password itself against its list and sends a bare join. It still
+can for a room whose host is an older game, while --passwords-for-old-games is
+host (the default, until --passwords-for-old-games-until if that's given):
+those rooms are listed to it as they are, password and all. Any other room with a password is listed to it
+without the password or 0x400, so its own check passes, and its join gets
+error version newer, which tells its player to reload the page. With none, or
+once the time given has passed, that goes for every room with a password.
 signal carries base64 SDP or ICE candidates between two players in the same
 room, a host and one of its clients or two clients linking to each other; the
 relay only checks the sender is in that room and swaps the target id for the
 sender's. ice is sent once on connect when --stun or --turn is set: base64
 JSON for RTCPeerConnection's iceServers. Then lobby says what this relay can do
-beyond the basics: links (signal between clients), and turn with --turn. A game
-in a room that sends turn then gets fresh TURN credentials, as ice with how
-many seconds they last (--turn-ttl); a game in no room, or without --turn, gets
-the ice it got on connect.
+beyond the basics: links (signal between clients), turn with --turn, and pw
+(passwords are checked here, so a game that sent pw=1 sends them with join). A
+game in a room that sends turn then gets fresh TURN credentials, as ice with
+how many seconds they last (--turn-ttl); a game in no room, or without --turn,
+gets the ice it got on connect.
 
 The landing page's live counts: each running game sends hello with its game
 (jk1 or mots) and its player's name in base64 UTF-8, again when it changes. A
@@ -46,12 +74,12 @@ page that sends watch gets status, base64 UTF-8 JSON, then again whenever it
 changes: {"online": n, "lobby": [names], "byGame": {"jk1": {"online": n,
 "lobby": [names]}, "mots": {...}}, "games": [{"id", "name", "game", "map",
 "episode", "mod", "locked", "players", "max", "names", "net"}]}, the host's
-name first and "" for a player whose game didn't say hello, and net the
-netcode the game's host speaks. byGame splits the
-counts and the lobby by the game players run, for the page's rooms. The relay reads a
-game's details from its entry (a jkMultiEntry, then the mod tail from mods.js),
-and never sends its password, only whether it has one. A player is a
-connection that said hello or is in a room; watching pages don't count.
+name first and "" for a player whose game didn't say hello, locked whether the
+game has a password, and net the netcode the game's host speaks. byGame splits
+the counts and the lobby by the game players run, for the page's rooms. The
+relay reads a game's details from its entry (a jkMultiEntry, then the mod tail
+from mods.js), and never sends its password, only whether it has one. A player
+is a connection that said hello or is in a room; watching pages don't count.
 
 Game packets go over WebRTC once a player's link is up, so a socket that
 drops mid-game (a network blip, or the lobby restarting) needn't end the
@@ -85,10 +113,12 @@ in the page, and it stays in their browser.
 
 import argparse
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -132,15 +162,30 @@ NET_RE = re.compile(r"^[0-9]{1,3}$")
 HIDDEN_RE = re.compile("[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]")
 # A match summary's most, as cloudflare/src/summary.js takes.
 MAX_SUMMARY = 64 * 1024
+# A room's password in its entry: 32 UTF-16 code units at byte 152, of which
+# the game uses 31, and sessionFlags at 216, whose 0x400 makes the join screen
+# show its password box.
+PW_AT = 152
+PW_UNITS = 32
+FLAGS_AT = 216
+SESSIONFLAG_PASSWORD = 0x400
+# The password a game sends with join: hex of 1 to 31 UTF-16LE code units.
+PW_HEX_RE = re.compile(r"(?:[0-9a-fA-F]{4}){1,31}")
+# Wrong passwords tried on one room from one address (an IPv6 one by its /64)
+# in PW_TRIES_S before every try from it gets error password wait. Same as in
+# cloudflare/src/lobby.js.
+PW_TRIES = 10
+PW_TRIES_S = 60
 
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
 
 class Conn:
-    def __init__(self, sock, addr, net=0):
+    def __init__(self, sock, addr, net=0, pw=False):
         self.sock = sock
         self.addr = addr
         self.net = net  # the netcode it connected with
+        self.pw = pw  # whether it sends passwords with join
         self.send_lock = threading.Lock()
         self.room = None
         self.id = 0
@@ -184,11 +229,22 @@ class Seat:
         self.net = 0
 
 
+class Verifier:
+    """What the relay keeps of a room's password: an HMAC of it with a random
+    salt. legacy while the room's host is an older game (no pw=1)."""
+
+    def __init__(self, salt, mac, legacy):
+        self.salt = salt
+        self.mac = mac
+        self.legacy = legacy
+
+
 class Room:
     def __init__(self, room_id, host, entry):
         self.id = room_id
         self.host = host  # None while the host's seat is held
-        self.entry = entry
+        self.entry = entry  # without its password, unless older games check it themselves
+        self.pw = None  # the password's Verifier, None without one
         self.peers = {}
         self.seats = {1: Seat()}
 
@@ -205,9 +261,19 @@ class Room:
 
 
 class Relay:
-    def __init__(self, hold=HOLD_S, ice=None):
+    def __init__(self, hold=HOLD_S, ice=None, old_games="host", old_games_until=None):
         self.hold = hold
         self.ice = ice
+        # Whether older games still check the password of a room an older
+        # game hosts themselves (host), and until when (time.time()).
+        self.old_games = old_games
+        self.old_games_until = old_games_until
+        # Rooms end when the relay does, so a key of its own does.
+        self.pw_key = secrets.token_bytes(32)
+        # room id -> {address (tries_key): [when each wrong password was tried]}. A try only looks at its own
+        # address's; the others' old ones go once a minute (_forget_old_tries).
+        self.tries = {}
+        self.tries_swept = time.monotonic()
         self.lock = threading.Lock()
         self.rooms = {}
         self.next_room = 1
@@ -231,24 +297,29 @@ class Relay:
         with self.lock:
             if op == "list":
                 want = args[0] if args and args[0] in GAMES else None
-                games = ["%d %d %s" % (r.id, len(r.seated()), r.entry) for r in self.rooms.values()
+                games = ["%d %d %s" % (r.id, len(r.seated()), self._listed_entry(r, conn)) for r in self.rooms.values()
                          if r.host and (not want or not r.host.game or r.host.game == want) and r.net() == conn.net]
                 outbox.append((conn, OP_TEXT, " ".join(["list"] + games).encode()))
             elif op == "host" and len(args) == 1 and valid_entry(args[0]):
                 self._leave(conn, outbox)
-                room = Room(self.next_room, conn, args[0])
+                room = Room(self.next_room, conn, "")
+                self._set_entry(room, args[0], conn)
                 self.next_room += 1
                 self.rooms[room.id] = room
                 conn.room, conn.id = room, 1
                 outbox.append((conn, OP_TEXT, b"hosted %d" % room.id))
                 outbox.append((conn, OP_TEXT, ("seat %d 1 %s" % (room.id, room.seats[1].key)).encode()))
-                log("room %d opened by %s" % (room.id, conn.addr_name()))
+                log("room %d opened by %s%s" % (room.id, conn.addr_name(), " with a password" if room.pw else ""))
                 self._status_changed(outbox)
             elif op == "update" and len(args) == 1 and valid_entry(args[0]):
-                if conn.room and conn.room.host is conn and conn.room.entry != args[0]:
-                    conn.room.entry = args[0]
-                    self._status_changed(outbox)
-            elif op == "join" and len(args) == 1 and args[0].isdigit():
+                room = conn.room
+                if room and room.host is conn:
+                    was = (room.entry, room.pw is None)
+                    self._set_entry(room, args[0], conn)
+                    if (room.entry, room.pw is None) != was:
+                        self._status_changed(outbox)
+            elif op == "join" and len(args) in (1, 2) and args[0].isdigit() and \
+                    (len(args) == 1 or valid_password(args[1])):
                 self._leave(conn, outbox)
                 room = self.rooms.get(int(args[0]))
                 # Not while its host is away: nobody would welcome them.
@@ -260,6 +331,14 @@ class Relay:
                 elif room.net() != conn.net:
                     outbox.append((conn, OP_TEXT, b"error version newer" if room.net() > conn.net
                                    else b"error version older"))
+                # An older game checked the password itself, against a list
+                # that only has it while the relay lets older games check.
+                elif room.pw and not conn.pw and not self._old_games_check(room):
+                    outbox.append((conn, OP_TEXT, b"error version newer"))
+                # A game that sends passwords: checked here, and told why not.
+                elif room.pw and conn.pw and \
+                        not self._password_ok(room, conn, args[1].lower() if len(args) == 2 else "", outbox):
+                    pass
                 else:
                     peer_id = next((i for i in range(FIRST_PEER_ID, LAST_PEER_ID + 1)
                                     if i not in room.peers and i not in room.seats), None)
@@ -278,7 +357,7 @@ class Relay:
                 if room and room.host is conn:
                     peer = room.peers.get(int(args[0]))
                     if peer:
-                        outbox.append((peer, OP_TEXT, ("welcome %s %s" % (args[0], args[1])).encode()))
+                        outbox.append((peer, OP_TEXT, ("welcome %s %s" % (args[0], strip_entry(args[1]))).encode()))
             elif op == "signal" and len(args) == 2 and args[0].isdigit() and valid_signal(args[1]):
                 # Between any two players in the same room: a host and its
                 # clients, and two clients linking to each other.
@@ -339,6 +418,85 @@ class Relay:
             self._status_changed(outbox)
         self.deliver(outbox)
 
+    def _keeps_password(self, pw):
+        """Whether this password stays in its room's entry, for older games to check themselves: a room an
+        older game hosts, while --passwords-for-old-games lets them."""
+        return bool(pw and pw.legacy and self.old_games != "none" and
+                    (self.old_games_until is None or time.time() < self.old_games_until))
+
+    def _old_games_check(self, room):
+        """Whether older games join this room as they always have, checking its password against their list."""
+        return self._keeps_password(room.pw) and entry_password(room.entry) != ""
+
+    def _listed_entry(self, room, conn):
+        """A room's entry as conn gets it in list: never a password for a game that sends them (and the
+        password box just for a room with one), and for an older game a room whose password the relay
+        checks without either, so its join comes here and gets error version newer."""
+        if conn.pw:
+            return strip_entry(room.entry, room.pw is not None)
+        if not room.pw or self._old_games_check(room):
+            return room.entry
+        return strip_entry(room.entry, False)
+
+    def _mac(self, salt, pw_hex):
+        return hmac.new(self.pw_key, salt + bytes.fromhex(pw_hex), hashlib.sha256).digest()
+
+    def _set_entry(self, room, entry, conn):
+        """A host's entry (host, update or rehost) and the verifier for its password: the room's own while
+        the password is the same, a new one when it isn't, none without one."""
+        pw_hex = entry_password(entry)
+        if not pw_hex:
+            room.pw = None
+        elif not room.pw or not hmac.compare_digest(self._mac(room.pw.salt, pw_hex), room.pw.mac):
+            salt = secrets.token_bytes(16)
+            room.pw = Verifier(salt, self._mac(salt, pw_hex), not conn.pw)
+        elif conn.pw:
+            room.pw.legacy = False
+        room.entry = entry if self._keeps_password(room.pw) else strip_entry(entry)
+
+    def _password_ok(self, room, conn, pw_hex, outbox):
+        """Checks the password a game sent with join; if it's wrong, missing or not checked (too many wrong
+        ones from its address), says so in outbox."""
+        now = time.monotonic()
+        self._forget_old_tries(now)
+        tries = self.tries.setdefault(room.id, {})
+        who = tries_key(conn.addr[0])
+        at = [t for t in tries.get(who, ()) if now - t < PW_TRIES_S]
+        ok = False
+        if len(at) >= PW_TRIES:
+            outbox.append((conn, OP_TEXT, b"error password wait"))
+        elif pw_hex and hmac.compare_digest(self._mac(room.pw.salt, pw_hex), room.pw.mac):
+            ok = True
+        else:
+            # An empty box tells nobody anything, so it isn't counted.
+            if pw_hex:
+                at.append(now)
+                if len(at) == PW_TRIES:
+                    log("room %d: %d wrong passwords from %s, it waits" % (room.id, PW_TRIES, who))
+            outbox.append((conn, OP_TEXT, b"error password"))
+        if at:
+            tries[who] = at
+        else:
+            tries.pop(who, None)
+        if not tries:
+            del self.tries[room.id]
+        return ok
+
+    def _forget_old_tries(self, now):
+        """Once a minute, drops the wrong passwords over a minute old for every room and address."""
+        if now - self.tries_swept < PW_TRIES_S:
+            return
+        self.tries_swept = now
+        for room_id, by_who in list(self.tries.items()):
+            for who, at in list(by_who.items()):
+                at = [t for t in at if now - t < PW_TRIES_S]
+                if at:
+                    by_who[who] = at
+                else:
+                    del by_who[who]
+            if not by_who:
+                del self.tries[room_id]
+
     # The landing page's live counts. Same as status() in cloudflare/src/lobby.js.
     def _status(self):
         waiting = [c for c in self.conns if not c.room and c.name is not None]
@@ -357,7 +515,8 @@ class Relay:
             game = host.game or guess_game(info["episode"])
             by_game[game]["online"] += len(names)
             games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
-                              mod=info["mod"], locked=info["locked"], players=len(names), max=info["max"],
+                              mod=info["mod"], locked=info["locked"] or room.pw is not None, players=len(names),
+                              max=info["max"],
                               names=names[:MAX_STATUS_NAMES], net=room.net()))
         for g in by_game.values():
             g["online"] += len(g["lobby"])
@@ -462,7 +621,7 @@ class Relay:
         if seat_id == 1:
             room.host = conn
             if entry:
-                room.entry = entry
+                self._set_entry(room, entry, conn)
         else:
             room.peers[seat_id] = conn
         conn.room, conn.id = room, seat_id
@@ -478,6 +637,7 @@ class Relay:
     # Ends a room: its players are told the host left.
     def _end_room(self, room, outbox):
         self.rooms.pop(room.id, None)
+        self.tries.pop(room.id, None)
         for peer in room.peers.values():
             peer.room, peer.id = None, 0
             outbox.append((peer, OP_TEXT, b"host-left"))
@@ -489,8 +649,58 @@ def netcode(path):
     return int(net) if NET_RE.match(net) else 0
 
 
+def sends_passwords(path):
+    """Whether a game sends passwords with join (pw=1 in its address)."""
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("pw", [""])[0] == "1"
+
+
+def tries_key(addr):
+    """The address wrong passwords are counted by: an IPv6 one by its first 64 bits, as a home line or a
+    server usually has a whole /64 to pick from. An IPv4 address, or one mapped into IPv6, as it is."""
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return addr
+    if ip.version == 4:
+        return str(ip)
+    if ip.ipv4_mapped:
+        return str(ip.ipv4_mapped)
+    return str(ipaddress.ip_network((ip, 64), strict=False))
+
+
 def valid_entry(text):
     return len(text) <= MAX_ENTRY_HEX and HEX_RE.match(text) is not None
+
+
+def valid_password(text):
+    """join's password: 1 to 31 code units in hex, none of them 0."""
+    return PW_HEX_RE.fullmatch(text) is not None and "0000" not in (text[i:i + 4] for i in range(0, len(text), 4))
+
+
+def entry_password(entry):
+    """The password in an entry, as lowercase hex of its code units up to the first 0, "" for none."""
+    if len(entry) < ENTRY_HEX:
+        return ""
+    units = []
+    for i in range(PW_UNITS - 1):
+        unit = entry[(PW_AT + i * 2) * 2:(PW_AT + i * 2) * 2 + 4].lower()
+        if unit == "0000":
+            break
+        units.append(unit)
+    return "".join(units)
+
+
+def strip_entry(entry, box=None):
+    """The entry without its password, and with the password box flag set to box unless that's None."""
+    if len(entry) < ENTRY_HEX:
+        return entry
+    out = entry[:PW_AT * 2] + "0" * (PW_UNITS * 4) + entry[(PW_AT + PW_UNITS * 2) * 2:]
+    if box is not None:
+        at = (FLAGS_AT + 1) * 2  # the flag is in sessionFlags' second byte
+        bit = SESSIONFLAG_PASSWORD >> 8
+        was = int(out[at:at + 2], 16)
+        out = out[:at] + "%02x" % (was | bit if box else was & ~bit) + out[at + 2:]
+    return out
 
 
 def valid_signal(text):
@@ -600,7 +810,7 @@ class IceConfig:
         return line + " %d" % self.ttl if with_ttl else line
 
     def lobby_message(self):
-        return "lobby links turn" if self.turn else "lobby links"
+        return "lobby links turn pw" if self.turn else "lobby links pw"
 
 
 def log(text):
@@ -710,11 +920,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         sock = self.connection
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.settimeout(QUIET_S)
-        conn = Conn(sock, self.client_address, netcode(self.path))
+        conn = Conn(sock, self.client_address, netcode(self.path), sends_passwords(self.path))
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())
-        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links")
+        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links pw")
         try:
             self.websocket_loop(conn)
         finally:
@@ -775,10 +985,30 @@ def main():
     parser.add_argument("--turn-ttl", type=int, default=12 * 3600, help="TURN login lifetime in seconds")
     parser.add_argument("--hold", type=float, default=HOLD_S,
                         help="seconds a dropped player's seat waits for them to come back")
+    parser.add_argument("--passwords-for-old-games", choices=("host", "none"),
+                        default=(os.environ.get("PASSWORDS_FOR_OLD_GAMES") or "host").strip().lower(),
+                        help="host: older builds (no pw=1) still check the password of a room an older build "
+                             "hosts themselves, password in the list; none: they can't join a room with a "
+                             "password until they reload (or set PASSWORDS_FOR_OLD_GAMES)")
+    parser.add_argument("--passwords-for-old-games-until", metavar="TIME",
+                        default=os.environ.get("PASSWORDS_FOR_OLD_GAMES_UNTIL") or None,
+                        help="ISO 8601 UTC time, e.g. 2026-11-06T12:00:00Z, after which host acts as none "
+                             "(or set PASSWORDS_FOR_OLD_GAMES_UNTIL)")
     args = parser.parse_args()
+    if args.passwords_for_old_games not in ("host", "none"):
+        parser.error("--passwords-for-old-games must be host or none")
+    until = None
+    if args.passwords_for_old_games_until:
+        try:
+            # Python before 3.11 doesn't take a Z.
+            text = re.sub(r"[Zz]$", "+00:00", args.passwords_for_old_games_until.strip())
+            when = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            parser.error("--passwords-for-old-games-until isn't an ISO 8601 time")
+        until = (when if when.tzinfo else when.replace(tzinfo=datetime.timezone.utc)).timestamp()
 
     Handler.ice = IceConfig(args.stun, args.turn, args.turn_secret, args.turn_user, args.turn_pass, args.turn_ttl)
-    Handler.relay = Relay(args.hold, Handler.ice)
+    Handler.relay = Relay(args.hold, Handler.ice, args.passwords_for_old_games, until)
     server = http.server.ThreadingHTTPServer((args.host, args.port), functools.partial(Handler, directory=args.dir))
     server.daemon_threads = True
     log("serving %s at http://%s:%d/index.html, relay at ws://%s:%d/relay"

@@ -44,8 +44,9 @@ const named = s => s.replace(/^(hosted|join|seat|rejoined|rehosted) (\d+)/, (m, 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const b64 = text => Buffer.from(text, 'utf8').toString('base64');
 const SECRET = 'sekrit9';
-// A jkMultiEntry (types.h in the OpenJKDF2 fork), in hex.
-function entry({ name, episode, map, max, password = '' }) {
+// A jkMultiEntry (types.h in the OpenJKDF2 fork), in hex. flags is its
+// sessionFlags, whose 0x400 shows the join screen's password box.
+function entry({ name, episode, map, max, password = '', flags = 0 }) {
   const b = Buffer.alloc(240);
   b.writeInt32LE(max, 16);
   b.writeInt32LE(1, 20);
@@ -53,8 +54,11 @@ function entry({ name, episode, map, max, password = '' }) {
   b.write(episode, 88, 'latin1');
   b.write(map, 120, 'latin1');
   b.write(password, 152, 'utf16le');
+  b.writeInt32LE(flags, 216);
   return b.toString('hex');
 }
+// A password as join sends it: hex of its UTF-16LE code units.
+const hexPw = text => Buffer.from(text, 'utf16le').toString('hex');
 // The tail mods.js adds for a mod (flag 1) and the MotS Remastered pack (2).
 function modTail(mod, pack) {
   const b = Buffer.alloc(7 + (mod ? 32 : 0) + (pack ? 16 : 0) + (mod || '').length, 0xab);
@@ -93,7 +97,7 @@ function client(name, query = '') {
       if (typeof ev.data === 'string') {
         s = ev.data.startsWith('ice ') ? 'ice ' + Buffer.from(ev.data.split(' ')[1], 'base64').toString() : ev.data;
         // A lobby with a TURN key says so too.
-        if (s === 'lobby links turn') s = 'lobby links';
+        if (s.startsWith('lobby ')) s = s.split(' ').filter(w => w !== 'turn').join(' ');
         if (s.startsWith('hosted ')) ws.room = s.split(' ')[1];
         if (s.startsWith('seat ')) ws.key = s.split(' ')[3];
         s = named(s);
@@ -303,13 +307,38 @@ await step('N1b', N1b, `rehost ${N1.room} ${N1.key}`, 'rehost <room8> <N1\'s key
 await step('Z', Z, 'join ' + N1.room);
 for (const [name, ws] of [['X', X], ['Y', Y], ['N0', N0], ['N1b', N1b]])
   await step(name, ws, 'leave');
+// Passwords: a game that connects with pw=1 never gets one, in a list or a
+// welcome, and gets the password box (sessionFlags 0x400) just for a room
+// with one. It sends the password its player typed with join, for the lobby
+// to check. A game without pw=1 gets such a room without its password or the
+// box, and its join hears error version newer, while a room whose host
+// didn't send pw=1 either (t_Duel above) it still checks itself.
+const PH = await client('PH', '?net=0&pw=1'); await sleep(200);
+await step('PH', PH, 'host ' + entry({ ...duel, name: 't_Locked', password: SECRET, flags: 0x400 }),
+           'host <t_Locked entry with a password>, connected with pw=1');
+const PO = await client('PO', '?pw=1'); await sleep(200);
+await step('PO', PO, 'host ' + entry({ ...duel, name: 't_Open', flags: 0x400 }),
+           'host <t_Open entry with no password but the password box>, connected with pw=1');
+const PJ = await client('PJ', '?pw=1'); await sleep(200);
+await step('PJ', PJ, 'list jk1');
+await step('X', X, 'list jk1');
+await step('X', X, 'join ' + PH.room);
+await step('PJ', PJ, 'join ' + PH.room);
+await step('PJ', PJ, `join ${PH.room} ${hexPw('wrong')}`, named('join ' + PH.room) + ' <wrong password>');
+await step('PJ', PJ, `join ${PH.room} 41`);
+await step('PJ', PJ, `join ${PH.room} ${hexPw(SECRET)}`, named('join ' + PH.room) + ' <the password>');
+await step('PH', PH, 'welcome 2 ' + entry({ ...duel, name: 't_Locked', password: SECRET, flags: 0x400 }),
+           'welcome 2 <t_Locked entry with the password>');
+await step('PJ', PJ, `join ${PO.room} ${hexPw('anything')}`, named('join ' + PO.room) + ' <a password>');
+for (const [name, ws] of [['PJ', PJ], ['PH', PH], ['PO', PO]])
+  await step(name, ws, 'leave');
 flush(); log.push('W2 closes'); W2.close(); await sleep(300);
 for (const ws of [Z, Z2]) {
   ws.close(); await sleep(300);
 }
 flush(); log.push('big message'); A.send('x'.repeat(70000)); await sleep(400);
 // One at a time: over the internet, two closes can finish in either order.
-for (const ws of [H, B, P2, S2, X, R]) {
+for (const ws of [H, B, P2, S2, X, R, PH, PJ, PO]) {
   ws.close(); await sleep(300);
 }
 flush();
