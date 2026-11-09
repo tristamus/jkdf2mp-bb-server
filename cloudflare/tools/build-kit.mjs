@@ -9,9 +9,11 @@
 //   node tools/build-kit.mjs sums <kit folder>
 //   node tools/build-kit.mjs check <kit folder>
 //
-// public: --asyncify and --jspi are build web/ folders (openjkdf2.js and
-// openjkdf2.wasm each). --page is packaging/wasm/index.html; its folder also
-// gives unzip.js, move-out.html and the room pictures the page names
+// public: --asyncify and --jspi are build web/ folders, each with one
+// build's openjkdf2.js and openjkdf2.wasm (the tool tells the two kinds of
+// engine apart, but not a script and a wasm from two builds of one kind).
+// --page is packaging/wasm/index.html; its folder also gives unzip.js,
+// move-out.html and the room pictures the page names
 // (rooms/<key>.<8 hex>.<ext>). --prev is the public/ of the kit deployed
 // before this one (it says which kits' files it kept, in kit-files.json; a
 // kit from before this script, cloudflare-92, is read by its fixed names).
@@ -43,17 +45,19 @@
 // an engine script that doesn't ask locateFile for its wasm, an engine given
 // as the other one (the JSPI engine's script wraps its wasm's imports in
 // WebAssembly.Suspending, the Asyncify one's doesn't), a wasm that doesn't
-// compile or imports from a module its script doesn't give it, one wasm for
-// both engines, a room picture whose content doesn't match its name, a kept
-// file that isn't in --prev, a kept file under e/ whose .br isn't there or
-// doesn't unpack to it, or two different files under one name.
+// compile or imports from a module its script doesn't give it (the other
+// kind's wasm), one wasm for both engines, a room picture whose content
+// doesn't match its name, a kept file that isn't in --prev, a kept file
+// under e/ whose .br isn't there or doesn't unpack to it, or two different
+// files under one name.
 //
 // sums rewrites <kit>/SHA256SUMS for every file in the kit (not node_modules,
 // .wrangler or SHA256SUMS itself), after README.md, src/ and the rest are in.
 // check reads a kit back: every file the page names is there (its room
 // pictures too), each .br unpacks to its file, names under e/ and rooms/
 // match their content, the page's two engines are the kinds it names them
-// and each one's wasm takes its script's imports, SHA256SUMS matches.
+// and each one's wasm imports only from modules its script gives,
+// SHA256SUMS matches.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -201,9 +205,12 @@ function scriptModules(js) {
     return keys.length ? keys : null;
 }
 
-// Why an engine's script and wasm aren't one build's, or null: the wasm has
-// to compile, and import only from modules the script gives it (else the
-// browser can't start it).
+// Why an engine's wasm can't start with its script, or null: the wasm has to
+// compile, and import only from modules the script gives it. That finds the
+// other kind's wasm (the Asyncify build's imports come from a, the JSPI
+// build's from env and wasi_snapshot_preview1), not one from another build
+// of the same kind, which imports from the same modules: a build folder has
+// to hold one build's script and wasm.
 function engineMismatch(js, wasm, jsWhere, wasmWhere) {
     const given = scriptModules(js);
     if (!given)

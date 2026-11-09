@@ -197,8 +197,9 @@ once there are routes, unless it's written out). `src/moved.js` decides what goe
 - `MOVED_STATUS` is 301 since 2026-10-29, after a 302 while the move was checked. Browsers keep
   a 301 for good, so the domain has to stay.
 
-Only `/relay`, `/summary`, `/` and `/index.html` run the Worker (`run_worker_first`); everything else
-is served straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
+`/relay`, `/summary`, `/imperial-games`, `/`, `/index.html` and everything under `/e/` run the Worker
+(`run_worker_first` in `wrangler.toml`), and so does a path with no file; everything else is served
+straight from the files. `wrangler dev` sees every request as `SITE` (the first route), so locally
 nothing moves. To try the moves locally, run it with a copy of `wrangler.toml` without `routes`:
 
 ```
@@ -320,7 +321,9 @@ the ones it kept, so the next kit keeps both, and tabs still open on either page
 
 `tools/build-kit.mjs` makes a kit's `public/` from the two builds' `web/` folders, the page (whose
 folder gives `unzip.js`, `move-out.html` and the room pictures in `rooms/`) and the previous kit's
-`public/`:
+`public/`. Each `web/` folder has to hold one build's `openjkdf2.js` and `openjkdf2.wasm`, as that
+build made them: the tool tells the two kinds of engine apart, but not a script and a wasm from two
+builds of the same kind.
 
 ```
 node tools/build-kit.mjs public --asyncify <asyncify web/> --jspi <jspi web/> \
@@ -334,17 +337,17 @@ It writes the page with its table filled in (nothing else in it changes), the ha
 kit's page loads, newest first, for the next kit's `--prev`; `.assetsignore` keeps it out of the
 upload) and `SHA256SUMS`, and prints which kits' files it kept. The same inputs give the same kit,
 byte for byte, with the same Node.js (its brotli makes the `.br` files; for a file the previous kit
-has too, it keeps that kit's `.br` when it unpacks to the same file, as another Node.js's brotli may
-write other bytes). It writes nothing when an input is wrong: a page without its one table, or one
-that names an engine file outside it, an engine script that doesn't ask `locateFile` for its wasm,
-the two builds swapped or one given for both (the JSPI engine's script wraps its wasm's imports in
-`WebAssembly.Suspending`, the Asyncify one's doesn't), a wasm that doesn't compile or imports from a
-module its script doesn't give it (a script and a wasm from two builds), a room picture whose content
-doesn't match its name, a kept file that isn't in `--prev`, or two different files under one name.
-`check` reads a kit back: every file each kit's page loads is there, the page's room pictures too,
-names under `e/` and `rooms/` match their content, the page's two engines are the ones it names and
-each wasm takes its script's imports, each `.br` unpacks to its file, there's no `.br` outside `e/`,
-and `SHA256SUMS` matches.
+has too, it keeps that kit's `.br`, as another Node.js's brotli may write other bytes). It writes
+nothing when an input is wrong: a page without its one table, or one that names an engine file
+outside it, an engine script that doesn't ask `locateFile` for its wasm, the two builds swapped or
+one given for both (the JSPI engine's script wraps its wasm's imports in `WebAssembly.Suspending`,
+the Asyncify one's doesn't), a wasm that doesn't compile or imports from a module its script doesn't
+give it (the other kind's wasm), a room picture whose content doesn't match its name, a kept file
+that isn't in `--prev`, a kept file under `e/` whose `.br` isn't there or doesn't unpack to it, or
+two different files under one name. `check` reads a kit back: every file each kit's page loads is
+there, the page's room pictures too, names under `e/` and `rooms/` match their content, the page's
+two engines are the kinds it names and each wasm imports only from modules its script gives, each
+`.br` unpacks to its file, there's no `.br` outside `e/`, and `SHA256SUMS` matches.
 
 `node test/engine.mjs` checks `src/engine.js` and the router, and `node test/build-kit.mjs` the kit
 tool and `tools/check-site.mjs`, both with no ports.
