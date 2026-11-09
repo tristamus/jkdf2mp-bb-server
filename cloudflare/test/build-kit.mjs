@@ -44,15 +44,31 @@ function run(...args) {
     return { code: r.status, out: r.stdout, err: r.stderr };
 }
 
-// An engine build's web/ folder: a script that asks locateFile for its wasm
-// (as emscripten's do), and a wasm.
-function engine(dir, mark) {
+// A wasm that imports a function from each of modules, with a custom section
+// of 4000 bytes of fill.
+function wasmImporting(modules, fill) {
+    const leb = n => n < 0x80 ? [n] : [(n & 0x7f) | 0x80, ...leb(n >>> 7)];
+    const name = s => [...leb(Buffer.byteLength(s)), ...Buffer.from(s)];
+    const section = (id, body) => [id, ...leb(body.length), ...body];
+    return Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+                        ...section(1, [1, 0x60, 0, 0]),                    // one type, () -> ()
+                        ...section(2, [...leb(modules.length),                // a function import from each
+                                       ...modules.flatMap((m, i) => [...name(m), ...name("f" + i), 0, 0])]),
+                        ...section(0, [...name("fill"), ...Buffer.alloc(4000, fill)])]);
+}
+// An engine build's web/ folder, as emscripten makes them: a script that asks
+// locateFile for its wasm and gives its imports from modules (the JSPI one
+// also wraps them in WebAssembly.Suspending), and a wasm that imports from
+// those modules.
+function engine(dir, mark, { jspi = /jspi/.test(mark), modules = jspi ? ["env", "wasi_snapshot_preview1"] : ["a"] } = {}) {
     const js = `var Module = typeof Module != "undefined" ? Module : {}; // ${mark}\n` +
                `function findWasmBinary(){return locateFile("openjkdf2.wasm")}\n` +
-               `if (Module["locateFile"]) {} if (Module["instantiateWasm"]) {}\n` + `// ${mark}\n`.repeat(300);
+               `if (Module["locateFile"]) {} if (Module["instantiateWasm"]) {}\n` +
+               `function getWasmImports(){${jspi ? "Asyncify.instrumentWasmImports(wasmImports);" : ""}` +
+               `var imports={${modules.map(m => m + ":wasmImports").join(",")}};return imports}\n` +
+               (jspi ? "x = new WebAssembly.Suspending(f);\n" : "") + `// ${mark}\n`.repeat(300);
     write(path.join(dir, "openjkdf2.js"), js);
-    write(path.join(dir, "openjkdf2.wasm"), Buffer.concat([Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]),
-                                                           Buffer.alloc(4000, mark.length)]));
+    write(path.join(dir, "openjkdf2.wasm"), wasmImporting(modules, mark.length));
 }
 const ROOM = Buffer.from("RIFF a picture of Nar Shaddaa");
 const ROOM_NAME = `rooms/nar-shaddaa.${sha(ROOM).slice(0, 8)}.webp`;
@@ -178,6 +194,24 @@ test("each kit keeps the last 3 before it (--keep), with their .br, and drops ol
     }
 });
 
+test("a kept file's .br from another brotli: the deployed one is kept, if it unpacks to the same file", () => {
+    // Kit 93 as if another Node.js had made it: other bytes for unzip.js's .br.
+    const prev = at("prevs", "otherbrotli");
+    fs.cpSync(at("k93", "public"), prev, { recursive: true });
+    const br = path.join(prev, table93.unzip + ".br");
+    const other = zlib.brotliCompressSync(fs.readFileSync(path.join(prev, table93.unzip)),
+                                          { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 } });
+    assert.notDeepEqual(other, fs.readFileSync(br));
+    fs.writeFileSync(br, other);
+    const r = build(at("k94other"), ["--label", "cloudflare-94"], { prev, jspi: at("jspi94") });
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(fs.readFileSync(at("k94other", "public", table93.unzip + ".br")), other);
+    assert.match(r.out, new RegExp(`  ${table93.unzip}  \\d+ B, ${other.length} B brotli 11\n`));
+    // Everything else as kit 94 made from kit 93 itself.
+    const sums = k => fs.readFileSync(at(k, "SHA256SUMS"), "utf8").split("\n").filter(l => !l.includes(table93.unzip + ".br"));
+    assert.deepEqual(sums("k94other"), sums("k94"));
+});
+
 // Each refusal: exit 1, the reason, and no public/ made. o is the options
 // for build() (made when the test runs, after kit 93 is), or args gives the
 // whole command line.
@@ -237,6 +271,43 @@ refuses("an engine script that doesn't ask locateFile for its wasm", /doesn't as
     write(at("badjs", "openjkdf2.js"), "var Module = {}; fetch('openjkdf2.wasm');");
     return { jspi: at("badjs") };
 } });
+refuses("the engines swapped", /[\/]jspi[\/]openjkdf2\.js is the JSPI engine's script \(.*\), given as --asyncify/,
+        { o: () => ({ asy: at("jspi"), jspi: at("asy") }) });
+refuses("the JSPI engine for both", /jspi[\/]openjkdf2\.js is the JSPI engine's script \(.*\), given as --asyncify/,
+        { o: () => ({ asy: at("jspi") }) });
+refuses("the Asyncify engine for both", /asy[\/]openjkdf2\.js is the Asyncify engine's script \(.*\), given as --jspi/,
+        { o: () => ({ jspi: at("asy") }) });
+// One engine's script with the other's wasm.
+for (const [name, kind, js, wasm, why] of [
+    ["the JSPI script with the Asyncify wasm", "jspi", "jspi", "asy",
+     /openjkdf2\.wasm imports from a, which .*openjkdf2\.js doesn't give it \(it gives env, wasi_snapshot_preview1\)/],
+    ["the Asyncify script with the JSPI wasm", "asy", "asy", "jspi",
+     /openjkdf2\.wasm imports from env, wasi_snapshot_preview1, which .*openjkdf2\.js doesn't give it \(it gives a\)/]])
+    refuses(name, why, { o: () => {
+        const dir = at("mixed", kind);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(at(js, "openjkdf2.js"), path.join(dir, "openjkdf2.js"));
+        fs.copyFileSync(at(wasm, "openjkdf2.wasm"), path.join(dir, "openjkdf2.wasm"));
+        return { [kind]: dir };
+    } });
+refuses("a wasm that doesn't compile", /openjkdf2\.wasm doesn't compile in Node\.js/, { o: () => {
+    engine(at("nocompile"), "jspi");
+    write(at("nocompile", "openjkdf2.wasm"), Buffer.concat([Buffer.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]), Buffer.alloc(100, 7)]));
+    return { jspi: at("nocompile") };
+} });
+refuses("an engine script that doesn't say which modules its wasm imports from", /can't find which modules .*getWasmImports/,
+        { o: () => {
+    engine(at("noimports"), "jspi");
+    const js = path.join(at("noimports"), "openjkdf2.js");
+    fs.writeFileSync(js, fs.readFileSync(js, "utf8").replace("function getWasmImports(){", "function makeImports(){"));
+    return { jspi: at("noimports") };
+} });
+refuses("one wasm for both engines", /openjkdf2\.wasm and .*openjkdf2\.wasm are the same file/, { o: () => {
+    // A JSPI script that gives the Asyncify wasm what it imports.
+    engine(at("samewasm"), "jspi", { modules: ["a"] });
+    fs.copyFileSync(at("asy", "openjkdf2.wasm"), at("samewasm", "openjkdf2.wasm"));
+    return { jspi: at("samewasm") };
+} });
 for (const [name, bytes] of [["that isn't wasm", Buffer.from("not a wasm file at all")], ["of 2 bytes", Buffer.from([0, 0x61])]])
     refuses("a wasm " + name, /isn't a wasm file/, { o: () => {
         engine(at("badwasm" + bytes.length), "bad");
@@ -254,6 +325,14 @@ refuses("a kit-files.json with no kits", /no kits list/, { o: badPrev("nokits", 
 refuses("a kit-files.json kit without files", /isn't \{ label, files/, { o: badPrev("nofiles", { kits: [{ label: "x" }] }) });
 refuses("two different files under one name", /two different files/,
         { o: badPrev("clash", keeping([ROOM_NAME]), { [ROOM_NAME]: "another picture" }) });
+for (const [name, br] of [["that unpacks to another file", () => zlib.brotliCompressSync("another unzip.js")],
+                          ["that doesn't unpack", () => Buffer.from("nonsense")]])
+    refuses("a kept .br " + name, /e\/unzip\.[0-9a-f]{12}\.js\.br: two different files \(kept from cloudflare-93\)/, { o: () => {
+        const dir = at("prevs", "br-" + name.replace(/[^a-z]/g, ""));
+        fs.cpSync(at("k93", "public"), dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, table93.unzip + ".br"), br());
+        return { prev: dir };
+    } });
 refuses("a --prev whose page has a table but no kit-files.json", /not a kit this script made/, { o: badPrev("nomanifest", null) });
 refuses("a --label a kept kit has", /a kept kit has that name/,
         { o: () => ({ prev: at("k93", "public") }), extra: ["--label", "cloudflare-93"] });
@@ -302,6 +381,47 @@ changed("a page whose table isn't the kit's", pub => {
 }, /doesn't name the page's own files first/);
 changed("an .assetsignore that lets kit-files.json out", pub => fs.writeFileSync(path.join(pub, ".assetsignore"), "# nothing\n"),
         /\.assetsignore doesn't keep/);
+changed("a room picture that isn't what its name says", pub => fs.writeFileSync(path.join(pub, ROOM_NAME), "another picture"),
+        [new RegExp(`${ROOM_NAME.replace(/\./g, "\\.")}: its content doesn't match its name`),
+         new RegExp(`SHA256SUMS: public/${ROOM_NAME.replace(/\./g, "\\.")} doesn't match`)]);
+changed("a room picture the page names that's gone", pub => fs.rmSync(path.join(pub, ROOM_NAME)),
+        new RegExp(`${ROOM_NAME.replace(/\./g, "\\.")} \\(cloudflare-94\\) isn't there`));
+changed("a page naming a room picture that isn't the kit's", pub => {
+    const f = path.join(pub, "index.html");
+    fs.writeFileSync(f, fs.readFileSync(f, "utf8").replace("</style>", "</style><img src=\"rooms/hoth.0123abcd.webp\">"));
+}, /rooms\/hoth\.0123abcd\.webp: the page names it, kit-files\.json doesn't, and it isn't there/);
+changed("a file under rooms/ not named by its content", pub => write(path.join(pub, "rooms", "hoth.webp"), "a picture"),
+        /rooms\/hoth\.webp: under rooms\/ but not named by its content/);
+// The two engines swapped, names and all, as the tool made kits before it
+// told them apart.
+changed("the engines swapped", (pub, kit) => {
+    const t = t94(), base = f => f.split("/").pop();
+    const swapped = { jspi: { js: "e/jspi/" + base(t.asyncify.js), wasm: "e/jspi/" + base(t.asyncify.wasm) },
+                      asyncify: { js: "e/" + base(t.jspi.js), wasm: "e/" + base(t.jspi.wasm) }, unzip: t.unzip };
+    for (const kind of ["jspi", "asyncify"])
+        for (const x of ["js", "wasm"])
+            for (const ext of ["", ".br"]) {
+                const other = kind === "jspi" ? "asyncify" : "jspi";
+                write(path.join(pub, swapped[kind][x] + ext), fs.readFileSync(path.join(pub, t[other][x] + ext)));
+            }
+    const f = path.join(pub, "index.html");
+    const html = fs.readFileSync(f, "utf8");
+    const a = html.indexOf("/* kit-files */") + "/* kit-files */".length, b = html.indexOf("/* /kit-files */");
+    fs.writeFileSync(f, html.slice(0, a) + " " + JSON.stringify(swapped) + " " + html.slice(b));
+    const m = JSON.parse(fs.readFileSync(path.join(pub, "kit-files.json"), "utf8"));
+    m.kits[0].page = swapped;
+    m.kits[0].files = [swapped.asyncify.js, swapped.asyncify.wasm, swapped.jspi.js, swapped.jspi.wasm, t.unzip, ROOM_NAME];
+    // Kit 94's own JSPI files: no other kit loads them.
+    for (const x of ["js", "wasm"])
+        for (const ext of ["", ".br"])
+            fs.rmSync(path.join(pub, t.jspi[x] + ext));
+    write(path.join(pub, "kit-files.json"), JSON.stringify(m));
+    assert.equal(run("sums", kit).code, 0);
+}, [/e\/openjkdf2\.[0-9a-f]{12}\.js: not the Asyncify engine's script/, /e\/jspi\/openjkdf2\.[0-9a-f]{12}\.js: not the JSPI engine's script/]);
+changed("a JSPI wasm that isn't its script's build", pub => {
+    const t = t94();
+    fs.copyFileSync(path.join(pub, t.asyncify.wasm), path.join(pub, t.jspi.wasm));
+}, /e\/jspi\/openjkdf2\.[0-9a-f]{12}\.wasm imports from a, which e\/jspi\/openjkdf2\.[0-9a-f]{12}\.js doesn't give it/);
 changed("a file SHA256SUMS doesn't list", (pub, kit) => write(path.join(kit, "README.md"), "the kit"),
         /SHA256SUMS doesn't list README\.md/);
 

@@ -37,16 +37,23 @@
 //   keeps assets by content.
 //
 // The same inputs give the same kit, byte for byte (with the same Node.js:
-// its brotli makes the .br files). Nothing is written when an input is
-// wrong: a page without its one table, or one that names an engine file
-// outside it, an engine script that doesn't ask locateFile for its wasm, a
-// room picture whose content doesn't match its name, a kept file that isn't
-// in --prev, or two different files under one name.
+// its brotli makes the .br files; for a file the previous kit has too, its
+// .br is kept as deployed when it unpacks to that file). Nothing is written
+// when an input is wrong: a page without its one table, or one that names an
+// engine file outside it, an engine script that doesn't ask locateFile for
+// its wasm, an engine given as the other one (the JSPI engine's script wraps
+// its wasm's imports in WebAssembly.Suspending, the Asyncify one's doesn't),
+// a wasm that doesn't compile or imports from a module its script doesn't
+// give it, one wasm for both engines, a room picture whose content doesn't
+// match its name, a kept file that isn't in --prev, or two different files
+// under one name.
 //
 // sums rewrites <kit>/SHA256SUMS for every file in the kit (not node_modules,
 // .wrangler or SHA256SUMS itself), after README.md, src/ and the rest are in.
-// check reads a kit back: every file the page names is there, each .br
-// unpacks to its file, names match their content, SHA256SUMS matches.
+// check reads a kit back: every file the page names is there (its room
+// pictures too), each .br unpacks to its file, names under e/ and rooms/
+// match their content, the page's two engines are the kinds it names them
+// and each one's wasm takes its script's imports, SHA256SUMS matches.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -162,13 +169,54 @@ function previousKits(prev) {
     return [{ label: LEGACY_LABEL, files }];
 }
 
-// Checks an engine build's script finds its wasm the way the page tells it.
-function checkEngineScript(js, where) {
+// The JSPI engine's script wraps the wasm's imports in WebAssembly.Suspending;
+// the Asyncify engine's never names it.
+const isJspiScript = js => js.toString("utf8").includes("new WebAssembly.Suspending(");
+
+// Checks an engine build's script finds its wasm the way the page tells it,
+// and is the engine it's given as.
+function checkEngineScript(js, where, kind) {
     const text = js.toString("utf8");
     if (!text.includes('locateFile("openjkdf2.wasm")') || !text.includes('Module["locateFile"]'))
         fail(`${where}: doesn't ask Module.locateFile for openjkdf2.wasm, so it wouldn't find its hashed wasm`);
+    if (isJspiScript(js) !== (kind === "jspi"))
+        fail(isJspiScript(js) ? `${where} is the JSPI engine's script (it wraps its wasm's imports in ` +
+                                `WebAssembly.Suspending), given as --${kind}` :
+                                `${where} is the Asyncify engine's script (it doesn't wrap its wasm's imports in ` +
+                                `WebAssembly.Suspending), given as --${kind}`);
     if (!text.includes('Module["instantiateWasm"]'))
         console.warn(`warning: ${where} doesn't read Module.instantiateWasm (the page's early compile won't be used)`);
+}
+
+// The modules an engine script gives its wasm's imports from: the keys of the
+// object emscripten's getWasmImports() makes ({a:wasmImports} when the import
+// names are minified, as in the Asyncify build; {env:wasmImports,
+// wasi_snapshot_preview1:wasmImports} in the JSPI one), or null.
+function scriptModules(js) {
+    const text = js.toString("utf8");
+    const at = text.indexOf("function getWasmImports(");
+    const m = at < 0 ? null : /(?:\bvar\s+imports\s*=|\breturn)\s*\{([^{}]*)\}/.exec(text.slice(at, at + 2000));
+    const keys = m ? [...m[1].matchAll(/(?:^|,)\s*(?:["']([^"']+)["']|([A-Za-z_$][\w$]*))\s*:\s*wasmImports\b/g)]
+        .map(k => k[1] || k[2]) : [];
+    return keys.length ? keys : null;
+}
+
+// Why an engine's script and wasm aren't one build's, or null: the wasm has
+// to compile, and import only from modules the script gives it (else the
+// browser can't start it).
+function engineMismatch(js, wasm, jsWhere, wasmWhere) {
+    const given = scriptModules(js);
+    if (!given)
+        return `${jsWhere}: can't find which modules it gives its wasm's imports from (getWasmImports)`;
+    let mod;
+    try {
+        mod = new WebAssembly.Module(wasm);
+    } catch (e) {
+        return `${wasmWhere} doesn't compile in Node.js ${process.versions.node} (${e.message})`;
+    }
+    const missing = [...new Set(WebAssembly.Module.imports(mod).map(i => i.module))].filter(m => !given.includes(m));
+    return missing.length ? `${wasmWhere} imports from ${missing.join(", ")}, which ${jsWhere} doesn't give it ` +
+                            `(it gives ${given.join(", ")}): they aren't one build's` : null;
 }
 
 function buildPublic(o) {
@@ -194,9 +242,12 @@ function buildPublic(o) {
     const table = { jspi: {}, asyncify: {} };
     for (const [kind, dir, sub] of [["asyncify", o.asyncify, "e/"], ["jspi", o.jspi, "e/jspi/"]]) {
         const js = read(path.join(dir, "openjkdf2.js")), wasm = read(path.join(dir, "openjkdf2.wasm"));
-        checkEngineScript(js, path.join(dir, "openjkdf2.js"));
+        checkEngineScript(js, path.join(dir, "openjkdf2.js"), kind);
         if (wasm.length < 8 || wasm.readUInt32BE(0) !== 0x0061736d)
             fail(`${path.join(dir, "openjkdf2.wasm")} isn't a wasm file`);
+        const mismatch = engineMismatch(js, wasm, path.join(dir, "openjkdf2.js"), path.join(dir, "openjkdf2.wasm"));
+        if (mismatch)
+            fail(mismatch);
         table[kind].js = sub + hashedName("openjkdf2.js", js);
         table[kind].wasm = sub + hashedName("openjkdf2.wasm", wasm);
         put(table[kind].js, js, kind);
@@ -206,7 +257,8 @@ function buildPublic(o) {
     table.unzip = "e/" + hashedName("unzip.js", unzip);
     put(table.unzip, unzip, "unzip");
     if (table.asyncify.wasm === table.jspi.wasm.replace("e/jspi/", "e/"))
-        console.warn("warning: the two engines' wasm are the same file");
+        fail(`${path.join(o.asyncify, "openjkdf2.wasm")} and ${path.join(o.jspi, "openjkdf2.wasm")} are the same file: ` +
+             "each engine is a build of its own");
     const brSizes = {};
     for (const p of tableFiles(table)) {
         const br = brotli(files.get(p));
@@ -244,8 +296,24 @@ function buildPublic(o) {
     for (const kit of before) {
         for (const f of kit.files) {
             put(f, read(path.join(o.prev, f)), "kept from " + kit.label);
-            if (fs.existsSync(path.join(o.prev, f + ".br")))
-                put(f + ".br", read(path.join(o.prev, f + ".br")), "kept from " + kit.label);
+            const brPath = path.join(o.prev, f + ".br");
+            if (!fs.existsSync(brPath))
+                continue;
+            // For a file this kit has too, the .br that's deployed, when it
+            // unpacks to that file: another Node.js's brotli may have written
+            // other bytes for it.
+            const kept = read(brPath);
+            let same = false;
+            try {
+                same = files.has(f + ".br") && zlib.brotliDecompressSync(kept).equals(files.get(f));
+            } catch (e) {}
+            if (same) {
+                files.set(f + ".br", kept);
+                if (brSizes[f])
+                    brSizes[f][1] = kept.length;
+            } else {
+                put(f + ".br", kept, "kept from " + kit.label);
+            }
         }
     }
     const kits = [{ label, page: table, files: mine }].concat(before);
@@ -324,9 +392,24 @@ function checkKit(kit) {
             if (!fs.existsSync(path.join(pub, f)))
                 problems.push(`${f} (${kit.label}) isn't there`);
         }
+    // The page's room pictures are this kit's, so the loop above found them
+    // there, and the next kit keeps them.
+    for (const r of roomsIn(page))
+        if (!manifest.kits[0].files.includes(r))
+            problems.push(`${r}: the page names it, ${MANIFEST} doesn't` +
+                          (fs.existsSync(path.join(pub, r)) ? "" : ", and it isn't there"));
     for (const f of tableFiles(table))
         if (!named.has(f))
             problems.push(`${f}: the page names it, ${MANIFEST} doesn't`);
+    for (const kind of ["asyncify", "jspi"]) {
+        const js = path.join(pub, table[kind].js), wasm = path.join(pub, table[kind].wasm);
+        if (fs.existsSync(js) && isJspiScript(read(js)) !== (kind === "jspi"))
+            problems.push(`${table[kind].js}: not the ${kind === "jspi" ? "JSPI" : "Asyncify"} engine's script`);
+        const mismatch = fs.existsSync(js) && fs.existsSync(wasm) &&
+            engineMismatch(read(js), read(wasm), table[kind].js, table[kind].wasm);
+        if (mismatch)
+            problems.push(mismatch);
+    }
     if (!/^\/kit-files\.json$/m.test(fs.existsSync(path.join(pub, ".assetsignore")) ?
                                       read(path.join(pub, ".assetsignore")).toString("utf8") : ""))
         problems.push(`.assetsignore doesn't keep /${MANIFEST} out of the upload`);
@@ -337,6 +420,12 @@ function checkKit(kit) {
             // The asset server would send it as it is, with no Content-Encoding.
             if (/\.br$/i.test(f))
                 problems.push(`${f}: a .br outside e/`);
+            // Kept a year (_headers), so named by their content too.
+            const room = /^rooms\/[A-Za-z0-9_-]+\.([0-9a-f]{8})\.(?:webp|jpg|png|avif)$/.exec(f);
+            if (f.startsWith("rooms/") && !room)
+                problems.push(`${f}: under rooms/ but not named by its content`);
+            else if (room && sha256(read(path.join(pub, f))).slice(0, 8) !== room[1])
+                problems.push(`${f}: its content doesn't match its name`);
             continue;
         }
         const m = /\.([0-9a-f]{12})\.(js|wasm)(\.br)?$/.exec(f);
