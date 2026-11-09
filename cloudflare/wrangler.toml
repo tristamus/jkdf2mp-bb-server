@@ -15,15 +15,17 @@ routes = [
 # stays. Without this line, wrangler turns workers.dev off once routes are set.
 workers_dev = true
 
-# index.html, openjkdf2.js and openjkdf2.wasm, jspi/openjkdf2.js and
-# jspi/openjkdf2.wasm (the build's web/ folder), and move-out.html. Only
-# /relay, /summary, /imperial-games and the page itself run the Worker (the
-# page so it can be sent on from an old address); the rest is served straight
-# from Cloudflare.
+# index.html, move-out.html, and under e/ the engines' files and unzip.js,
+# named by their content (with a .br of each beside it), as the kit's build
+# script (tools/build-kit.mjs) makes them, also those of the last kits, for
+# pages opened before a deploy; the room pictures in rooms/; and _headers.
+# /relay, /summary, /imperial-games, the page itself (so it can be sent on
+# from an old address) and e/ (src/engine.js) run the Worker, and so does a
+# path with no file; the rest is served straight from Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
