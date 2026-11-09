@@ -302,11 +302,21 @@ answers only a name as a kit writes it: a `.br` by its own name, any other spell
 name that isn't there get a 404 with `no-store`, as does any other path with no file (`src/lobby.js`),
 also under `rooms/`, so a page from a newer deploy that reaches an older one finds its file once it's
 there. A `Range` gets the whole file. Each engine file is a Worker request the first time a browser
-downloads it, and none after that.
+downloads it (once per browser per kit), and none after that; these count toward the free plan's
+100,000 Worker requests a day, and past the limit they get a 429, as the page does.
 
 Each kit also keeps the files of the last three kits before it, at their own paths, so a tab opened
 before a deploy still finds its engine: those of cloudflare-92 and before by their fixed names
 (`openjkdf2.js`, `openjkdf2.wasm`, `jspi/openjkdf2.js`, `jspi/openjkdf2.wasm`, `unzip.js`).
+
+An older kit hasn't got a newer kit's files, so a rollback (deploying an older kit again) takes them
+away. A tab on the newer page whose game has started has its engine already and plays on. One whose
+game hasn't asks for files that are gone: its player clicks Play, picks the game folder, and then sees
+"The game couldn't start" with a Reload button; the reload brings the older page, where the folder
+has to be picked again, and the game starts. Tabs on the older page, and on those of the kits it
+keeps, aren't affected. Build the next kit with `--prev` set to the newest kit built, even one that
+was rolled back, not to the kit the rollback went to: the newest kit's `public/` has its own files and
+the ones it kept, so the next kit keeps both, and tabs still open on either page find their engine.
 
 `tools/build-kit.mjs` makes a kit's `public/` from the two builds' `web/` folders, the page (whose
 folder gives `unzip.js`, `move-out.html` and the room pictures in `rooms/`) and the previous kit's
@@ -323,12 +333,18 @@ It writes the page with its table filled in (nothing else in it changes), the ha
 `.br`, the kept ones, `_headers` (a year for `rooms/` and `e/`), `kit-files.json` (which files each
 kit's page loads, newest first, for the next kit's `--prev`; `.assetsignore` keeps it out of the
 upload) and `SHA256SUMS`, and prints which kits' files it kept. The same inputs give the same kit,
-byte for byte, with the same Node.js (its brotli makes the `.br` files). It writes nothing when an
-input is wrong: a page without its one table, or one that names an engine file outside it, an engine
-script that doesn't ask `locateFile` for its wasm, a room picture whose content doesn't match its
-name, a kept file that isn't in `--prev`, or two different files under one name. `check` reads a kit
-back: every file each kit's page loads is there, names match their content, each `.br` unpacks to its
-file, there's no `.br` outside `e/`, and `SHA256SUMS` matches.
+byte for byte, with the same Node.js (its brotli makes the `.br` files; for a file the previous kit
+has too, it keeps that kit's `.br` when it unpacks to the same file, as another Node.js's brotli may
+write other bytes). It writes nothing when an input is wrong: a page without its one table, or one
+that names an engine file outside it, an engine script that doesn't ask `locateFile` for its wasm,
+the two builds swapped or one given for both (the JSPI engine's script wraps its wasm's imports in
+`WebAssembly.Suspending`, the Asyncify one's doesn't), a wasm that doesn't compile or imports from a
+module its script doesn't give it (a script and a wasm from two builds), a room picture whose content
+doesn't match its name, a kept file that isn't in `--prev`, or two different files under one name.
+`check` reads a kit back: every file each kit's page loads is there, the page's room pictures too,
+names under `e/` and `rooms/` match their content, the page's two engines are the ones it names and
+each wasm takes its script's imports, each `.br` unpacks to its file, there's no `.br` outside `e/`,
+and `SHA256SUMS` matches.
 
 `node test/engine.mjs` checks `src/engine.js` and the router, and `node test/build-kit.mjs` the kit
 tool and `tools/check-site.mjs`, both with no ports.
