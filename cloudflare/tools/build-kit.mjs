@@ -38,15 +38,15 @@
 //
 // The same inputs give the same kit, byte for byte (with the same Node.js:
 // its brotli makes the .br files; for a file the previous kit has too, its
-// .br is kept as deployed when it unpacks to that file). Nothing is written
-// when an input is wrong: a page without its one table, or one that names an
-// engine file outside it, an engine script that doesn't ask locateFile for
-// its wasm, an engine given as the other one (the JSPI engine's script wraps
-// its wasm's imports in WebAssembly.Suspending, the Asyncify one's doesn't),
-// a wasm that doesn't compile or imports from a module its script doesn't
-// give it, one wasm for both engines, a room picture whose content doesn't
-// match its name, a kept file that isn't in --prev, or two different files
-// under one name.
+// .br is kept as deployed). Nothing is written when an input is wrong: a
+// page without its one table, or one that names an engine file outside it,
+// an engine script that doesn't ask locateFile for its wasm, an engine given
+// as the other one (the JSPI engine's script wraps its wasm's imports in
+// WebAssembly.Suspending, the Asyncify one's doesn't), a wasm that doesn't
+// compile or imports from a module its script doesn't give it, one wasm for
+// both engines, a room picture whose content doesn't match its name, a kept
+// file that isn't in --prev, a kept file under e/ whose .br isn't there or
+// doesn't unpack to it, or two different files under one name.
 //
 // sums rewrites <kit>/SHA256SUMS for every file in the kit (not node_modules,
 // .wrangler or SHA256SUMS itself), after README.md, src/ and the rest are in.
@@ -295,25 +295,31 @@ function buildPublic(o) {
         fail(`--label ${label}: a kept kit has that name already`);
     for (const kit of before) {
         for (const f of kit.files) {
-            put(f, read(path.join(o.prev, f)), "kept from " + kit.label);
+            const buf = read(path.join(o.prev, f));
+            put(f, buf, "kept from " + kit.label);
             const brPath = path.join(o.prev, f + ".br");
-            if (!fs.existsSync(brPath))
+            if (!f.startsWith("e/")) {
+                if (fs.existsSync(brPath))
+                    put(f + ".br", read(brPath), "kept from " + kit.label);
                 continue;
-            // For a file this kit has too, the .br that's deployed, when it
-            // unpacks to that file: another Node.js's brotli may have written
-            // other bytes for it.
-            const kept = read(brPath);
-            let same = false;
-            try {
-                same = files.has(f + ".br") && zlib.brotliDecompressSync(kept).equals(files.get(f));
-            } catch (e) {}
-            if (same) {
-                files.set(f + ".br", kept);
-                if (brSizes[f])
-                    brSizes[f][1] = kept.length;
-            } else {
-                put(f + ".br", kept, "kept from " + kit.label);
             }
+            // The Worker sends a file under e/ from its .br to every browser
+            // that takes br (src/engine.js), so the deployed .br has to be
+            // there and unpack to the file. It's kept as it is, also for a
+            // file this kit has too: another Node.js's brotli may have written
+            // other bytes for it.
+            if (!fs.existsSync(brPath))
+                fail(`${path.join(o.prev, f)} has no .br beside it (kept from ${kit.label})`);
+            const kept = read(brPath);
+            let unpacked = null;
+            try {
+                unpacked = zlib.brotliDecompressSync(kept);
+            } catch (e) {}
+            if (!unpacked || !unpacked.equals(buf))
+                fail(`${brPath} doesn't unpack to ${f} (kept from ${kit.label})`);
+            files.set(f + ".br", kept);
+            if (brSizes[f])
+                brSizes[f][1] = kept.length;
         }
     }
     const kits = [{ label, page: table, files: mine }].concat(before);

@@ -212,7 +212,7 @@ test("a kept file's .br from another brotli: the deployed one is kept, if it unp
     assert.deepEqual(sums("k94other"), sums("k94"));
 });
 
-// Each refusal: exit 1, the reason, and no public/ made. o is the options
+// Each refusal: exit 1, the reason, and nothing written. o is the options
 // for build() (made when the test runs, after kit 93 is), or args gives the
 // whole command line.
 function refuses(name, why, { o = () => ({}), args, extra = [], before } = {}) {
@@ -225,7 +225,7 @@ function refuses(name, why, { o = () => ({}), args, extra = [], before } = {}) {
         assert.match(r.err, why);
         assert.doesNotMatch(r.err, /\n    at /);
         if (!before)
-            assert.ok(!fs.existsSync(path.join(out, "public")), "public/ was made");
+            assert.ok(!fs.existsSync(out), "something was written");
     });
 }
 const badPage = (name, html) => () => ({ page: pageDir(at("pages", name), html) });
@@ -325,14 +325,25 @@ refuses("a kit-files.json with no kits", /no kits list/, { o: badPrev("nokits", 
 refuses("a kit-files.json kit without files", /isn't \{ label, files/, { o: badPrev("nofiles", { kits: [{ label: "x" }] }) });
 refuses("two different files under one name", /two different files/,
         { o: badPrev("clash", keeping([ROOM_NAME]), { [ROOM_NAME]: "another picture" }) });
-for (const [name, br] of [["that unpacks to another file", () => zlib.brotliCompressSync("another unzip.js")],
-                          ["that doesn't unpack", () => Buffer.from("nonsense")]])
-    refuses("a kept .br " + name, /e\/unzip\.[0-9a-f]{12}\.js\.br: two different files \(kept from cloudflare-93\)/, { o: () => {
-        const dir = at("prevs", "br-" + name.replace(/[^a-z]/g, ""));
-        fs.cpSync(at("k93", "public"), dir, { recursive: true });
-        fs.writeFileSync(path.join(dir, table93.unzip + ".br"), br());
-        return { prev: dir };
-    } });
+// A kept engine file's .br that isn't in --prev, or doesn't unpack to it: of
+// a file kit 94 has too (unzip.js), and of one only kit 93 has (its JSPI
+// script), which kit 94 would otherwise have written as it was.
+for (const [which, file, re] of [["a file the kit has too", () => table93.unzip, "unzip\\.[0-9a-f]{12}\\.js"],
+                                 ["a file only a kept kit has", () => table93.jspi.js, "jspi[\\\\/]openjkdf2\\.[0-9a-f]{12}\\.js"]])
+    for (const [name, br, why] of [
+        ["isn't there", null, new RegExp(`${re} has no \\.br beside it \\(kept from cloudflare-93\\)`)],
+        ["unpacks to another file", () => zlib.brotliCompressSync("another file"),
+         new RegExp(`${re}\\.br doesn't unpack to e/${re.replace("[\\\\/]", "/")} \\(kept from cloudflare-93\\)`)],
+        ["doesn't unpack", () => Buffer.from("nonsense"), /\.js\.br doesn't unpack to e\/.* \(kept from cloudflare-93\)/]])
+        refuses(`a kept .br of ${which} that ${name}`, why, { o: () => {
+            const dir = at("prevs", "br-" + (which + " " + name).replace(/[^a-z]+/g, "-"));
+            fs.cpSync(at("k93", "public"), dir, { recursive: true });
+            if (br)
+                fs.writeFileSync(path.join(dir, file() + ".br"), br());
+            else
+                fs.rmSync(path.join(dir, file() + ".br"));
+            return { prev: dir, jspi: at("jspi94") };
+        } });
 refuses("a --prev whose page has a table but no kit-files.json", /not a kit this script made/, { o: badPrev("nomanifest", null) });
 refuses("a --label a kept kit has", /a kept kit has that name/,
         { o: () => ({ prev: at("k93", "public") }), extra: ["--label", "cloudflare-93"] });
