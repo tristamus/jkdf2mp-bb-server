@@ -60,8 +60,10 @@ const test = (name, fn) => tests.push({ name, fn });
 
 test("a summary the page makes is kept as it is", () => {
     assert.deepEqual(cleanSummary(sample()), sample());
-    const s = { ...sample(), sim: true, test: true, netstats: true, dropped: 4 };
+    const s = { ...sample(), sim: true, test: true, netstats: true, jspi: true, dropped: 4 };
     assert.deepEqual(cleanSummary(s), s);
+    // A flag is true or left out.
+    assert.equal(cleanSummary({ ...sample(), jspi: "yes" }).jspi, undefined);
     // A Classic match's, by the receipts: blocks shown here that the other
     // game counted as hits or never saw.
     const classic = { ...sample(), rules: "classic" };
@@ -143,12 +145,14 @@ test("one data point for each other player, within Analytics Engine's limits", (
     assert.deepEqual(p.doubles, [300, 754, 2, 144, 58, 750, 48, 41, 72, 48, 40, 38, 2, 43, 1, 13, 1, 13, 1, 3]);
 
     // Not known: -1. Flags.
-    const s = cleanSummary({ ...sample(), test: true, sim: true });
+    const s = cleanSummary({ ...sample(), test: true, sim: true, jspi: true });
     delete s.others[0].ping;
     delete s.others[0].drawn;
     s.fps.low = null;
     const q = summaryPoints(s, "x")[0];
     assert.equal(q.blobs[7], "sim+test");
+    // The JSPI engine's match is an ordinary one: only in the JSON.
+    assert.equal(JSON.parse(q.blobs[10]).jspi, true);
     assert.deepEqual([q.doubles[4], q.doubles[6], q.doubles[8], q.doubles[9]], [-1, -1, -1, -1]);
 
     // What a page sends fits what it may post. Each data point fits what

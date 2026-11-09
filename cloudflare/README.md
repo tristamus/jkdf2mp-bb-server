@@ -4,7 +4,9 @@
 Cloudflare at https://jediknight.zone/ (before 2026-10-29, `https://jkdf2mp.jkdf2mp-lobby.workers.dev/`;
 see Address below), with nothing running at home. It speaks the same protocol, so the same browser build works with either one.
 
-- The page and engine (`index.html`, `openjkdf2.js`, `openjkdf2.wasm`) are static files in `public/`.
+- The page and its two engines (`index.html`; `openjkdf2.js` and `openjkdf2.wasm`, the Asyncify
+  engine; `jspi/openjkdf2.js` and `jspi/openjkdf2.wasm`, the JSPI engine, which browsers with JSPI
+  load) are static files in `public/`.
   They're not in this branch: take them from a folder in the `builds` branch, where `SHA256SUMS`
   lists their hashes. There are no game files here or there.
 - The lobby itself is a Durable Object, so every player reaches the same one. It uses WebSocket
@@ -242,7 +244,8 @@ the rules (`classic` or `hwys`), `blob4` the build, `blob5` `host` or `joiner`, 
 `blob7` the hello version the two games agreed on (0 for a build from before Hit what you see, -1
 unknown), `blob8` any of `sim`, `test` and `netstats` (a slowed, scripted or measured match; empty for
 an ordinary one), `blob9` an id the rows of one summary share, `blob10` that other player's part as
-JSON, and `blob11` the rest of the summary as JSON. Its numbers: `double1` the reach, `double2` the
+JSON, and `blob11` the rest of the summary as JSON (with `"jspi":true` when that game ran the JSPI
+engine, which browsers with JSPI get; without it, the Asyncify engine). Its numbers: `double1` the reach, `double2` the
 game's time in the match (s), `double3` players, `double4` and `double5` its frame rate (the middle,
 and the lowest tenth), `double6` the other player's time in the match with it, `double7` the ping,
 `double8` the round trip the browser measured on their link, `double9` how far behind they were drawn

@@ -15,10 +15,11 @@ routes = [
 # stays. Without this line, wrangler turns workers.dev off once routes are set.
 workers_dev = true
 
-# index.html, openjkdf2.js and openjkdf2.wasm, which get-build.mjs fetches,
-# and move-out.html. Only /relay, /summary, /imperial-games and the page itself
-# run the Worker (the page so it can be sent on from an old address); the rest
-# is served straight from Cloudflare.
+# index.html, openjkdf2.js and openjkdf2.wasm, jspi/openjkdf2.js and
+# jspi/openjkdf2.wasm (the build's web/ folder), and move-out.html. Only
+# /relay, /summary, /imperial-games and the page itself run the Worker (the
+# page so it can be sent on from an old address); the rest is served straight
+# from Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
