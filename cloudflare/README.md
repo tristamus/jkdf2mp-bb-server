@@ -4,11 +4,11 @@
 Cloudflare at https://jediknight.zone/ (before 2026-10-29, `https://jkdf2mp.jkdf2mp-lobby.workers.dev/`;
 see Address below), with nothing running at home. It speaks the same protocol, so the same browser build works with either one.
 
-- The page and its two engines (`index.html`; `openjkdf2.js` and `openjkdf2.wasm`, the Asyncify
-  engine; `jspi/openjkdf2.js` and `jspi/openjkdf2.wasm`, the JSPI engine, which browsers with JSPI
-  load) are static files in `public/`.
-  They're not in this branch: take them from a folder in the `builds` branch, where `SHA256SUMS`
-  lists their hashes. There are no game files here or there.
+- The page and its two engines (`index.html`; the Asyncify engine's `openjkdf2.js` and
+  `openjkdf2.wasm`, and the JSPI engine's, which browsers with JSPI load) are static files in
+  `public/`, the engines' files and `unzip.js` under `e/`, named by their content (see Engine files
+  below). They're not in this branch: take them from a folder in the `builds` branch, where
+  `SHA256SUMS` lists their hashes. There are no game files here or there.
 - The lobby itself is a Durable Object, so every player reaches the same one. It uses WebSocket
   hibernation, so it isn't kept in memory while people sit in the lobby, and Cloudflare answers the
   pages' keepalive pings without waking it.
@@ -285,6 +285,54 @@ node test/imperial-route.mjs http://127.0.0.1:8797 8799
 
 With the real relay: `npx wrangler dev`, then http://127.0.0.1:8787/imperial-games.
 
+## Engine files
+
+In a kit, the engines' files are named by their content: `e/openjkdf2.<h>.js` and
+`e/openjkdf2.<h>.wasm` (Asyncify), `e/jspi/openjkdf2.<h>.js` and `.wasm` (JSPI) and `e/unzip.<h>.js`,
+where `<h>` is the first 12 hex digits of the file's SHA-256, each with a `.br` beside it (brotli
+quality 11). The page names them in one table, `ENGINE_FILES`, the JSON between its `/* kit-files */`
+and `/* /kit-files */` marks. So browsers keep them a year without asking again (`immutable`), and a
+page only ever loads its own engine.
+
+`src/engine.js` answers `/e/` (`run_worker_first`): to a browser that takes br (by
+`request.cf.clientAcceptEncoding`, since the `Accept-Encoding` a Worker sees always says br) the
+`.br`'s bytes as `Content-Encoding: br`, otherwise the plain file, which Cloudflare compresses as
+usual. The JSPI engine's wasm is 683 KB that way, against about 853-880 KB compressed on the fly. It
+answers only a name as a kit writes it: a `.br` by its own name, any other spelling of a name, and a
+name that isn't there get a 404 with `no-store`, as does any other path with no file (`src/lobby.js`),
+also under `rooms/`, so a page from a newer deploy that reaches an older one finds its file once it's
+there. A `Range` gets the whole file. Each engine file is a Worker request the first time a browser
+downloads it, and none after that.
+
+Each kit also keeps the files of the last three kits before it, at their own paths, so a tab opened
+before a deploy still finds its engine: those of cloudflare-92 and before by their fixed names
+(`openjkdf2.js`, `openjkdf2.wasm`, `jspi/openjkdf2.js`, `jspi/openjkdf2.wasm`, `unzip.js`).
+
+`tools/build-kit.mjs` makes a kit's `public/` from the two builds' `web/` folders, the page (whose
+folder gives `unzip.js`, `move-out.html` and the room pictures in `rooms/`) and the previous kit's
+`public/`:
+
+```
+node tools/build-kit.mjs public --asyncify <asyncify web/> --jspi <jspi web/> \
+    --page <OpenJKDF2>/packaging/wasm/index.html --prev <previous kit>/public --out <kit> --label cloudflare-93
+node tools/build-kit.mjs sums <kit>     # once README.md, src/ and the rest are in
+node tools/build-kit.mjs check <kit>
+```
+
+It writes the page with its table filled in (nothing else in it changes), the hashed files and their
+`.br`, the kept ones, `_headers` (a year for `rooms/` and `e/`), `kit-files.json` (which files each
+kit's page loads, newest first, for the next kit's `--prev`; `.assetsignore` keeps it out of the
+upload) and `SHA256SUMS`, and prints which kits' files it kept. The same inputs give the same kit,
+byte for byte, with the same Node.js (its brotli makes the `.br` files). It writes nothing when an
+input is wrong: a page without its one table, or one that names an engine file outside it, an engine
+script that doesn't ask `locateFile` for its wasm, a room picture whose content doesn't match its
+name, a kept file that isn't in `--prev`, or two different files under one name. `check` reads a kit
+back: every file each kit's page loads is there, names match their content, each `.br` unpacks to its
+file, there's no `.br` outside `e/`, and `SHA256SUMS` matches.
+
+`node test/engine.mjs` checks `src/engine.js` and the router, and `node test/build-kit.mjs` the kit
+tool and `tools/check-site.mjs`, both with no ports.
+
 ## Deploy
 
 Needs Node.js 22 or newer and a Cloudflare account (the free plan runs it, within the limits above).
@@ -299,6 +347,12 @@ npx wrangler deploy --env="" # the site; --env beta for the test address (below)
 
 `npx wrangler dev` runs it locally at http://127.0.0.1:8787/ instead. A plain `npx wrangler deploy`
 deploys the site too, with a warning that there's more than one environment; `--env=""` names the site's.
+
+After a deploy, `node tools/check-site.mjs https://beta.jediknight.zone` (or the site's address) in the
+kit's folder checks how the page and the engine files come: the kit's `.br` byte for byte to a browser
+that takes br, the plain file otherwise, a year's caching, 404s that nothing keeps, and the kept kits'
+files. It makes a few dozen requests, all GET or HEAD, and downloads about 4 MB. A page without an ETag
+comes from the zone's settings, not from the kit, and its line says so (`zone`, not `BAD`).
 
 The deploy that brings room passwords, and a rollback from it, can tell a player joining a room with
 a password, once, "Wrong password" with the right one, or that the game couldn't connect; joining
