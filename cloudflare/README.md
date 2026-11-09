@@ -4,7 +4,9 @@
 Cloudflare at https://jediknight.zone/ (before 2026-10-29, `https://jkdf2mp.jkdf2mp-lobby.workers.dev/`;
 see Address below), with nothing running at home. It speaks the same protocol, so the same browser build works with either one.
 
-- The page and engine (`index.html`, `openjkdf2.js`, `openjkdf2.wasm`) are static files in `public/`.
+- The page and its two engines (`index.html`; `openjkdf2.js` and `openjkdf2.wasm`, the Asyncify
+  engine; `jspi/openjkdf2.js` and `jspi/openjkdf2.wasm`, the JSPI engine, which browsers with JSPI
+  load) are static files in `public/`.
   They're not in this branch: take them from a folder in the `builds` branch, where `SHA256SUMS`
   lists their hashes. There are no game files here or there.
 - The lobby itself is a Durable Object, so every player reaches the same one. It uses WebSocket
