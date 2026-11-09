@@ -34,6 +34,10 @@ const THEIRS = ["counted", "blocked", "dead", "turnedDown", "targeted", "claims"
 // How many claims reached at least this far back, in ms.
 const REACHES = ["150", "200", "250", "300", "400", "500"];
 const FLAGS = ["sim", "test", "netstats"];
+// A match the JSPI engine played (the other engine is the Asyncify one). An
+// ordinary match, so it stays out of blob8 (summaryPoints) and is only in the
+// summary's JSON (blob11).
+const KEPT_FLAGS = FLAGS.concat(["jspi"]);
 const BUILD_RE = /^[0-9a-f]{7,16}$/;
 
 function whole(v, max) {
@@ -150,7 +154,7 @@ export function cleanSummary(s) {
     const dropped = whole(s.dropped, 63);
     if (dropped)
         out.dropped = dropped;
-    for (const flag of FLAGS) {
+    for (const flag of KEPT_FLAGS) {
         if (s[flag] === true)
             out[flag] = true;
     }
