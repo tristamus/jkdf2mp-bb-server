@@ -344,6 +344,18 @@ for (const [which, file, re] of [["a file the kit has too", () => table93.unzip,
                 fs.rmSync(path.join(dir, file() + ".br"));
             return { prev: dir, jspi: at("jspi94") };
         } });
+// A .br beside a kept file outside e/ (which check refuses in a kit): of kit
+// 92's JSPI script, and of the room picture kit 93 has.
+for (const [which, file, from] of [["kit 92's JSPI script", "jspi/openjkdf2.js", "before build-kit\\.mjs"],
+                                   ["a room picture", ROOM_NAME, "cloudflare-93"]])
+    refuses(`a .br beside a kept file outside e/ (${which})`,
+            new RegExp(`${file.replace(/\./g, "\\.").replace("/", "[\\\\/]")}\\.br: a \\.br outside e/ \\(kept from ${from}\\)`),
+            { o: () => {
+        const dir = at("prevs", "stray-br-" + which.replace(/[^a-z0-9]+/gi, "-"));
+        fs.cpSync(at("k93", "public"), dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, file + ".br"), zlib.brotliCompressSync(fs.readFileSync(path.join(dir, file))));
+        return { prev: dir, jspi: at("jspi94") };
+    } });
 refuses("a --prev whose page has a table but no kit-files.json", /not a kit this script made/, { o: badPrev("nomanifest", null) });
 refuses("a --label a kept kit has", /a kept kit has that name/,
         { o: () => ({ prev: at("k93", "public") }), extra: ["--label", "cloudflare-93"] });

@@ -343,11 +343,12 @@ outside it, an engine script that doesn't ask `locateFile` for its wasm, the two
 one given for both (the JSPI engine's script wraps its wasm's imports in `WebAssembly.Suspending`,
 the Asyncify one's doesn't), a wasm that doesn't compile or imports from a module its script doesn't
 give it (the other kind's wasm), a room picture whose content doesn't match its name, a kept file
-that isn't in `--prev`, a kept file under `e/` whose `.br` isn't there or doesn't unpack to it, or
-two different files under one name. `check` reads a kit back: every file each kit's page loads is
-there, the page's room pictures too, names under `e/` and `rooms/` match their content, the page's
-two engines are the kinds it names and each wasm imports only from modules its script gives, each
-`.br` unpacks to its file, there's no `.br` outside `e/`, and `SHA256SUMS` matches.
+that isn't in `--prev`, a kept file under `e/` whose `.br` isn't there or doesn't unpack to it, a
+`.br` beside a kept file outside `e/`, or two different files under one name. `check` reads a kit
+back: every file each kit's page loads is there, the page's room pictures too, names under `e/` and
+`rooms/` match their content, the page's two engines are the kinds it names and each wasm imports
+only from modules its script gives, each `.br` unpacks to its file, there's no `.br` outside `e/`,
+and `SHA256SUMS` matches.
 
 `node test/engine.mjs` checks `src/engine.js` and the router, and `node test/build-kit.mjs` the kit
 tool and `tools/check-site.mjs`, both with no ports.

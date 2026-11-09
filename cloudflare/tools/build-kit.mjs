@@ -48,8 +48,8 @@
 // compile or imports from a module its script doesn't give it (the other
 // kind's wasm), one wasm for both engines, a room picture whose content
 // doesn't match its name, a kept file that isn't in --prev, a kept file
-// under e/ whose .br isn't there or doesn't unpack to it, or two different
-// files under one name.
+// under e/ whose .br isn't there or doesn't unpack to it, a .br beside a
+// kept file outside e/, or two different files under one name.
 //
 // sums rewrites <kit>/SHA256SUMS for every file in the kit (not node_modules,
 // .wrangler or SHA256SUMS itself), after README.md, src/ and the rest are in.
@@ -306,8 +306,11 @@ function buildPublic(o) {
             put(f, buf, "kept from " + kit.label);
             const brPath = path.join(o.prev, f + ".br");
             if (!f.startsWith("e/")) {
+                // The asset server would send a .br outside e/ as it is,
+                // with no Content-Encoding, so a kit has none there (check
+                // refuses one): it isn't copied, and nothing is written.
                 if (fs.existsSync(brPath))
-                    put(f + ".br", read(brPath), "kept from " + kit.label);
+                    fail(`${brPath}: a .br outside e/ (kept from ${kit.label})`);
                 continue;
             }
             // The Worker sends a file under e/ from its .br to every browser
