@@ -286,8 +286,9 @@ A player is a browser key: 32 hex digits the page gets from `POST /ladder/key`, 
 sets as a cookie (`jkpk`, kept 400 days and set again on each visit) so it outlasts a browser
 clearing what pages keep. There are no accounts. D1 only ever gets the key's SHA-256, with the name
 the player last used. A player whose page says not to record them is in the match with no name and
-no key, and so is one whose page never asked for a key (a tab opened before the record was on). They
-are in no standings and have no page of their own.
+no key: in no standings, and with no page of their own. A player whose game sent no key (it reported
+nothing, or its page never asked for one: a tab opened before the record was on) is in the match by
+name only, and counts for the record that has that name when exactly one does (below).
 
 A browser that clears its cookies and site data gets a new key. So that the record isn't lost with
 it, a key D1 has never had becomes another key of a record when it plays under that record's name
@@ -395,8 +396,44 @@ UPDATE players SET merged_into = NULL WHERE id = 46;
 DELETE FROM ladder_cache;
 ```
 
-`LADDER_JOIN_NAMES = "0"` under `[vars]` turns joining off: every new key is then a new player, and
-two records are joined only by hand.
+`LADDER_JOIN_NAMES = "0"` under `[vars]` turns joining off: every new key is then a new player, a
+player with no key is nobody's, and two records are joined only by hand.
+
+### A player with no key under a known name
+
+A player whose game sent no key is in a match by name only (`match_players.player_id` is empty). The
+same rule gives such a line to a record, whichever came first, the line or the record:
+
+- its name is the name exactly one record on the pages last used, whatever the letters' case;
+- the name has three characters or more and isn't one many players would have;
+- no other player in that match has the same name;
+- that record's player isn't in that match under a key.
+
+It's looked at when a match is saved, for the names in that match: their lines in it, and their
+earlier lines that are still nobody's. So a player's matches from before they had a key become
+theirs with the first match they play with one. The first match a lobby saves after this rule came
+in looks once at every such line, whatever its name (the lobby keeps `ladder:keyless` in its own
+storage to say it has). The lobby logs each line (`a player with no key joins record <id> by their
+name`).
+
+The lines hang on a row of their own in `players`, the record's stand-in for them: its `key_hash` is
+`name:` and the record's id, which no browser's key can be, and its `merged_into` is the record. So
+the pages need nothing new to count them, and they come off the record the way a joined key does.
+Taken off, the stand-in is a player of its own under the same name, and the record gets no more
+such lines until it's put back:
+
+```
+-- Record 45's matches without a key: make them a player of their own again
+UPDATE players SET merged_into = NULL WHERE key_hash = 'name:45';
+DELETE FROM ladder_cache;
+-- ... and back
+UPDATE players SET merged_into = 45 WHERE key_hash = 'name:45';
+DELETE FROM ladder_cache;
+```
+
+A name is all it takes here too, and less: nobody has to play. A line under a name is theirs as
+soon as one record has that name, so a player who renames themselves to a name that has lines and
+no record gets those lines.
 
 ### By hand
 
@@ -424,6 +461,10 @@ limit, queries fail until 00:00 UTC: matches aren't saved (the lobby tries five 
 apart, then drops the match) and the pages answer an error. Workers Paid includes 25 billion rows
 read and 50 million written a month. (https://developers.cloudflare.com/d1/platform/pricing/)
 
+Saving a match reads, besides its own rows, the lines that are nobody's (players with no key or no
+name, one row each) and, for a new key or a line without one, a row or two by its name
+(`players_name`).
+
 What reads rows: a match page reads that match's rows, a list its 30 matches, the standings and the
 landing page's boards the six kept rows, and a player's page that player's matches of the period and
 the players of their latest 50. The one large read is adding the standings up again after a match:
@@ -447,7 +488,8 @@ keeps well-behaved crawlers off the player pages; nothing stops one that doesn't
   lost; the match is saved from what the other games sent and the last scoreboard that arrived.
 - A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
   game told could change who holds them.
-- A player with no key has no record: the match shows them, the standings don't.
+- A player with no key whose name is no record's, or the name of more than one, has no record: the
+  match shows them, the standings don't.
 
 ## Imperial relay games
 
