@@ -575,7 +575,12 @@ export class Ladder {
         if (!this.on())
             return;
         const room = this.lobby.rooms.get(c.room);
-        if (!room || ws !== (c.id === 1 ? room.host : room.peers.get(c.id)))
+        const seated = !!room && ws === (c.id === 1 ? room.host : room.peers.get(c.id));
+        // A game whose room has just ended (its host left) still has its
+        // last word while the match closes (roomEnded). The mark the lobby
+        // put on its socket says which match it reported, and as whom.
+        const late = !seated && c.m ? this.matches.get(c.m[0]) : null;
+        if (!seated && !(late && !late.done && late.roomGone))
             return;
         const now = Date.now();
         let rate = this.rates.get(ws);
@@ -591,6 +596,16 @@ export class Ladder {
         const r = cleanReport(b64);
         if (!r)
             return;
+        if (!seated) {
+            // As the player with the mark's key, whoever sat in that seat
+            // since, and only until its end: a player who left before has
+            // said its last. Never the host: its end was its last word, and
+            // a host's line can open a match.
+            const pi = late.players.findIndex(p => p.key && p.key === c.m[1] && p.seat !== 1 && !p.left);
+            if (pi < 0)
+                return;
+            return this.later(() => this.take(c.m[0], late.players[pi].seat, [], { locked: false }, r, now, pi));
+        }
         // The seats as they are now: by the time it's worked through, its
         // game may have left.
         const seats = this.lobby.seated(room).filter(([, , seat]) => seat).map(([id, sock, seat]) => ({
@@ -613,7 +628,9 @@ export class Ladder {
         this.rates.delete(ws);
     }
 
-    async take(roomId, seatId, seats, info, r, now) {
+    // as: the match's player a late line is from (report), else the one in
+    // the seat now.
+    async take(roomId, seatId, seats, info, r, now, as = -1) {
         let hash = "";
         if (r.pk && !r.anon) {
             hash = this.hashes.get(r.pk) || await hashKey(r.pk);
@@ -640,7 +657,7 @@ export class Ladder {
         // A password at any time in it is one for the match.
         m.locked = m.locked || info.locked;
         this.roster(m, seats, now);
-        const pi = this.who(m, seatId, now);
+        const pi = as >= 0 ? as : this.who(m, seatId, now);
         if (pi < 0)
             return;
         const p = m.players[pi];
@@ -669,15 +686,23 @@ export class Ladder {
             m.teams = r.teams;
         }
         m.lastAt = now;
-        if (r.end) {
-            p.left = now;
-            if (isHost) {
-                m.ended = r.end;
-                m.closing = now + CLOSE_MS;
-            }
+        // Back in the level after leaving it, its game has more to say.
+        p.left = r.end ? now : as >= 0 ? p.left : 0;
+        if (r.end && isHost) {
+            m.ended = r.end;
+            m.closing = now + CLOSE_MS;
         }
+        // Its room is gone and that was the last game to say its last.
+        if (m.roomGone && this.saidAll(m))
+            m.closing = now;
         this.lobby.ctx.storage.put("match:" + roomId, m);
         this.wake();
+    }
+
+    // Whether every game that reported the match has sent its end. The
+    // host's isn't asked: its room ending is its end.
+    saidAll(m) {
+        return m.players.every(p => p.seat === 1 || !p.reports || p.left);
     }
 
     // The players in the room's seats, each a player of the match from the
@@ -763,15 +788,26 @@ export class Ladder {
         }
     }
 
-    // A room that ended: its match is over.
+    // A room that ended: its match is over. A host that leaves ends its
+    // room at once, while the other games' last reports (their last kills,
+    // their time, their end) are still on their way, so the match stays open
+    // for them CLOSE_MS at most, as after the host's end of a level, and
+    // closes as soon as each has said its last (take).
     roomEnded(room) {
         if (!this.matches.has(room.id))
             return;
         const now = Date.now();
         this.later(() => {
             const m = this.matches.get(room.id);
-            if (m && !m.done)
-                this.finish(m, "room closed", now);
+            if (m && !m.done) {
+                m.roomGone = true;
+                if (this.saidAll(m))
+                    return this.finish(m, "room closed", now);
+                if (!m.closing || m.closing > now + CLOSE_MS)
+                    m.closing = now + CLOSE_MS;
+                this.lobby.ctx.storage.put("match:" + room.id, m);
+                return this.wake();
+            }
             this.matches.delete(room.id);
             this.lobby.ctx.storage.delete("match:" + room.id);
         });
@@ -787,7 +823,7 @@ export class Ladder {
             if (m.done)
                 continue;
             if (m.closing && m.closing <= now)
-                this.later(() => { if (!m.done) this.finish(m, "level over", now); });
+                this.later(() => { if (!m.done) this.finish(m, m.roomGone ? "room closed" : "level over", now); });
             else if (m.lastAt + IDLE_MS <= now)
                 this.later(() => { if (!m.done) this.finish(m, "went quiet", now); });
         }
@@ -813,11 +849,17 @@ export class Ladder {
     finish(m, why, now) {
         const rec = buildRecord(m, why, now);
         const storage = this.lobby.ctx.storage;
-        // What's left says it's over, for a late report from its host.
-        const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map };
-        this.matches.set(m.room, done);
         m.done = true;
-        storage.put("match:" + m.room, done);
+        if (m.roomGone) {
+            // Nothing more can come for it.
+            this.matches.delete(m.room);
+            storage.delete("match:" + m.room);
+        } else {
+            // What's left says it's over, for a late report from its host.
+            const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map };
+            this.matches.set(m.room, done);
+            storage.put("match:" + m.room, done);
+        }
         if (!rec) {
             console.log(`ladder: room ${m.room}: ${m.map} not kept (${m.players.length} players, ${m.kills.length} kills, ${why})`);
             return;
