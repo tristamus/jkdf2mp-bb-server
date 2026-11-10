@@ -56,11 +56,16 @@
 // /imperial-games answers the Imperial Network Protocol relay's game list
 // (IMPERIAL_LIST), for the page to show beside this lobby's (src/imperial.js).
 // It never touches the lobby.
+//
+// /e/ is the engine's files, named by their content and kept by browsers for
+// good, sent brotli-compressed at its best where the browser takes it
+// (src/engine.js).
 
 import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
 import { imperialGames } from "./imperial.js";
+import { engineFile } from "./engine.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -164,10 +169,24 @@ export default {
             return takeSummary(request, env);
         if (url.pathname === "/imperial-games")
             return imperialGames(request, env, ctx);
+        // Before the move's redirect: the engine's files are the same on
+        // every address, and the page's fetch of one would fail on a
+        // redirect to another.
+        if (url.pathname.startsWith("/e/"))
+            return engineFile(request, env);
         const to = movedTo(url, env.SITE, env.MOVED_FROM);
         if (to)
             return Response.redirect(to, movedStatus(env.MOVED_STATUS));
-        return env.ASSETS.fetch(request);
+        const res = await env.ASSETS.fetch(request);
+        if (res.status !== 404)
+            return res;
+        // The Worker also runs for a path with no file. Its 404 is kept by
+        // nothing, also where public/_headers gives the path a year (rooms/),
+        // so a page from a newer deploy reaching an older one can find the
+        // file once it's there.
+        const missing = new Response(res.body, res);
+        missing.headers.set("Cache-Control", "no-store");
+        return missing;
     },
 };
 
