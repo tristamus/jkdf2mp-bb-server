@@ -21,7 +21,10 @@
 // `wrangler dev --var HOLD_MS:3000`. It also sends packets that go nowhere for
 // longer than the lobby's NOTICE_MS (5000 by default): set NOTICE_MS the same
 // way. protocol.expected.txt was made with
-// `wrangler dev --var HOLD_MS:3000 --var NOTICE_MS:1000`.
+// `wrangler dev --env beta --var HOLD_MS:3000 --var NOTICE_MS:1000`: the test
+// address's settings, which keep a match record (the "match" on the lobby
+// line) and still give older games room passwords, as the site's did until
+// its PASSWORDS_FOR_OLD_GAMES_UNTIL.
 const url = process.argv[2];
 const STEP_MS = Number(process.env.STEP_MS) || 400;
 const HOLD_MS = Number(process.env.HOLD_MS) || 60000;

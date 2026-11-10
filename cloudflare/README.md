@@ -303,14 +303,17 @@ which is there only when the lobby keeps a record), so the landing page shows it
 asks for them again only when that number changes. Games that reported a match hear `matched <id>`
 when it's saved.
 
-To turn it on, make the database once, put its id in `wrangler.toml` (the commented block there) and
-deploy. The lobby makes the tables itself (`SCHEMA` in `src/ladder.js`).
+It's on for the site and for the test address: `wrangler.toml` binds a database for each
+(`jkdf2mp-ladder`, and `jkdf2mp-ladder-beta` under `[env.beta]`). A deploy without those blocks turns
+the record off, with no error; the matches already saved stay in the database. So after a deploy, the
+`lobby` line a game gets still has to carry the word `match`, and `/ladder/recent` has to answer.
+
+A copy of the lobby in another Cloudflare account makes its own database once and puts the id that
+prints in `wrangler.toml`. The lobby makes the tables itself (`SCHEMA` in `src/ladder.js`).
 
 ```
 npx wrangler d1 create jkdf2mp-ladder
 ```
-
-The test address has its own (`jkdf2mp-ladder-beta`, under `[env.beta]`).
 
 To post each match to a Discord channel, make a webhook for the channel in Discord (channel
 settings, Integrations, Webhooks) and give its address to the lobby as a secret. It's posted for
