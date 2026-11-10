@@ -456,10 +456,19 @@ A game's reports are a few WebSocket messages a minute (one within two seconds o
 every 30 s), beside the thousands a minute of a match that goes through the lobby. A match is a
 handful of rows in D1.
 
-D1's free plan allows 5 million rows read and 100,000 rows written a day, and 5 GB. Past either daily
-limit, queries fail until 00:00 UTC: matches aren't saved (the lobby tries five times, a minute
-apart, then drops the match) and the pages answer an error. Workers Paid includes 25 billion rows
-read and 50 million written a month. (https://developers.cloudflare.com/d1/platform/pricing/)
+D1's free plan allows 5 million rows read and 100,000 rows written a day, and 5 GB for an account,
+500 MB for one database. Past either daily limit, queries fail until 00:00 UTC: matches aren't saved
+(the lobby tries five times, a minute apart, then drops the match) and the pages answer an error.
+Workers Paid includes 25 billion rows read and 50 million written a month, and takes a database to
+10 GB. (https://developers.cloudflare.com/d1/platform/pricing/,
+https://developers.cloudflare.com/d1/platform/limits/)
+
+The free plan also allows a Worker 50 queries each time it's called (1,000 on Workers Paid), a batch
+counting as one. Saving a match takes four or five, and up to four more when a line without a key
+finds its record; a lobby's first save takes up to six more (the tables, and the earlier lines
+without a key). Those pages don't say how a call is counted for a Durable Object that stays up
+between them. Counted at its strictest (everything saved in one go is one call), ten or so matches
+that end in the same moment fit; a save that fails is tried again a minute later.
 
 Saving a match reads, besides its own rows, the lines that are nobody's (players with no key or no
 name, one row each) and, for a new key or a line without one, a row or two by its name
