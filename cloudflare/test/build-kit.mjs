@@ -561,6 +561,22 @@ test("check-site: no address, or not http(s): the usage line", () => {
     }
 });
 
+test("check-site: run through a linked folder or a relative path, it still runs", () => {
+    const link = fs.mkdtempSync(path.join(os.tmpdir(), "check-site-link-"));
+    try {
+        fs.symlinkSync(path.join(HERE, ".."), path.join(link, "kit"), "junction");   // no rights needed on Windows
+        for (const [cwd, script] of [[link, path.join("kit", "tools", "check-site.mjs")],
+                                     [path.join(link, "kit"), path.join("tools", "check-site.mjs")],
+                                     [path.join(HERE, ".."), path.join("tools", "check-site.mjs")]]) {
+            const r = spawnSync(process.execPath, [script], { cwd, encoding: "utf8" });
+            assert.equal(r.status, 2, `${cwd} ${script}: ${r.status} ${r.stdout}${r.stderr}`);
+            assert.match(r.stderr, /^usage: node tools\/check-site\.mjs https:\/\/<site>/);
+        }
+    } finally {
+        fs.rmSync(link, { recursive: true, force: true });
+    }
+});
+
 let failed = 0;
 try {
     for (const t of tests) {

@@ -17,7 +17,7 @@ import https from "node:https";
 import crypto from "node:crypto";
 import path from "node:path";
 import zlib from "node:zlib";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 // CHECK_AE=br for wrangler dev, which answers with the first coding listed (gzip for Chrome's).
 export const CHROME_AE = "gzip, deflate, br, zstd";
@@ -135,7 +135,23 @@ export async function checkSite({ pub, get, ae = CHROME_AE, log = console.log })
     return counts;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+// Run as a command, not imported (test/build-kit.mjs imports checkSite). node gives this file's URL
+// with the links in its path (a symlink, or a junction on Windows) replaced by their targets, but
+// process.argv[1] as typed, so through a link the two never matched and the check printed nothing
+// at all. Both go through realpath first (the system's, then node's own), compared without case on
+// Windows, where a \\server\share's name comes back lowercased.
+function runAsCommand() {
+    if (!process.argv[1]) return false;
+    const a = path.resolve(process.argv[1]), b = fileURLToPath(import.meta.url);
+    const same = (x, y) => process.platform === "win32" ? x.toLowerCase() === y.toLowerCase() : x === y;
+    for (const real of [fs.realpathSync.native, fs.realpathSync])
+        try {
+            if (same(real(a), real(b))) return true;
+        } catch (e) {}
+    return same(a, b);
+}
+
+if (runAsCommand()) {
     let base;
     try {
         base = new URL(process.argv[2]);
