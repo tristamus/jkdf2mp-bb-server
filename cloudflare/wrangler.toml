@@ -20,12 +20,13 @@ workers_dev = true
 # script (tools/build-kit.mjs) makes them, also those of the last kits, for
 # pages opened before a deploy; the room pictures in rooms/; and _headers.
 # /relay, /summary, /imperial-games, the page itself (so it can be sent on
-# from an old address) and e/ (src/engine.js) run the Worker, and so does a
-# path with no file; the rest is served straight from Cloudflare.
+# from an old address), e/ (src/engine.js) and the match record's pages
+# (src/ladder-pages.js) run the Worker, and so does a path with no file; the
+# rest is served straight from Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/ladder/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -48,6 +49,17 @@ class_name = "Lobby"
 [[analytics_engine_datasets]]
 binding = "SUMMARIES"
 dataset = "jkdf2mp_summaries"
+
+# The match record (src/ladder.js): a D1 database for the matches the games
+# in the rooms report. Off until this block is there: the lobby asks for no
+# reports and the pages aren't served. To turn it on, make the database once
+# with `npx wrangler d1 create jkdf2mp-ladder`, put the database_id it prints
+# here and take the # off these four lines. The lobby makes the tables itself.
+# README.md, The match record.
+# [[d1_databases]]
+# binding = "LADDER"
+# database_name = "jkdf2mp-ladder"
+# database_id = ""
 
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
@@ -76,6 +88,11 @@ IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 # From this time, older games no longer get room passwords (kit 90 README, Settings).
 PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
+# The match record's Discord post (the DISCORD_WEBHOOK secret) is for matches
+# of this many players or more, and links to the match's page here; without
+# MATCH_LINKS, at SITE.
+# DISCORD_MIN_PLAYERS = "3"
+# MATCH_LINKS = "https://jediknight.zone"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
@@ -101,6 +118,13 @@ class_name = "Lobby"
 binding = "SUMMARIES"
 dataset = "jkdf2mp_beta_summaries"
 
+# Its own match record, so test matches stay out of the site's. As above:
+# `npx wrangler d1 create jkdf2mp-ladder-beta`, its id here, the # off.
+# [[env.beta.d1_databases]]
+# binding = "LADDER"
+# database_name = "jkdf2mp-ladder-beta"
+# database_id = ""
+
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"
 # Nothing moves: every page load is served where it is.
@@ -109,3 +133,4 @@ MOVED_FROM = ""
 MOVED_STATUS = "302"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
+MATCH_LINKS = "https://beta.jediknight.zone"
