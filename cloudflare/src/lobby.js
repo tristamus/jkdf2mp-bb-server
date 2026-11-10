@@ -1298,9 +1298,9 @@ export class Lobby extends DurableObject {
         }
         return "status " + base64Utf8(JSON.stringify({
             online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
-            // The last matches recorded, for the page's lists; not there
-            // without the match record.
-            ...(this.ladder.on() ? { matches: this.ladder.recent } : {}),
+            // The last match recorded, for the page to know when to get its
+            // lists again (/ladder/recent); not there without the record.
+            ...(this.ladder.on() ? { match: this.ladder.latest } : {}),
         }));
     }
 

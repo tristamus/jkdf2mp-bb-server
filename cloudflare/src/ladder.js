@@ -26,6 +26,7 @@
 //     t: 61234,              ms this game has been in the level
 //     pk: "<32 hex>",        its player's browser key (/ladder/key), if any
 //     anon: 1,               its player asked not to be recorded by name
+//     idle: 1,               its player isn't playing (a host that only serves)
 //     build: "<commit>",     the engine's build
 //     rules: { mode, sl, tl },   the host's: the game's multiplayer mode
 //                            flags, score limit and time limit (minutes)
@@ -103,15 +104,13 @@ const COUNT_SECS = 120;
 const COUNT_AGREE = 0.9;
 // A match's players are those in a kill, and those whose game reported being
 // in its level for this long: not one who sat in the room without playing
-// (still loading, or gone before it began).
+// (still loading, gone before it began, or a host that only serves).
 const BRIEF_SECS = 30;
 const SAVE_TRIES = 5;
 const SAVE_RETRY_MS = 60 * 1000;
 // Reports from one connection: this many at once, then one a second.
 const RATE_BURST = 20;
 const RATE_MS = 1000;
-// The page's list of the last matches (status).
-const RECENT = 6;
 
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAP_RE = /^[A-Za-z0-9_.-]{1,32}$/;
@@ -254,6 +253,7 @@ export function cleanReport(b64) {
         title: typeof r.title === "string" ? cleanText(r.title, 48) : "",
         pk: typeof r.pk === "string" && KEY_RE.test(r.pk) ? r.pk : "",
         anon: r.anon === 1,
+        idle: r.idle === 1,
         build: typeof r.build === "string" && BUILD_RE.test(r.build) ? r.build : "",
         end: ENDS.includes(r.end) ? r.end : "",
         rules: null, ev: [], sb: null, teams: null,
@@ -302,7 +302,7 @@ export async function hashKey(key) {
 }
 
 function newPlayer(seat, key, now) {
-    return { seat, key, name: "", pk: "", anon: false, build: "", reports: 0, lv: 0, lastN: 0, t: 0, addr: -1,
+    return { seat, key, name: "", pk: "", anon: false, idle: false, build: "", reports: 0, lv: 0, lastN: 0, t: 0, addr: -1,
              joined: now, seen: now, left: 0 };
 }
 
@@ -343,7 +343,8 @@ export function buildRecord(m, why, now) {
     const slotOf = new Array(n).fill(-1);
     const kept = [];
     for (let i = 0; i < n; i++) {
-        if (stats[i].involved || (m.players[i].reports && secsOf(m.players[i]) >= BRIEF_SECS)) {
+        const p = m.players[i];
+        if (stats[i].involved || (p.reports && !p.idle && secsOf(p) >= BRIEF_SECS)) {
             slotOf[i] = kept.length;
             kept.push(i);
         }
@@ -481,15 +482,6 @@ export function winnerOf(mode, rows, teamScores) {
     return { name: winners[0].name, team: 0, score: winners[0].score };
 }
 
-// A match for the page's list of the last ones.
-function recentEntry(id, rec) {
-    return {
-        id, game: rec.game, title: rec.title, mod: rec.mod, players: rec.players, secs: rec.secs, at: rec.endedAt,
-        teams: (rec.mode & MODE_TEAMS) !== 0,
-        ...winnerOf(rec.mode, rec.rows, rec.detail.teams),
-    };
-}
-
 // Discord's markdown has no say inside a code block, which only ``` ends.
 function plain(text) {
     return text.replace(/`/g, "'");
@@ -536,7 +528,9 @@ export class Ladder {
         // Finished matches D1 doesn't have yet: {n, rec, tries, at}.
         this.unsaved = [];
         this.nextUnsaved = 1;
-        this.recent = [];
+        // The last match saved that anyone could have joined, for the page to
+        // know there's a new one (status); 0 before the first.
+        this.latest = 0;
         this.rates = new Map();   // ws -> {n, at}
         // room id -> the sockets that reported its match, and unsaved match's
         // n -> the same, to tell once it's saved. In memory only.
@@ -557,7 +551,7 @@ export class Ladder {
         if (!this.on())
             return;
         const storage = this.lobby.ctx.storage;
-        this.recent = (await storage.get("ladder:recent")) || [];
+        this.latest = (await storage.get("ladder:latest")) || 0;
         for (const [key, m] of await storage.list({ prefix: "match:" }))
             this.matches.set(Number(key.slice(6)), m);
         for (const [, u] of await storage.list({ prefix: "matchdone:" })) {
@@ -659,6 +653,7 @@ export class Ladder {
         p.reports++;
         p.t = Math.max(p.t, r.t);
         p.anon = r.anon;
+        p.idle = r.idle;
         p.pk = r.anon ? "" : hash || p.pk;
         p.build = r.build || p.build;
         if (r.title && (isHost || !m.title))
@@ -879,9 +874,9 @@ export class Ladder {
             }
             this.toTell.delete(u.n);
             // The page's lists are of matches anyone could have joined.
-            if (!rec.locked) {
-                this.recent = [recentEntry(id, rec), ...this.recent.filter(r => r.id !== id)].slice(0, RECENT);
-                storage.put("ladder:recent", this.recent);
+            if (!rec.locked && id > this.latest) {
+                this.latest = id;
+                storage.put("ladder:latest", id);
                 this.lobby.statusChanged();
             }
             // Not waited for: the next match doesn't wait on Discord.

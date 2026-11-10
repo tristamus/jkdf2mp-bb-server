@@ -292,7 +292,7 @@ await check("without the database the lobby doesn't ask for reports or keep them
     await H.report();
     assert.deepEqual(H.ws.take(), [], "a match line is never answered");
     assert.equal([...w.storage.m.keys()].filter(k => k.startsWith("match")).length, 0);
-    assert.equal("matches" in await w.status(), false);
+    assert.equal("match" in await w.status(), false);
     const res = await w.page("/matches", {}, {}).catch(e => e);
     assert.ok(!(res && res.status === 200), "no pages without the database");
 });
@@ -370,11 +370,16 @@ await check("a match three games report is saved once its level is over", async 
     w.H = H;
 });
 
-await check("the page's status lists it, with its mod and winner", async () => {
-    const s = await w.status();
-    assert.equal(s.matches.length, 1);
-    assert.deepEqual({ ...s.matches[0], at: 0 }, { id: firstId, game: "jk1", title: "Nar Shaddaa Loading Terminal", mod: "SBX 4.5",
-                                                  players: 3, secs: 199, at: 0, teams: false, name: "Maw", team: 0, score: 3 });
+await check("the page's status names it, and the page's lists have it with its mod and winner", async () => {
+    assert.equal((await w.status()).match, firstId);
+    const res = await w.page("/ladder/recent");
+    assert.equal(res.status, 200);
+    const lists = JSON.parse(res.body);
+    assert.deepEqual(lists.games.mots, []);
+    assert.deepEqual(lists.games.jk1.map(m => ({ ...m, at: 0 })), [{
+        id: firstId, title: "Nar Shaddaa Loading Terminal", mod: "SBX 4.5", pack: 0, custom: 0, players: 3, secs: 199, at: 0,
+        teams: false, name: "Maw", team: 0, score: 3 }]);
+    assert.equal(res.headers["Content-Type"], "application/json");
 });
 
 await check("Discord gets the scoreboard, with nothing a name could mention or break", async () => {
@@ -472,7 +477,9 @@ await check("the next level in the same room is another match, and so is one aft
     assert.deepEqual(rows.map(r => ({ ...r })), [{ name: "Maw", kills: 1, won: 0, place: 1 }, { name: "Jan_Ors", kills: 1, won: 0, place: 1 }]);
     assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM players")[0].n, 4, "the host is the same player in both");
     assert.equal(discord.length, 1, "a match of two isn't posted");
-    assert.deepEqual((await w2.status()).matches.map(x => [x.title, x.name]), [["Canyon Oasis", null], ["Nar Shaddaa Loading Terminal", "Maw"]]);
+    assert.equal((await w2.status()).match, m[1].id, "the status names the newer one, also after the restart");
+    assert.deepEqual(JSON.parse((await w2.page("/ladder/recent")).body).games.jk1.map(x => [x.title, x.name]),
+                     [["Canyon Oasis", null], ["Nar Shaddaa Loading Terminal", "Maw"]]);
     assert.equal([...w.storage.m.keys()].filter(k => k.startsWith("match")).length, 0, "nothing of a closed room is left in storage");
 });
 
@@ -549,6 +556,21 @@ await check("one browser in two seats doesn't count, and a game's next level isn
     assert.deepEqual([m.players, m.kills, m.confirmed, m.counted], [2, 1, 1, 0]);
     assert.equal(JSON.parse(m.detail).sharedKey, true);
     assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM players")[0].n, 1);
+    // A host that only serves is no player of its match.
+    const D = await w.host("Server");
+    const A = await w.join("Kyle_K", D), B = await w.join("Boc", D);
+    await D.report({ idle: 1 });
+    await A.report();
+    await B.report();
+    skew += 3 * MIN;
+    await killAll([D, A, B], A.id, B.id);
+    await D.report({ idle: 1, end: "left" });
+    await w.say(D.ws, "leave");
+    await w.settle();
+    const d = env.LADDER.rows("SELECT * FROM matches ORDER BY id DESC")[0];
+    assert.deepEqual([d.players, d.reporters, d.secs], [2, 2, 180]);
+    assert.deepEqual(env.LADDER.rows("SELECT name, host FROM match_players WHERE match_id = ? ORDER BY slot", d.id).map(r => [r.name, r.host]),
+                     [["Kyle_K", 0], ["Boc", 0]]);
 });
 
 await check("a short match, a match alone and one nobody died in aren't kept", async () => {
@@ -600,7 +622,8 @@ await check("a game with a password is recorded, but listed and posted nowhere",
     await w.settle();
     const m = env.LADDER.rows("SELECT * FROM matches")[0];
     assert.deepEqual([m.locked, m.counted, m.players], [1, 0, 3]);
-    assert.deepEqual((await w.status()).matches, []);
+    assert.equal((await w.status()).match, 0);
+    assert.deepEqual(JSON.parse((await w.page("/ladder/recent")).body).games, { jk1: [], mots: [] });
     assert.equal(discord.length, before);
     assert.equal((await w.page("/matches")).body.includes(`/match/${m.id}`), false);
     const page = await w.page(`/match/${m.id}`);
@@ -632,8 +655,8 @@ await check("teams: the team with the most wins, and a custom map is marked", as
     assert.deepEqual([m.game, m.mod, m.pack, m.episode, m.time_limit], ["mots", "", 1, "sabersgalore", 15]);
     const rows = env.LADDER.rows("SELECT name, team, won FROM match_players ORDER BY slot");
     assert.deepEqual(rows.map(r => [r.name, r.team, r.won]), [["Maw", 1, 1], ["Kyle_K", 1, 1], ["Boc", 3, 0]]);
-    const s = (await w.status()).matches[0];
-    assert.deepEqual([s.teams, s.name, s.team, s.score], [true, null, 1, 2]);
+    const s = JSON.parse((await w.page("/ladder/recent")).body).games.mots[0];
+    assert.deepEqual([s.teams, s.name, s.team, s.score, s.custom, s.pack], [true, null, 1, 2, 1, 1]);
     const html = (await w.page(`/match/${m.id}`)).body;
     assert.ok(html.includes("Red team wins"));
     assert.ok(html.includes("Custom map (sabersgalore, duel.jkl)"));
@@ -743,6 +766,8 @@ await check("a database with no tables yet shows an empty list, and one that's a
     const down = await w.page("/matches");
     assert.equal(down.status, 503);
     assert.equal(down.headers["Cache-Control"], "no-store");
+    env.LADDER.fail = 5;
+    assert.equal((await w.page("/ladder/recent")).status, 503);
     // Other paths aren't the record's.
     env.LADDER.fail = 0;
     env.ASSETS = { fetch: async () => new Response("asset", { status: 200 }) };

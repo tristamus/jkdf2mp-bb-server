@@ -293,12 +293,15 @@ joined by hand (below).
 | --- | --- |
 | `/match/<id>` | A match: scoreboard, who killed whom, mod and map, and how many games reported it |
 | `/matches` | The matches, newest first; `?game=jk` or `mots` for one game's |
+| `/ladder/recent` | The latest matches of each game, as JSON, for the landing page's lists |
 | `/ladder/key` | `POST`: the page's player's key |
 
 The pages are made for each request, in the landing page's two looks, and ask search engines not to
 keep them. A match in a room with a password has its page, for its players, but is in no list, isn't
-posted to Discord and isn't `counted`. The landing page's lists of the latest matches come with the
-lobby's status (`matches`). Games that reported a match hear `matched <id>` when it's saved.
+posted to Discord and isn't `counted`. The lobby's status says which match is the latest (`match`,
+which is there only when the lobby keeps a record), so the landing page shows its lists only then and
+asks for them again only when that number changes. Games that reported a match hear `matched <id>`
+when it's saved.
 
 To turn it on, make the database once, put its id in `wrangler.toml` (the commented block there) and
 deploy. The lobby makes the tables itself (`SCHEMA` in `src/ladder.js`).

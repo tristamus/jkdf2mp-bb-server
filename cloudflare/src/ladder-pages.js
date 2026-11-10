@@ -7,6 +7,9 @@
 //                      body, {"key": "<32 hex>"}), else a new one. Sets the
 //                      cookie again. The key is who a player is here; D1 only
 //                      ever gets its SHA-256.
+//   GET /ladder/recent the last matches of each game as JSON, for the landing
+//                      page's lists, which it gets again when the lobby's
+//                      status names a newer match
 //   GET /match/<id>    a match: its scoreboard, who killed whom, and how many
 //                      of its players' games reported it
 //   GET /matches       the matches, newest first, 30 to a page: ?game=jk or
@@ -29,6 +32,7 @@ const MAX_KEY_BODY = 256;
 const KEY_RE = /^[0-9a-f]{32}$/;
 const PAGE = 30;
 const SIDE = 8;
+const RECENT = 8;
 const MODE_TIME_LIMIT = 0x8;
 const MODE_SCORE_LIMIT = 0x10;
 const GAMES = { jk1: "Jedi Knight", mots: "Mysteries of the Sith" };
@@ -107,19 +111,20 @@ async function keyRoute(request) {
 // the LADDER binding.
 export async function ladderRoute(request, env, url) {
     const path = url.pathname;
-    if (!env.LADDER || !(path === "/ladder/key" || path === "/matches" || path.startsWith("/match/")))
+    if (!env.LADDER || !(path === "/ladder/key" || path === "/ladder/recent" || path === "/matches" || path.startsWith("/match/")))
         return null;
     if (path === "/ladder/key")
         return keyRoute(request);
     const m = /^\/match\/([1-9][0-9]{0,8})$/.exec(path);
-    if (path !== "/matches" && !m)
+    if (path.startsWith("/match/") && !m)
         return null;
     if (request.method !== "GET" && request.method !== "HEAD")
         return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
     // The page marks its viewer's own row.
     const key = m ? cookieKey(request) : "";
     const viewer = key ? await hashKey(key) : "";
-    const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer) : matchesPage(env.LADDER, url);
+    const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer)
+                     : path === "/matches" ? matchesPage(env.LADDER, url) : recentMatches(env.LADDER);
     try {
         try {
             return await show();
@@ -132,6 +137,8 @@ export async function ladderRoute(request, env, url) {
         }
     } catch (e) {
         console.log(`ladder: ${path} failed (${e && e.message || e})`);
+        if (path === "/ladder/recent")
+            return json(503, { error: "The match record can't be read right now" });
         return page(503, "Match record", "The match record",
                     `<div class="ladder-main"><p class="empty"><b>The match record can't be read right now.</b>
                      Try again in a minute.</p></div>`, { noStore: true });
@@ -250,6 +257,24 @@ function sideList(list, here) {
           <span class="label">${gameBall(m.game)}${m.mod ? esc(m.mod) + " &middot; " : ""}${count(m.players, "player")} &middot; ${length(m.secs)} &middot; ${time(m.ended_at, "ago")}</span>
           <span class="line"><span>${wonLine(m.winner)}</span><span>${m.winner.score ?? ""}</span></span>
         </div>`).join("");
+}
+
+// GET /ladder/recent: {v: 1, games: {jk1: [...], mots: [...]}}, each match
+// {id, title, mod, pack, custom, players, secs, at, teams, name, team, score}:
+// name the winner's ("" for one not recorded by name), null when a team won
+// (team, its number) or nobody did.
+export async function recentMatches(db) {
+    const ids = Object.keys(GAMES);
+    const answers = await db.batch(ids.flatMap(game => listQueries(db, game, 0, RECENT)));
+    const games = {};
+    ids.forEach((game, i) => {
+        games[game] = listed(answers[i * 2].results, answers[i * 2 + 1].results).map(m => ({
+            id: m.id, title: m.title, mod: m.mod, pack: m.pack ? 1 : 0, custom: customMap(m.episode) ? 1 : 0,
+            players: m.players, secs: m.secs, at: m.ended_at, teams: (m.mode & MODE_TEAMS) !== 0, ...m.winner,
+        }));
+    });
+    // Kept a little while by the browser: every page asks when a match ends.
+    return json(200, { v: 1, games }, { "Cache-Control": "private, max-age=10" });
 }
 
 // GET /match/<id>
@@ -462,7 +487,7 @@ export async function matchesPage(db, url) {
     const tab = (g, label) => `<a href="${link(g, 0)}"${g === game ? ` aria-current="page"` : ""}>${g ? gameBall(g) : ""}${label}</a>`;
     const rows = shown.map(m => `
             <tr>
-              <td class="name"><a href="/match/${m.id}">${esc(m.title)}</a>${customMap(m.episode) ? ` <span class="tag soft">Custom</span>` : ""}</td>
+              <td class="level"><a href="/match/${m.id}">${esc(m.title)}</a>${customMap(m.episode) ? ` <span class="tag soft">Custom</span>` : ""}</td>
               ${game ? "" : `<td class="game">${gameBall(m.game)}${GAMES[m.game] || GAMES.jk1}</td>`}
               <td class="mod">${esc(m.mod) || (m.pack ? "Remastered pack" : `<span class="soft">&ndash;</span>`)}</td>
               <td class="num">${m.players}</td>
@@ -581,7 +606,8 @@ main { padding: 12px 8px 24px; }
 .ladder-table th.num, .ladder-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ladder-table td { padding: 5px 8px; border-bottom: 1px solid var(--rule); vertical-align: baseline; }
 .ladder-table tbody tr:hover td { background-color: rgba(255, 255, 255, 0.07); }
-.ladder-table td.name { max-width: 260px; overflow-wrap: anywhere; }
+.ladder-table td.name { white-space: nowrap; }
+.ladder-table td.level { min-width: 150px; overflow-wrap: anywhere; }
 .ladder-table td.strong { font-weight: bold; }
 .ladder-table td.game, .ladder-table td.when { white-space: nowrap; color: var(--muted); }
 .ladder-table td.mod { max-width: 180px; overflow-wrap: anywhere; }
