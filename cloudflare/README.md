@@ -256,6 +256,91 @@ game's player: `double16` all, `double17` turned down, `double18` with a moment,
 300 ms back or more; and `double20` its targeted Force powers that played on them. -1 for a number
 the game didn't know.
 
+## The match record
+
+With a D1 database bound as `LADDER`, the lobby keeps a record of every match played in its rooms,
+so nobody has to post a screenshot of the scoreboard. Without the binding none of it runs: the lobby
+asks the games for nothing, and the pages below aren't served.
+
+The game has no server, and each player's game keeps its own score. So each game in a room reports
+to the lobby what it sees (`match`, a text line like the others; `src/ladder.js` has the format): the
+kills, as its own game heard them announced, and from the host its scoreboard. A match is one level
+in a room. The lobby puts the reports together, counting a kill once however many games saw it, and
+when the level ends writes the match to D1: one row for the match, one for each player, and the
+kills in order. It keeps how many games reported and how many kills two games or more saw, and
+marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
+kills were seen by two games and it had no password. Nothing ranks players yet; `counted` is for
+when something does.
+
+What that's worth: a kill two games reported was announced in the match, not made up afterwards by
+one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
+can announce what it likes, and two players can agree to feed each other kills.
+
+Each match keeps what it was played with: the game, the level's file, title and episode (one that
+isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest
+Force rank, and the host's mod, which everyone in the room runs. The mod is kept by name and by
+fingerprint (`mods.js` in the fork). The name is the mod folder's on the host's computer, so one mod
+can come under several names, and the fingerprint changes with any file in it.
+
+A player is a browser key: 32 hex digits the page gets from `POST /ladder/key`, which the lobby also
+sets as a cookie (`jkpk`, kept 400 days and set again on each visit) so it outlasts a browser
+clearing what pages keep. There are no accounts. D1 only ever gets the key's SHA-256, with the name
+the player last used. A player whose page says not to record them is in the match with no name and
+no key. A browser that clears its cookies and site data starts a new player; two records can be
+joined by hand (below).
+
+| Path | What it is |
+| --- | --- |
+| `/match/<id>` | A match: scoreboard, who killed whom, mod and map, and how many games reported it |
+| `/matches` | The matches, newest first; `?game=jk` or `mots` for one game's |
+| `/ladder/key` | `POST`: the page's player's key |
+
+The pages are made for each request, in the landing page's two looks, and ask search engines not to
+keep them. A match in a room with a password has its page, for its players, but is in no list, isn't
+posted to Discord and isn't `counted`. The landing page's lists of the latest matches come with the
+lobby's status (`matches`). Games that reported a match hear `matched <id>` when it's saved.
+
+To turn it on, make the database once, put its id in `wrangler.toml` (the commented block there) and
+deploy. The lobby makes the tables itself (`SCHEMA` in `src/ladder.js`).
+
+```
+npx wrangler d1 create jkdf2mp-ladder
+```
+
+The test address has its own (`jkdf2mp-ladder-beta`, under `[env.beta]`).
+
+To post each match to a Discord channel, make a webhook for the channel in Discord (channel
+settings, Integrations, Webhooks) and give its address to the lobby as a secret. It's posted for
+matches of three players or more (`DISCORD_MIN_PLAYERS`) that ran two minutes, with the scoreboard
+and a link to the match's page (`MATCH_LINKS`, else `SITE`). Names are players' own words, so the
+post can't mention anyone.
+
+```
+npx wrangler secret put DISCORD_WEBHOOK
+```
+
+By hand, with `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`:
+
+```
+-- Take a match, or a player's name, off the pages
+UPDATE matches SET hidden = 1 WHERE id = 123;
+UPDATE players SET hidden = 1 WHERE id = 45;
+-- One player with two records (a new browser): 46's matches count for 45 from now on
+UPDATE players SET merged_into = 45 WHERE id = 46;
+UPDATE match_players SET player_id = 45 WHERE player_id = 46;
+-- The matches of the last week by mod
+SELECT mod, COUNT(*) FROM matches WHERE ended_at > (unixepoch() - 7 * 86400) * 1000 GROUP BY mod;
+```
+
+`npx wrangler d1 export jkdf2mp-ladder --remote --output=ladder-backup.sql` saves all of it as a
+file, and D1's Time Travel can put the database back as it was at any minute of the last 30 days.
+
+What it costs: a game's reports are a few WebSocket messages a minute (one within two seconds of a
+kill, else one every 30 s), beside the thousands a minute of a match that goes through the lobby. A
+match is a handful of rows in D1, whose paid plan includes 50 million rows written a month.
+
+`node test/ladder.mjs` checks it, with Node's own SQLite standing in for D1.
+
 ## Imperial relay games
 
 `/imperial-games` (`src/imperial.js`) answers the game list of the Imperial Network Protocol relay

@@ -53,6 +53,11 @@
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
+// With a D1 database bound as LADDER, the lobby also keeps a record of every
+// match: it says match on connect, the games in a room report what happens in
+// theirs (match), and each match gets a page (src/ladder.js,
+// src/ladder-pages.js). Without the binding nothing of it runs.
+//
 // /imperial-games answers the Imperial Network Protocol relay's game list
 // (IMPERIAL_LIST), for the page to show beside this lobby's (src/imperial.js).
 // It never touches the lobby.
@@ -66,6 +71,8 @@ import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
 import { imperialGames } from "./imperial.js";
 import { engineFile } from "./engine.js";
+import { Ladder } from "./ladder.js";
+import { ladderRoute } from "./ladder-pages.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -177,6 +184,11 @@ export default {
         const to = movedTo(url, env.SITE, env.MOVED_FROM);
         if (to)
             return Response.redirect(to, movedStatus(env.MOVED_STATUS));
+        // The match record's pages and a player's key (/match/<id>,
+        // /matches, /ladder/key): null for any other path.
+        const ladder = await ladderRoute(request, env, url);
+        if (ladder)
+            return ladder;
         const res = await env.ASSETS.fetch(request);
         if (res.status !== 404)
             return res;
@@ -232,13 +244,25 @@ function utf16(b, at, n) {
 // The mod named in a host's tail: "JKMD", version 2, flags (1 a mod, 2 the
 // MotS Remastered pack), the name's length, the mod's 32-byte and the pack's
 // 16-byte fingerprints when there, then the name. As mods.js writes it.
-function modName(hex) {
+// {name, fp, pack}: the mod's name and its fingerprint as hex ("" for none),
+// and whether the game runs the pack.
+function modTail(hex) {
     const b = hexBytes(hex);
     if (b.length < 7 || b[0] !== 0x4a || b[1] !== 0x4b || b[2] !== 0x4d || b[3] !== 0x44 || b[4] !== 2)
-        return "";
-    const flags = b[5];
-    const name = flags & 1 ? ascii(b, 7 + 32 + (flags & 2 ? 16 : 0), b[6]) : "";
-    if (flags & 2)
+        return { name: "", fp: "", pack: false };
+    const mod = (b[5] & 1) !== 0, pack = (b[5] & 2) !== 0;
+    return {
+        name: mod ? ascii(b, 7 + 32 + (pack ? 16 : 0), b[6]) : "",
+        // The mod's fingerprint, for the match record.
+        fp: mod && b.length >= 7 + 32 ? toHex(b.subarray(7, 7 + 32)) : "",
+        pack,
+    };
+}
+
+// The same as the page's lists name it.
+function modName(hex) {
+    const { name, pack } = modTail(hex);
+    if (pack)
         return name ? name + ", Remastered pack" : "Remastered pack";
     return name;
 }
@@ -258,6 +282,8 @@ function readEntry(hex) {
         map: ascii(b, 120, 32),
         locked: v.getUint16(152, true) !== 0,
         mod: modName(hex.slice(ENTRY_HEX)),
+        // The highest Force rank its players may have (jkMultiEntry.maxRank).
+        maxRank: Math.max(0, Math.min(99, v.getInt32(236, true))),
     };
 }
 
@@ -427,7 +453,8 @@ function turnOn(env) {
 
 // What the lobby can do beyond the basics, for the game to know on connect.
 function lobbyMessage(env) {
-    return turnOn(env) ? "lobby links turn pw" : "lobby links pw";
+    // match: games in a room report their match (src/ladder.js).
+    return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "");
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -456,7 +483,7 @@ export class Lobby extends DurableObject {
         // room id -> {id, host, entry, peers: Map(id -> ws), seats, pw,
         // entrySeq}, where seats is Map(id -> {key, until, name, game, net})
         // for the host (1) and each peer: until, name, game and net only
-        // while the seat is held. pw is the password's verifier, {salt, mac,
+        // while the seat is held, and at, when its player sat down. pw is the password's verifier, {salt, mac,
         // legacy}, null for a room without one. entrySeq counts the host's
         // entries, so one that waited for its verifier doesn't undo a newer.
         this.rooms = new Map();
@@ -492,6 +519,7 @@ export class Lobby extends DurableObject {
         this.nextRoom = 1;
         this.lastStatus = null;   // the status the watchers have
         this.stats = this.newStats(Date.now());
+        this.ladder = new Ladder(this);
         // Pages send "ping" every 25 s so proxies keep the socket open. Cloudflare
         // answers it without waking the object; the page ignores the "pong".
         ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -575,6 +603,7 @@ export class Lobby extends DurableObject {
             this.sweepLater();
         if (this.nextExpiry())
             this.sweepLater(this.nextExpiry());
+        await this.ladder.restore();
     }
 
     newRoom(id, entry, seats, pw) {
@@ -642,11 +671,13 @@ export class Lobby extends DurableObject {
         this.unsent.delete(ws);
         this.turnAt.delete(ws);
         this.opSeq.delete(ws);
+        this.ladder.forget(ws);
     }
 
     async alarm() {
         this.alarmAt = null;
         this.sweep();
+        this.ladder.sweep();
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
@@ -894,6 +925,9 @@ export class Lobby extends DurableObject {
         } else if (op === "watch" && !args.length) {
             this.saveConn(ws, { ...c, watch: true });
             this.watch(ws);
+        } else if (op === "match" && args.length === 1) {
+            // Never answered, right or wrong (src/ladder.js).
+            return this.ladder.report(ws, c, args[0]);
         } else {
             this.send(ws, "error bad-request");
         }
@@ -944,7 +978,7 @@ export class Lobby extends DurableObject {
         this.leave(ws);
         const room = this.newRoom(this.nextRoom++, this.keepsPassword(pw) ? entry : stripEntry(entry), null, pw);
         room.host = ws;
-        room.seats.set(1, { key: newKey() });
+        room.seats.set(1, { key: newKey(), at: Date.now() });
         const put = { nextRoom: this.nextRoom, ["room:" + room.id]: room.entry,
                       ["seats:" + room.id]: Object.fromEntries(room.seats) };
         if (pw)
@@ -1111,7 +1145,7 @@ export class Lobby extends DurableObject {
             return;
         }
         room.peers.set(peerId, ws);
-        room.seats.set(peerId, { key: newKey() });
+        room.seats.set(peerId, { key: newKey(), at: Date.now() });
         this.saveSeats(room);
         this.setConn(ws, room.id, peerId);
         this.send(room.host, `peer-joined ${peerId}`);
@@ -1264,7 +1298,21 @@ export class Lobby extends DurableObject {
         }
         return "status " + base64Utf8(JSON.stringify({
             online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
+            // The last matches recorded, for the page's lists; not there
+            // without the match record.
+            ...(this.ladder.on() ? { matches: this.ladder.recent } : {}),
         }));
+    }
+
+    // What the match record keeps of a room (src/ladder.js).
+    roomInfo(room) {
+        const info = readEntry(room.entry) || { name: "", episode: "", map: "", locked: false, maxRank: 0 };
+        const host = room.host ? this.conn(room.host) : room.seats.get(1);
+        const mod = modTail(room.entry.slice(ENTRY_HEX));
+        return {
+            game: (host && host.game) || guessGame(info.episode), name: info.name, episode: info.episode,
+            locked: info.locked || !!room.pw, mod: mod.name, modFp: mod.fp, pack: mod.pack, maxRank: info.maxRank,
+        };
     }
 
     watchers() {
@@ -1438,6 +1486,7 @@ export class Lobby extends DurableObject {
     endRoom(room) {
         this.rooms.delete(room.id);
         this.pwTries.delete(room.id);
+        this.ladder.roomEnded(room);
         this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id]);
         for (const peer of room.peers.values()) {
             this.setConn(peer, 0, 0);
