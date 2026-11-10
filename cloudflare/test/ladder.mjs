@@ -636,6 +636,9 @@ await check("a game with a password is recorded, but listed and posted nowhere",
     const page = await w.page(`/match/${m.id}`);
     assert.equal(page.status, 200, "its players can still open its page");
     assert.ok(page.body.includes("password game"));
+    // As well known as any other: its kills were seen by all three games.
+    assert.ok(page.body.includes("Confirmed by 3 of 3 players"));
+    assert.equal(/standings/.test(page.body), false, "nothing ranks players yet");
     assert.deepEqual(K.ws.take().filter(l => l.startsWith("matched")), [`matched ${m.id}`]);
 });
 

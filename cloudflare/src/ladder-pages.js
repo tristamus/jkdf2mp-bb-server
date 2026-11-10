@@ -23,7 +23,7 @@
 // password has its page, but isn't in any list. Each match says its mod and
 // whether its level is a custom one.
 
-import { MODE_COG_SCORES, MODE_TEAMS, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
+import { COUNT_AGREE, MODE_COG_SCORES, MODE_TEAMS, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
 
 const KEY_COOKIE = "jkpk";
 // Chrome keeps a cookie 400 days at most, so each visit sets it again.
@@ -334,9 +334,12 @@ export async function matchPage(db, id, viewerHash) {
     if (m.locked)
         facts.push("password game");
 
-    // How well it's known: green when it meets the rule for standings.
+    // How well it's known: green when two games or more reported it, nine
+    // in ten of its kills were seen by two, and no two of its players shared
+    // a browser. (Whether it counts for standings also takes its length and
+    // no password: a short match or a private one is as well known.)
     let badge;
-    if (m.counted)
+    if (m.reporters >= 2 && m.confirmed >= COUNT_AGREE * m.kills && !detail.sharedKey)
         badge = `<span class="verified">Confirmed by ${m.reporters} of ${count(m.players, "player")}</span>`;
     else if (m.reporters < 2)
         badge = `<span class="verified one">Reported by ${m.reporters} of ${count(m.players, "player")}</span>`;
@@ -424,7 +427,7 @@ export async function matchPage(db, id, viewerHash) {
     const how = `Each player's game reports the kills it sees to the lobby. ${count(m.reporters, "game")} of ${m.players} reported this match, and ` +
                 `${m.confirmed} of its ${count(m.kills, "kill")} ${m.confirmed === 1 ? "was" : "were"} seen by two games or more.` +
                 (agree.sbRows ? ` The host's scoreboard matched for ${agree.sbSame} of ${count(agree.sbRows, "player")}.` : "") +
-                (m.counted ? "" : " It's listed, but doesn't meet the rule to count toward standings.");
+                (detail.sharedKey ? " Two of its players played from the same browser." : "");
 
     const title = `${m.title}${result ? ": " + (winner.name !== null ? (winner.name || "Anonymous") + " wins" : TEAMS[winner.team] + " team wins") : ""}`;
     const top = rows.slice(0, 8).map((r, i) => `${r.place}. ${names[i]} ${r.score ?? "-"} (${r.kills}/${r.deaths}/${r.suicides})`).join(" | ");

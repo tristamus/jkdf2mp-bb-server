@@ -101,7 +101,7 @@ const CLOSE_MS = 15 * 1000;
 const IDLE_MS = 5 * 60 * 1000;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
-const COUNT_AGREE = 0.9;
+export const COUNT_AGREE = 0.9;
 // A match's players are those in a kill, and those whose game reported being
 // in its level for this long: not one who sat in the room without playing
 // (still loading, gone before it began, or a host that only serves).
