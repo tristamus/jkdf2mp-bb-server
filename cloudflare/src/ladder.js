@@ -43,7 +43,10 @@
 //
 // when its level starts, within a couple of seconds of a kill, every 30 s
 // otherwise, and when the level ends or its player leaves. The lobby never
-// answers one, right or wrong.
+// answers one, right or wrong. A level's end that couldn't be sent (the
+// lobby out of reach just then) comes when it can: from the host before
+// anything of its next level, so it still closes its match as it ended, and
+// from another game only until its own next level begins.
 //
 // A match is one level in a room. The host's game opens it (its first report
 // with a new lv or map) and closes it: with end, by leaving, or by opening
@@ -760,6 +763,13 @@ export class Ladder {
         const p = m.players[pi];
         // Its game has gone on to another level, before the host's has.
         if (p.lv && p.lv !== r.lv)
+            return;
+        // A game's first word in a match isn't a level's end: that's the last
+        // report of the level before, which its game kept while the lobby was
+        // out of its reach (ladder.js in the fork) and sent after the host
+        // had opened this one. Only the same level played again gets this
+        // far: another map's was turned away above.
+        if (!isHost && r.end === "level" && !p.reports)
             return;
         p.lv = r.lv;
         p.reports++;

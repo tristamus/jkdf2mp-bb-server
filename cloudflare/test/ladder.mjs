@@ -742,6 +742,73 @@ await check("a game's last word is heard when it comes while the lobby is busy w
                      [["Maw", 2, 0], ["Kyle_K", 0, 2]]);
 });
 
+await check("a host's last report of a level that comes late, ahead of its next level's first, closes the match as it ended", async () => {
+    const rules = { mode: 0, sl: 0, tl: 0 };
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const J = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, J]) { g.since = Date.now(); await g.report({ rules }); }
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    await H.report({ rules, sb: [[1, 1, 1, 0, 0, 0], [2, 0, 0, 1, 0, 0]], teams: [0, 0, 0, 0, 0] });
+    skew += 30 * SEC;
+    // The lobby's socket drops for the host. A kill only it and the joiner saw, 4 s before the level ends.
+    await J.saw([[2, 1, 1]]);
+    skew += 4 * SEC;
+    const endedAt = Date.now(), t = endedAt - H.since;
+    await J.report({ end: "level" });
+    // 20 s later the host is back, in its next level already: the kept last report, then the new level's first.
+    skew += 20 * SEC;
+    await H.report({ t, rules, sb: [[1, 2, 2, 0, 0, 0], [2, 0, 0, 2, 0, 0]], teams: [0, 0, 0, 0, 0], end: "level",
+                     ev: [[++H.n, Date.now() - (endedAt - 4 * SEC), 2, 1, 0]] });
+    H.lv = 2; H.n = 0; H.since = Date.now() - 12 * SEC;
+    await H.report({ rules });
+    await w.settle();
+    const m = env.LADDER.rows("SELECT * FROM matches");
+    assert.equal(m.length, 1, "the next level's first report closed it at once");
+    assert.deepEqual([m[0].ended, m[0].secs, m[0].kills, m[0].confirmed, m[0].counted], ["level", 214, 2, 2, 1],
+                     "as it ended: its length is the level's, and the kill the host still had is the one the other game saw");
+    assert.deepEqual(env.LADDER.rows("SELECT kills, deaths FROM match_players ORDER BY slot").map(r => Object.values(r)), [[2, 0], [0, 2]]);
+    assert.equal(JSON.parse(m[0].detail).agree.sbSame, 2, "with the host's scoreboard as the level ended");
+});
+
+await check("another game's late last report isn't taken for the same level played again", async () => {
+    const rules = { mode: 0, sl: 0, tl: 0 };
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const J = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, J]) { g.since = Date.now(); await g.report({ rules }); }
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    skew += 10 * SEC;
+    // The joiner's socket is down as the level ends; the host's isn't.
+    const t = Date.now() - J.since;
+    await H.report({ rules, end: "level" });
+    skew += 5 * SEC;
+    // The host's next level, the same map again.
+    H.lv = 2; H.n = 0; H.since = Date.now();
+    await H.report({ rules });
+    // The joiner's socket is back before its own next level began: its kept last report.
+    await J.report({ t, end: "level", ev: [[++J.n, 6000, 2, 1, 1]] });
+    // Then its game is in the next level too.
+    J.lv = 2; J.n = 0; J.since = Date.now();
+    await J.report();
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    await killAll([H, J], 2, 1, 1);
+    await H.report({ rules, end: "level" });
+    await J.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches ORDER BY id");
+    assert.equal(m.length, 2);
+    assert.deepEqual([m[0].kills, m[0].confirmed], [1, 1], "the first match is as the lobby had it");
+    assert.deepEqual([m[1].kills, m[1].confirmed, m[1].reporters, m[1].counted], [2, 2, 2, 1],
+                     "the second has its own two kills, both seen by both games, and nothing of the level before");
+});
+
 await check("a weapon highlight is left out when kills of a kind nobody told could change it", async () => {
     const env = newEnv();
     const w = await new World(env).start();
