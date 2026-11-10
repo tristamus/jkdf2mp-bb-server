@@ -38,7 +38,7 @@
 // A match in a game with a password has its page, but isn't in any list. Each
 // match says its mod and whether its level is a custom one.
 
-import { COUNT_AGREE, MODE_COG_SCORES, MODE_TEAMS, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
+import { COUNT_AGREE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
 
 const KEY_COOKIE = "jkpk";
 // Chrome keeps a cookie 400 days at most, so each visit sets it again.
@@ -888,9 +888,15 @@ export async function playerPage(db, id, url, viewerHash, now) {
     // Who it is (a key's own number goes on to its record), and when they
     // played which game.
     const first = [
+        // browsers: its keys. keyless: its lines from players whose game sent
+        // no key, which hang on its stand-in row (adoptKeyless in ladder.js).
         db.prepare(`SELECT c.id, c.name, c.hidden, c.first_at,
-                           (SELECT COUNT(*) FROM players k WHERE k.id = c.id OR k.merged_into = c.id) AS browsers
-                    FROM players p JOIN players c ON c.id = COALESCE(p.merged_into, p.id) WHERE p.id = ?`).bind(id),
+                           (SELECT COUNT(*) FROM players k
+                            WHERE (k.id = c.id OR k.merged_into = c.id) AND k.key_hash != ? || c.id) AS browsers,
+                           (SELECT COUNT(*) FROM match_players mp JOIN players k ON k.id = mp.player_id
+                            WHERE k.merged_into = c.id AND k.key_hash = ? || c.id) AS keyless
+                    FROM players p JOIN players c ON c.id = COALESCE(p.merged_into, p.id) WHERE p.id = ?`)
+            .bind(NAME_KEY, NAME_KEY, id),
         db.prepare(`SELECT m.game, COUNT(*) AS n, MAX(m.ended_at) AS last_at, SUM(m.counted) AS counted,
                            SUM(m.counted AND m.ended_at >= ?) AS week, SUM(m.counted AND m.ended_at >= ?) AS month
                     FROM match_players mp JOIN matches m ON m.id = mp.match_id
@@ -1079,7 +1085,8 @@ export async function playerPage(db, id, url, viewerHash, now) {
           </table>
         </div>` : ""}
         <p class="foot">${me && !me.qualified ? `&dagger; Fewer than ${KD_MIN} kills and deaths ${PERIODS_LC[period]}: K/D is shown but takes no place in the standings. ` : ""}${HOW_COUNTED}
-          A player here is a browser, together with any new browser that later played under the same name${who.browsers > 1 ? ` (this record has matches from ${who.browsers} browsers)` : ""}.</p>
+          A player here is a browser, together with any new browser that later played under the same name${who.browsers > 1 ? ` (this record has matches from ${who.browsers} browsers)` : ""}.
+          Where a player's game didn't say which browser it was, the match counts by their name alone${who.keyless ? ` (${count(who.keyless, "match", "matches")} of this record)` : ""}.</p>
       </div>`;
     const line = me ? `${num(me.kills)} kills, ${num(me.deaths)} deaths, ${count(me.matches, "match", "matches")}, ${span(me.secs)} played ${PERIODS_LC[period]}.` : "";
     return page(200, `${who.name} - ${GAMES[game]} - jkdf2mp`, `${GAMES_LONG[game]} - ${who.name}`, main, {

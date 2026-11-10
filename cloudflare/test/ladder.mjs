@@ -261,15 +261,19 @@ async function hostLeaves(w, H, others = [], more = {}) {
 }
 
 // A whole match in a room of its own, which everyone leaves afterwards:
-// players are [name, browser key or null], the host first; kills are [victim's
-// seat, killer's seat (0 for nobody), kind]. Returns the match's number, 0 for
-// one that wasn't kept.
+// players are [name, browser key or null, "silent" for one whose game reports
+// nothing], the host first; kills are [victim's seat, killer's seat (0 for
+// nobody), kind]. Returns the match's number, 0 for one that wasn't kept.
 async function playMatch(w, players, kills, opts = {}) {
     const rules = { mode: opts.mode || 0, sl: 0, tl: 0 };
     const H = await w.host(players[0][0], { ...opts, pk: players[0][1] });
-    const all = [H];
-    for (const [name, pk] of players.slice(1))
-        all.push(await w.join(name, H, { pk, game: opts.game, password: opts.password }));
+    const everyone = [H], all = [H];
+    for (const [name, pk, how] of players.slice(1)) {
+        const g = await w.join(name, H, { pk, game: opts.game, password: opts.password });
+        everyone.push(g);
+        if (how !== "silent")
+            all.push(g);
+    }
     for (const g of all) {
         g.since = Date.now();
         await g.report({ rules });
@@ -290,7 +294,7 @@ async function playMatch(w, players, kills, opts = {}) {
         await g.report({ end: "level" });
     skew += 16 * SEC;
     await w.alarm();
-    for (const g of all.reverse())
+    for (const g of everyone.reverse())
         await w.say(g.ws, "leave");
     await w.settle();
     return newest() > before ? newest() : 0;
@@ -742,6 +746,73 @@ await check("a game's last word is heard when it comes while the lobby is busy w
                      [["Maw", 2, 0], ["Kyle_K", 0, 2]]);
 });
 
+await check("a host's last report of a level that comes late, ahead of its next level's first, closes the match as it ended", async () => {
+    const rules = { mode: 0, sl: 0, tl: 0 };
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const J = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, J]) { g.since = Date.now(); await g.report({ rules }); }
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    await H.report({ rules, sb: [[1, 1, 1, 0, 0, 0], [2, 0, 0, 1, 0, 0]], teams: [0, 0, 0, 0, 0] });
+    skew += 30 * SEC;
+    // The lobby's socket drops for the host. A kill only it and the joiner saw, 4 s before the level ends.
+    await J.saw([[2, 1, 1]]);
+    skew += 4 * SEC;
+    const endedAt = Date.now(), t = endedAt - H.since;
+    await J.report({ end: "level" });
+    // 20 s later the host is back, in its next level already: the kept last report, then the new level's first.
+    skew += 20 * SEC;
+    await H.report({ t, rules, sb: [[1, 2, 2, 0, 0, 0], [2, 0, 0, 2, 0, 0]], teams: [0, 0, 0, 0, 0], end: "level",
+                     ev: [[++H.n, Date.now() - (endedAt - 4 * SEC), 2, 1, 0]] });
+    H.lv = 2; H.n = 0; H.since = Date.now() - 12 * SEC;
+    await H.report({ rules });
+    await w.settle();
+    const m = env.LADDER.rows("SELECT * FROM matches");
+    assert.equal(m.length, 1, "the next level's first report closed it at once");
+    assert.deepEqual([m[0].ended, m[0].secs, m[0].kills, m[0].confirmed, m[0].counted], ["level", 214, 2, 2, 1],
+                     "as it ended: its length is the level's, and the kill the host still had is the one the other game saw");
+    assert.deepEqual(env.LADDER.rows("SELECT kills, deaths FROM match_players ORDER BY slot").map(r => Object.values(r)), [[2, 0], [0, 2]]);
+    assert.equal(JSON.parse(m[0].detail).agree.sbSame, 2, "with the host's scoreboard as the level ended");
+});
+
+await check("another game's late last report isn't taken for the same level played again", async () => {
+    const rules = { mode: 0, sl: 0, tl: 0 };
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const J = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, J]) { g.since = Date.now(); await g.report({ rules }); }
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    skew += 10 * SEC;
+    // The joiner's socket is down as the level ends; the host's isn't.
+    const t = Date.now() - J.since;
+    await H.report({ rules, end: "level" });
+    skew += 5 * SEC;
+    // The host's next level, the same map again.
+    H.lv = 2; H.n = 0; H.since = Date.now();
+    await H.report({ rules });
+    // The joiner's socket is back before its own next level began: its kept last report.
+    await J.report({ t, end: "level", ev: [[++J.n, 6000, 2, 1, 1]] });
+    // Then its game is in the next level too.
+    J.lv = 2; J.n = 0; J.since = Date.now();
+    await J.report();
+    skew += 3 * MIN;
+    await killAll([H, J], 2, 1, 1);
+    await killAll([H, J], 2, 1, 1);
+    await H.report({ rules, end: "level" });
+    await J.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches ORDER BY id");
+    assert.equal(m.length, 2);
+    assert.deepEqual([m[0].kills, m[0].confirmed], [1, 1], "the first match is as the lobby had it");
+    assert.deepEqual([m[1].kills, m[1].confirmed, m[1].reporters, m[1].counted], [2, 2, 2, 1],
+                     "the second has its own two kills, both seen by both games, and nothing of the level before");
+});
+
 await check("a weapon highlight is left out when kills of a kind nobody told could change it", async () => {
     const env = newEnv();
     const w = await new World(env).start();
@@ -1170,6 +1241,126 @@ await check("a browser never seen before joins the record that has its name, and
     await playMatch(w2, [["Maw", NEW(5)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
     assert.deepEqual(env2.LADDER.rows("SELECT name, merged_into FROM players ORDER BY id").map(p => [p.name, p.merged_into]),
                      [["Maw", null], ["Kyle_K", null], ["Maw", null]]);
+});
+
+await check("a player whose game sent no key counts for the one record that has their name, whichever came first", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const NEW = n => String(n).repeat(32);
+    // A name's lines: [match, the record it counts for, by "key" or by "name"].
+    const lines = (e, name) => e.LADDER.rows(
+        `SELECT mp.match_id, COALESCE(p.merged_into, p.id) AS record, p.key_hash
+         FROM match_players mp LEFT JOIN players p ON p.id = mp.player_id
+         WHERE mp.name = ? COLLATE NOCASE ORDER BY mp.match_id, mp.slot`, name)
+        .map(r => [r.match_id, r.record, !r.key_hash ? null : r.key_hash.startsWith("name:") ? "name" : "key"]);
+    // The standings: [record, name, matches], by record.
+    const board = async (world = w) => [...(await world.page("/players?period=all")).body.matchAll(/<td class="name"><a href="\/player\/(\d+)[^"]*">([^<]*)<\/a>[^]*?<\/tr>/g)]
+        .map(r => [Number(r[1]), r[2], Number(textOf(r[0]).trim().split(" ").at(-4))]).sort((a, b) => a[0] - b[0]);
+
+    // Drum's game says nothing in its first match (a tab from before the
+    // record): in it by name, and nobody's.
+    const m1 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", null, "silent"]], [[3, 1], [3, 2], [1, 3]]);
+    assert.deepEqual(lines(env, "Drum"), [[m1, null, null]]);
+    assert.deepEqual(env.LADDER.rows("SELECT counted, reporters, players FROM matches").map(r => [r.counted, r.reporters, r.players]), [[1, 2, 3]]);
+    assert.deepEqual(await board(), [[1, "Maw", 1], [2, "Kyle_K", 1]]);
+    // Then with a key, in other letters: a record, and the earlier match is its too.
+    const m2 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["drum", NEW(5)]], [[3, 1], [1, 3]]);
+    assert.deepEqual(lines(env, "Drum"), [[m1, 3, "name"], [m2, 3, "key"]]);
+    assert.deepEqual(env.LADDER.rows("SELECT id, key_hash, name, merged_into FROM players WHERE id > 2 ORDER BY id")
+        .map(p => [p.id, p.key_hash.length, p.name, p.merged_into]), [[3, 64, "drum", null], [4, 6, "Drum", 3]]);
+    assert.ok(logged.some(l => l.includes(`match ${m1}: a player with no key joins record 3 by their name`)));
+    assert.deepEqual(await board(), [[1, "Maw", 2], [2, "Kyle_K", 2], [3, "drum", 2]]);
+    // First seen when the first of its matches was played.
+    assert.equal(env.LADDER.rows("SELECT first_at FROM players WHERE id = 3")[0].first_at,
+                 env.LADDER.rows("SELECT ended_at FROM matches WHERE id = ?", m1)[0].ended_at);
+    // The match's name leads to the record, the stand-in's own number too, and
+    // the others met one Drum, not two.
+    assert.ok((await w.page(`/match/${m1}`)).body.includes(`<a href="/player/3?game=jk">Drum</a>`));
+    const moved = await w.page("/player/4?period=all");
+    assert.deepEqual([moved.status, moved.headers.Location], [302, "/player/3?period=all"]);
+    const drum = textOf((await w.page("/player/3?period=all")).body);
+    assert.ok(drum.includes("Matches 2") && drum.includes("the match counts by their name alone (1 match of this record)"), drum.slice(-500));
+    assert.equal(drum.includes("browsers)"), false, "the stand-in is no browser");
+    const maw = (await w.page("/player/1?period=all")).body;
+    assert.equal((maw.match(/<td><a href="\/player\/3\?game=jk">drum<\/a><\/td>/g) || []).length, 1);
+    assert.equal(/<td>Drum<\/td>/i.test(maw), false);
+    assert.ok(textOf(maw).includes("the match counts by their name alone."));
+
+    // Later without a key again, this time from a game that reports: the record's at once.
+    const m3 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", null]], [[3, 1]]);
+    assert.deepEqual(lines(env, "Drum").slice(2), [[m3, 3, "name"]]);
+    assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM players")[0].n, 4, "one stand-in for a record");
+    assert.deepEqual((await board())[2], [3, "drum", 3]);
+
+    // Not when the record's player is in the match with their key: that's somebody else.
+    const m4 = await playMatch(w, [["Maw", KEYS.maw], ["Drum", NEW(5)], ["Drum", null, "silent"]], [[3, 1], [2, 1]]);
+    assert.deepEqual(lines(env, "Drum").slice(3), [[m4, 3, "key"], [m4, null, null]]);
+    // Not when two in the match have the name and neither a key: which of them would it be.
+    const mTwo = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", null, "silent"], ["drum", null, "silent"]],
+                                 [[3, 1], [4, 2]]);
+    assert.deepEqual(lines(env, "Drum").slice(5), [[mTwo, null, null], [mTwo, null, null]]);
+    // Not by a name anyone might have, though one record has it.
+    await playMatch(w, [["Maw", KEYS.maw], ["Player", NEW(6)]], [[2, 1], [2, 1]]);
+    const m6 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Player", null, "silent"]], [[3, 1], [3, 2]]);
+    assert.deepEqual(lines(env, "Player").at(-1), [m6, null, null]);
+    // Not a name two records have.
+    await playMatch(w, [["Twin", NEW(7)], ["Twin", NEW(8)], ["Kyle_K", KEYS.kyle]], [[3, 1], [3, 2]]);
+    const m8 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Twin", null, "silent"]], [[3, 1], [3, 2]]);
+    assert.deepEqual(lines(env, "Twin").at(-1), [m8, null, null]);
+    // Not when the record was in that match under the name it had then: Kyle
+    // takes the name of someone who played beside him.
+    const m9 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Ghost", null, "silent"]], [[3, 1], [3, 2]]);
+    await playMatch(w, [["Maw", KEYS.maw], ["Ghost", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.equal(env.LADDER.rows("SELECT name FROM players WHERE id = 2")[0].name, "Ghost");
+    assert.deepEqual(lines(env, "Ghost")[0], [m9, null, null]);
+    // Not a record taken off the pages.
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE id = 1");
+    const m11 = await playMatch(w, [["Jan", KEYS.jan], ["Ghost", KEYS.kyle], ["Maw", null, "silent"]], [[3, 1], [3, 2]]);
+    assert.deepEqual(lines(env, "Maw").at(-1), [m11, null, null]);
+    env.LADDER.db.exec("UPDATE players SET hidden = 0 WHERE id = 1");
+    // ... which the next match under that name puts right.
+    await playMatch(w, [["Maw", KEYS.maw], ["Jan", KEYS.jan]], [[2, 1], [2, 1]]);
+    assert.deepEqual(lines(env, "Maw").filter(l => l[0] === m11), [[m11, 1, "name"]]);
+
+    // By hand: the stand-in taken off its record is a player of its own, and
+    // the record gets no more such lines, whatever becomes of the stand-in.
+    env.LADDER.db.exec("UPDATE players SET merged_into = NULL WHERE key_hash = 'name:3'");
+    env.LADDER.db.exec("DELETE FROM ladder_cache");
+    assert.deepEqual((await board()).filter(r => r[0] === 3 || r[0] === 4), [[3, "Drum", 2], [4, "Drum", 2]]);
+    const m13 = await playMatch(w, [["Jan", KEYS.jan], ["Ghost", KEYS.kyle], ["Drum", null, "silent"]], [[3, 1], [3, 2]]);
+    assert.deepEqual(lines(env, "Drum").at(-1), [m13, null, null]);
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE id = 4");
+    const m14 = await playMatch(w, [["Jan", KEYS.jan], ["Ghost", KEYS.kyle], ["Drum", null, "silent"]], [[3, 1], [3, 2]]);
+    assert.deepEqual(lines(env, "Drum").slice(-2), [[m13, null, null], [m14, null, null]]);
+
+    // A record is found by its name without reading the table.
+    assert.match(env.LADDER.rows(`EXPLAIN QUERY PLAN SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL
+                                  AND hidden = 0 LIMIT 2`, "x").map(r => r.detail).join(" "), /USING INDEX players_name/);
+
+    // Turned off, a player with no key is nobody's.
+    const env2 = newEnv({ LADDER_JOIN_NAMES: "0" });
+    const w2 = await new World(env2).start();
+    const old = await playMatch(w2, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", null, "silent"]], [[3, 1], [3, 2]]);
+    await playMatch(w2, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", NEW(5)]], [[3, 1], [1, 3]]);
+    assert.deepEqual(lines(env2, "Drum")[0], [old, null, null]);
+    assert.deepEqual((await board(w2))[2], [3, "Drum", 1]);
+    // A lobby that has the rule looks at what was saved before it once, with
+    // the first match it saves, whoever played in that one; the standings
+    // have it at once.
+    const env3 = { ...env2, LADDER_JOIN_NAMES: "1" };
+    const w3 = await new World(env3).start();
+    assert.equal(env3.LADDER.calls, env2.LADDER.calls, "nothing goes to D1 before a match is saved");
+    await playMatch(w3, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(lines(env3, "Drum")[0], [old, 3, "name"]);
+    assert.ok(logged.some(l => l.includes("1 earlier line(s) of players with no key joined their records")));
+    assert.deepEqual((await board(w3))[2], [3, "Drum", 2]);
+    assert.equal(w3.storage.m.get("ladder:keyless"), 1);
+    // Once: a line that turns up nobody's afterwards waits for a match under its name.
+    env3.LADDER.db.exec("UPDATE match_players SET player_id = NULL WHERE match_id = " + old + " AND name = 'Drum'");
+    await playMatch(w3, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(lines(env3, "Drum")[0], [old, null, null]);
+    await playMatch(w3, [["Maw", KEYS.maw], ["Drum", NEW(5)]], [[2, 1], [2, 1]]);
+    assert.deepEqual(lines(env3, "Drum")[0], [old, 3, "name"]);
 });
 
 await check("a database with no tables yet shows an empty list, and one that's away says so", async () => {

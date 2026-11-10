@@ -43,7 +43,10 @@
 //
 // when its level starts, within a couple of seconds of a kill, every 30 s
 // otherwise, and when the level ends or its player leaves. The lobby never
-// answers one, right or wrong.
+// answers one, right or wrong. A level's end that couldn't be sent (the
+// lobby out of reach just then) comes when it can: from the host before
+// anything of its next level, so it still closes its match as it ended, and
+// from another game only until its own next level begins.
 //
 // A match is one level in a room. The host's game opens it (its first report
 // with a new lv or map) and closes it: with end, by leaving, or by opening
@@ -98,6 +101,13 @@
 // playing under its name. What keeps that mendable is that every match row
 // names the key it came from, so one key's matches can be taken off a record
 // again by hand (README.md, "The match record").
+//
+// A player whose game sent no key (it reported nothing, or was loaded before
+// its page had one) is in a match by name only. By the same rule their line
+// counts for the one record that has that name (adoptKeyless), whichever came
+// first, the line or the record. Such lines hang on a row of their own in
+// players, the record's stand-in for them (key_hash "name:<record>"), so they
+// too can be taken off the record again.
 
 export const MAX_REPORT_B64 = 24 * 1024;
 const MAX_EVENTS = 64;
@@ -134,6 +144,11 @@ const COMMON_NAMES = ["player", "player1", "player 1", "player2", "player 2", "n
                       "anonymous", "unknown", "unknown player", "guest", "test", "tester", "host", "kyle", "kyle katarn",
                       "katarn", "mara", "mara jade", "jedi", "sith", "jerec", "yun", "luke", "vader", "admin"];
 
+// The lines without a key looked at in one go, the newest first.
+const ADOPT_MAX = 200;
+// What a record's stand-in for its lines without a key has for a key.
+export const NAME_KEY = "name:";
+
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAP_RE = /^[A-Za-z0-9_.-]{1,32}$/;
 const KEY_RE = /^[0-9a-f]{32}$/;
@@ -155,7 +170,9 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // name it last played under. A row without merged_into is a player's record;
 // one with it is another key of the record it names (one level only: never a
 // row that is itself merged), put there by saveRecord when a new key came
-// under the record's name, or by hand. The record's own row has the name the
+// under the record's name, or by hand. A row whose key_hash is "name:" and a
+// record's id is no browser's: the record's lines from players whose game sent
+// no key hang on it (adoptKeyless). The record's own row has the name the
 // player last used under any of their keys. Setting merged_into back to NULL
 // makes that key's matches a record of their own again. hidden, on a record,
 // takes its name off the pages.
@@ -172,9 +189,10 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 //
 // match_players: one row for each player in a match. slot is their number in
 // the match's detail. player_id is the players row of the key their game
-// sent, so whose match it is takes COALESCE(merged_into, id) of that row; it's
-// empty for a player whose game sent no key (an older build, or one who asked
-// not to be recorded, whose name is empty too).
+// sent, so whose match it is takes COALESCE(merged_into, id) of that row. For
+// a player whose game sent no key it's the stand-in row of the one record
+// that has their name, and empty when there's no such record (or more than
+// one), as for one who asked not to be recorded, whose name is empty too.
 //
 // ladder_cache: the standings as last added up (ladder-pages.js), so a page
 // reads a few rows instead of every match: D1 counts each row a query looks
@@ -241,6 +259,8 @@ export const SCHEMA = [
     )`,
     `CREATE INDEX IF NOT EXISTS match_players_player ON match_players (player_id, match_id)`,
     `CREATE INDEX IF NOT EXISTS players_merged ON players (merged_into)`,
+    // Finding a record by its name reads a row or two instead of the table.
+    `CREATE INDEX IF NOT EXISTS players_name ON players (name COLLATE NOCASE)`,
     `CREATE TABLE IF NOT EXISTS ladder_cache (
         key TEXT PRIMARY KEY,
         stamp TEXT NOT NULL,
@@ -477,6 +497,8 @@ export function joinableName(name) {
 // record's (whatever the letters' case), becomes another key of that record,
 // unless the name is too common to say anything, two of the match's players
 // have it, or the record's player is in the match under a key of their own.
+// The lines without a key under the names in this match go to their records
+// the same way (adoptKeyless).
 export async function saveRecord(db, rec, opts = {}) {
     const match = await db.prepare(
         `INSERT INTO matches (uid, game, map, title, episode, room_name, started_at, ended_at, secs, mode, score_limit,
@@ -553,7 +575,107 @@ export async function saveRecord(db, rec, opts = {}) {
                   r.place, r.won, r.host, r.reported, JSON.stringify(r.kinds)));
     }
     await db.batch(statements);
+    if (opts.joinNames) {
+        // The match is saved whatever comes of this: the next match under
+        // one of these names looks again.
+        try {
+            await adoptKeyless(db, rec.rows.map(r => r.name));
+        } catch (e) {
+            console.log(`ladder: match ${id}: its names' lines without a key weren't looked at (${e.message})`);
+        }
+    }
     return id;
+}
+
+// Gives the lines of players whose game sent no key to the record that has
+// their name, and returns how many. names: only lines under these names (a
+// match's, when it's saved); without, every such line. A line goes to a
+// record when the name is exactly one record's on the pages (whatever the
+// letters' case) and isn't too common to say anything, nobody else in that
+// match has it, and the record's player isn't in that match under a key. It
+// then hangs on the record's stand-in row, made here when the record has
+// none. A stand-in taken off its record by hand stays off: the record gets no
+// more such lines.
+export async function adoptKeyless(db, names = null) {
+    const lower = name => name.trim().toLowerCase();
+    let wanted = [];
+    if (names) {
+        wanted = [...new Set(names.filter(joinableName).map(lower))].slice(0, MAX_PLAYERS);
+        if (!wanted.length)
+            return 0;
+    }
+    // Reads the lines that are nobody's (match_players_player): these, and
+    // those of players who asked not to be recorded.
+    const sql = `SELECT mp.match_id, mp.slot, mp.name, m.ended_at
+                 FROM match_players mp JOIN matches m ON m.id = mp.match_id
+                 WHERE mp.player_id IS NULL AND mp.name != ''
+                       ${wanted.length ? `AND mp.name COLLATE NOCASE IN (${wanted.map(() => "?").join(", ")})` : ""}
+                 ORDER BY mp.match_id DESC LIMIT ${ADOPT_MAX}`;
+    const asked = wanted.length ? db.prepare(sql).bind(...wanted) : db.prepare(sql);
+    const lines = (await asked.all()).results.filter(l => joinableName(l.name));
+    if (!lines.length)
+        return 0;
+    // The one record each name has, if it has one.
+    const lineNames = [...new Set(lines.map(l => lower(l.name)))];
+    const found = await db.batch(lineNames.map(n => db.prepare(
+        `SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL AND hidden = 0
+         LIMIT 2`).bind(n)));
+    const recordOf = new Map();
+    lineNames.forEach((n, i) => {
+        if (found[i].results.length === 1)
+            recordOf.set(n, found[i].results[0].id);
+    });
+    const open = lines.filter(l => recordOf.has(lower(l.name)));
+    if (!open.length)
+        return 0;
+    // Who else was in those matches, and the records' stand-ins as they are.
+    const matchIds = [...new Set(open.map(l => l.match_id))];
+    const records = [...new Set(recordOf.values())];
+    const more = await db.batch([
+        ...matchIds.map(id => db.prepare(
+            `SELECT mp.name, COALESCE(p.merged_into, p.id) AS record
+             FROM match_players mp LEFT JOIN players p ON p.id = mp.player_id WHERE mp.match_id = ?`).bind(id)),
+        ...records.map(id => db.prepare("SELECT merged_into FROM players WHERE key_hash = ?").bind(NAME_KEY + id)),
+    ]);
+    const inMatch = new Map(matchIds.map((id, i) => [id, more[i].results]));
+    const takenOff = new Set(records.filter((id, i) => {
+        const standIn = more[matchIds.length + i].results[0];
+        return standIn && standIn.merged_into !== id;
+    }));
+    const statements = [];
+    let n = 0;
+    for (const l of open) {
+        const name = lower(l.name), record = recordOf.get(name), rows = inMatch.get(l.match_id);
+        if (takenOff.has(record) || rows.filter(r => lower(r.name) === name).length !== 1 ||
+            rows.some(r => r.record === record))
+            continue;
+        const standIn = NAME_KEY + record;
+        statements.push(
+            db.prepare(`INSERT INTO players (key_hash, name, first_at, last_at, merged_into) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT (key_hash) DO UPDATE SET first_at = MIN(first_at, excluded.first_at),
+                                                             last_at = MAX(last_at, excluded.last_at)`)
+                .bind(standIn, l.name, l.ended_at, l.ended_at, record),
+            db.prepare(`UPDATE match_players SET player_id = (SELECT id FROM players WHERE key_hash = ?)
+                        WHERE match_id = ? AND slot = ? AND player_id IS NULL`).bind(standIn, l.match_id, l.slot),
+            // The record was first seen when its first match was played.
+            db.prepare("UPDATE players SET first_at = MIN(first_at, ?) WHERE id = ?").bind(l.ended_at, record));
+        // One line of a name in a match, so this record gets no second there.
+        rows.push({ name: l.name, record });
+        n++;
+        console.log(`ladder: match ${l.match_id}: a player with no key joins record ${record} by their name`);
+    }
+    if (n) {
+        await db.batch(statements);
+        // The standings as kept were added up without them. A database from
+        // before they were kept has none to empty.
+        try {
+            await db.prepare("DELETE FROM ladder_cache").run();
+        } catch (e) {
+            if (!/no such table/i.test(String(e && e.message)))
+                throw e;
+        }
+    }
+    return n;
 }
 
 // Who won a match, from its players' rows ({name, team, score, won}) and its
@@ -625,6 +747,9 @@ export class Ladder {
         this.rates = new Map();   // ws -> {n, at}
         this.hashes = new Map();  // browser key -> its SHA-256
         this.ready = false;       // whether D1 has the tables, as far as this one knows
+        // Whether the lines saved before a player with no key could be a
+        // known one by their name have been looked at: once for a lobby.
+        this.caughtUp = false;
         // Reports and endings are worked through one at a time, in the order
         // they came.
         this.queue = Promise.resolve();
@@ -639,6 +764,7 @@ export class Ladder {
             return;
         const storage = this.lobby.ctx.storage;
         this.latest = (await storage.get("ladder:latest")) || 0;
+        this.caughtUp = !!(await storage.get("ladder:keyless"));
         for (const [key, m] of await storage.list({ prefix: "match:" }))
             this.matches.set(Number(key.slice(6)), m);
         for (const [, u] of await storage.list({ prefix: "matchdone:" })) {
@@ -760,6 +886,13 @@ export class Ladder {
         const p = m.players[pi];
         // Its game has gone on to another level, before the host's has.
         if (p.lv && p.lv !== r.lv)
+            return;
+        // A game's first word in a match isn't a level's end: that's the last
+        // report of the level before, which its game kept while the lobby was
+        // out of its reach (ladder.js in the fork) and sent after the host
+        // had opened this one. Only the same level played again gets this
+        // far: another map's was turned away above.
+        if (!isHost && r.end === "level" && !p.reports)
             return;
         p.lv = r.lv;
         p.reports++;
@@ -988,9 +1121,12 @@ export class Ladder {
                     await ensureSchema(this.lobby.env.LADDER);
                     this.ready = true;
                 }
-                // LADDER_JOIN_NAMES = "0" keeps every new key a record of its own.
-                id = await saveRecord(this.lobby.env.LADDER, u.rec,
-                                      { joinNames: this.lobby.env.LADDER_JOIN_NAMES !== "0" });
+                // LADDER_JOIN_NAMES = "0" keeps every new key a record of its
+                // own, and a player with no key out of every record.
+                const joinNames = this.lobby.env.LADDER_JOIN_NAMES !== "0";
+                id = await saveRecord(this.lobby.env.LADDER, u.rec, { joinNames });
+                if (joinNames && !this.caughtUp)
+                    await this.catchUp();
             } catch (e) {
                 // The tables may be gone (another database bound).
                 this.ready = false;
@@ -1030,6 +1166,21 @@ export class Ladder {
                 this.lobby.ctx.waitUntil(told);
         }
         this.wake();
+    }
+
+    // With the first match a lobby saves: the earlier lines of players with
+    // no key, whatever their names. The match is saved whatever comes of it,
+    // and a failure is tried again with the next match.
+    async catchUp() {
+        try {
+            const n = await adoptKeyless(this.lobby.env.LADDER);
+            this.caughtUp = true;
+            this.lobby.ctx.storage.put("ladder:keyless", 1);
+            if (n)
+                console.log(`ladder: ${n} earlier line(s) of players with no key joined their records`);
+        } catch (e) {
+            console.log(`ladder: the earlier lines of players with no key weren't looked at (${e.message})`);
+        }
     }
 
     // Posts a finished match to the Discord channel whose webhook address is
