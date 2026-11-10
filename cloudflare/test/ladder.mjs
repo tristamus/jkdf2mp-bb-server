@@ -407,6 +407,9 @@ await check("its page shows it, with every name escaped and nothing loaded from 
     const csp = res.headers["Content-Security-Policy"];
     const nonce = /script-src 'nonce-([^']+)'/.exec(csp)[1];
     assert.match(csp, /^default-src 'none'/);
+    // Only to the site itself, for Cloudflare Web Analytics' page view.
+    assert.match(csp, /; connect-src 'self';/);
+    assert.equal(/https?:|\*/.test(csp), false, "no other site is named");
     assert.ok(html.includes(`<script nonce="${nonce}">`) && html.includes(`<style nonce="${nonce}">`));
     assert.equal((html.match(/<script/g) || []).length, 1);
     assert.equal(/ style="/.test(html), false, "no style attributes: the policy would drop them");
