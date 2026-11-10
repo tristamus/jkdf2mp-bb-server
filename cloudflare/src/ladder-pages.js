@@ -18,10 +18,13 @@
 // The pages are whole documents in the landing page's two looks (the same
 // browser setting picks one), made here from D1 for each request. Everything a
 // player or host typed (names, room names, level titles) is escaped, and the
-// page's policy lets it load nothing and run only its own script, which shows
-// times in the viewer's zone and switches the look. A match in a game with a
-// password has its page, but isn't in any list. Each match says its mod and
-// whether its level is a custom one.
+// page's policy lets it load nothing and run only scripts that carry its
+// nonce: its own, which shows times in the viewer's zone and switches the
+// look, and the one Cloudflare Web Analytics adds on the way out when it's on
+// for the zone (Cloudflare gives it the page's nonce). A script may only talk
+// to this site, which is where that one sends its page view (/cdn-cgi/rum).
+// A match in a game with a password has its page, but isn't in any list. Each
+// match says its mod and whether its level is a custom one.
 
 import { COUNT_AGREE, MODE_COG_SCORES, MODE_TEAMS, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
 
@@ -829,7 +832,8 @@ function page(status, title, windowTitle, body, opts = {}) {
             // A match's page marks its viewer's row, so it's theirs alone.
             "Cache-Control": opts.noStore ? "no-store" : "private, max-age=30",
             "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
-                                       "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                                       "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; " +
+                                       "frame-ancestors 'none'",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "same-origin",
             "X-Robots-Tag": "noindex",

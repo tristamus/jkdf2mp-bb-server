@@ -51,15 +51,17 @@ binding = "SUMMARIES"
 dataset = "jkdf2mp_summaries"
 
 # The match record (src/ladder.js): a D1 database for the matches the games
-# in the rooms report. Off until this block is there: the lobby asks for no
-# reports and the pages aren't served. To turn it on, make the database once
-# with `npx wrangler d1 create jkdf2mp-ladder`, put the database_id it prints
-# here and take the # off these four lines. The lobby makes the tables itself.
-# README.md, The match record.
-# [[d1_databases]]
-# binding = "LADDER"
-# database_name = "jkdf2mp-ladder"
-# database_id = ""
+# in the rooms report, on since kit 94. Without this block the record is off:
+# the lobby asks for no reports and the pages aren't served, and the matches
+# already saved stay in the database. The id only says which database it is:
+# reading or writing one takes a login to the Cloudflare account it is in. A
+# copy of the lobby in another account makes its own with
+# `npx wrangler d1 create jkdf2mp-ladder` and puts the database_id that
+# prints here. The lobby makes the tables itself. README.md, The match record.
+[[d1_databases]]
+binding = "LADDER"
+database_name = "jkdf2mp-ladder"
+database_id = "d17bff22-b11d-4f1b-8414-a01b190eec2d"
 
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
@@ -118,12 +120,12 @@ class_name = "Lobby"
 binding = "SUMMARIES"
 dataset = "jkdf2mp_beta_summaries"
 
-# Its own match record, so test matches stay out of the site's. As above:
-# `npx wrangler d1 create jkdf2mp-ladder-beta`, its id here, the # off.
-# [[env.beta.d1_databases]]
-# binding = "LADDER"
-# database_name = "jkdf2mp-ladder-beta"
-# database_id = ""
+# Its own match record, so test matches stay out of the site's. As above
+# (`npx wrangler d1 create jkdf2mp-ladder-beta` made it).
+[[env.beta.d1_databases]]
+binding = "LADDER"
+database_name = "jkdf2mp-ladder-beta"
+database_id = "5e3266ed-0d04-4c94-a643-156a4b00cc18"
 
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"
