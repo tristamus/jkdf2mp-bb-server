@@ -247,6 +247,18 @@ async function killAll(games, victim, killer, kind = 2) {
         await g.saw([[victim, killer, g.id === victim ? kind : 0]]);
 }
 
+// The host leaves, which ends its room. The other games are told, and each
+// says its last, as the game does when its level ends under it; the match
+// closes a moment after the last of them.
+async function hostLeaves(w, H, others = [], more = {}) {
+    await H.report({ ...more, end: "left" });
+    await w.say(H.ws, "leave");
+    for (const g of others)
+        await g.report({ end: "left" });
+    skew += 2 * SEC;
+    await w.alarm();
+}
+
 let failed = 0;
 async function check(name, fn) {
     try {
@@ -471,9 +483,7 @@ await check("the next level in the same room is another match, and so is one aft
     await killAll([H, J], 1, J.id, 1);
     for (const g of [H, J])
         g.ws.take();
-    await H.report({ end: "left" });
-    await w2.say(H.ws, "leave");
-    await w2.settle();
+    await hostLeaves(w2, H, [J]);
     const m = env.LADDER.rows("SELECT * FROM matches ORDER BY id");
     assert.equal(m.length, 2);
     // Which games to tell is kept on their sockets, so the restart, which
@@ -562,6 +572,13 @@ await check("one browser in two seats doesn't count, and a game's next level isn
     await H.report({ end: "left" });
     await w.say(H.ws, "leave");
     await w.settle();
+    // Its end isn't this level's either, so the match waits out its time.
+    await K.report({ end: "left" });
+    skew += 2 * SEC;
+    await w.alarm();
+    assert.equal(env.LADDER.calls, 0, "still open for the joiner's last word");
+    skew += 14 * SEC;
+    await w.alarm();
     const m = env.LADDER.rows("SELECT * FROM matches")[0];
     assert.deepEqual([m.players, m.kills, m.confirmed, m.counted], [2, 1, 1, 0]);
     assert.equal(JSON.parse(m.detail).sharedKey, true);
@@ -574,13 +591,70 @@ await check("one browser in two seats doesn't count, and a game's next level isn
     await B.report();
     skew += 3 * MIN;
     await killAll([D, A, B], A.id, B.id);
-    await D.report({ idle: 1, end: "left" });
-    await w.say(D.ws, "leave");
-    await w.settle();
+    await hostLeaves(w, D, [A, B], { idle: 1 });
     const d = env.LADDER.rows("SELECT * FROM matches ORDER BY id DESC")[0];
     assert.deepEqual([d.players, d.reporters, d.secs], [2, 2, 180]);
     assert.deepEqual(env.LADDER.rows("SELECT name, host FROM match_players WHERE match_id = ? ORDER BY slot", d.id).map(r => [r.name, r.host]),
                      [["Kyle_K", 0], ["Boc", 0]]);
+});
+
+await check("a host that leaves ends its room, and the other games still get their last word", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    const B = await w.join("Boc", H, { pk: KEYS.boc });
+    for (const g of [H, K, B]) {
+        g.since = Date.now();
+        await g.report();
+    }
+    skew += 2 * MIN;
+    await killAll([H, K, B], 2, 1);
+    // Boc leaves and stays in the lobby; Jan takes the seat.
+    await B.report({ end: "left" });
+    await w.say(B.ws, "leave");
+    const J = await w.join("Jan_Ors", H, { pk: KEYS.jan });
+    assert.equal(J.id, B.id, "the seat is used again");
+    await J.report();
+    skew += 1 * MIN;
+    // The host kills Jan and quits, before the other games have reported it.
+    await H.saw([[J.id, 1, 0]], { sb: [[1, 2, 2, 0, 0, 0], [2, 0, 0, 1, 0, 0], [3, 0, 0, 1, 0, 0]], teams: [0, 0, 0, 0, 0], end: "left" });
+    await w.say(H.ws, "leave");
+    await w.settle();
+    assert.equal(env.LADDER.calls, 0, "not saved yet: two games haven't said their last");
+    assert.ok([...w.storage.m.keys()].some(k => k.startsWith("match:")), "it's kept open");
+    // The lobby sleeps in between, as it does whenever it's quiet: what
+    // comes next finds the match in storage and the marks on the sockets.
+    const w2 = await new World(env, w.storage).start(w.ctx.sockets);
+    for (const g of [H, K, B, J])
+        g.world = w2;
+    skew += 3 * SEC;
+    // Not the host's any more, nor a socket's that never reported it, nor a
+    // player's who left before: Boc's game can't speak for Jan's seat.
+    await H.report({ t: 999 * SEC });
+    const X = await w2.connect();
+    await w2.say(X, "match " + b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", title: "", t: 5000, build: "", ev: [[1, 0, 2, 1, 1]] })));
+    await B.saw([[J.id, 2, 4]]);
+    // A bystander's game saw the kill, and the victim's own knows what did it.
+    await K.saw([[J.id, 1, 0]]);
+    await J.saw([[J.id, 1, 1]], { end: "left" });
+    skew += 2 * SEC;
+    await w2.alarm();
+    assert.equal(env.LADDER.calls, 0, "one game hasn't sent its end");
+    await K.report({ end: "left" });
+    skew += 2 * SEC;
+    await w2.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches")[0];
+    assert.deepEqual([m.players, m.reporters, m.kills, m.confirmed, m.ended, m.secs], [4, 4, 2, 2, "left", 180]);
+    const detail = JSON.parse(m.detail);
+    assert.equal(detail.why, "room closed");
+    assert.deepEqual([detail.agree.sbSame, detail.agree.sbRows], [3, 3], "the host's scoreboard has its last kill, and so has the record");
+    const rows = env.LADDER.rows("SELECT name, kills, deaths, secs FROM match_players ORDER BY slot");
+    assert.deepEqual(rows.map(r => [r.name, r.kills, r.deaths, r.secs]),
+                     [["Maw", 2, 0, 180], ["Kyle_K", 0, 1, 185], ["Boc", 0, 0, 120], ["Jan_Ors", 0, 1, 63]],
+                     "each game's time is its own last line's");
+    assert.deepEqual([H, K, J].map(g => g.ws.take().filter(l => l.startsWith("matched"))), Array(3).fill([`matched ${m.id}`]));
+    assert.equal([...w.storage.m.keys()].filter(k => k.startsWith("match")).length, 0, "nothing of it is left in storage");
 });
 
 await check("a short match, a match alone and one nobody died in aren't kept", async () => {
@@ -593,23 +667,20 @@ await check("a short match, a match alone and one nobody died in aren't kept", a
     await H.report({ end: "left" });
     await w.say(H.ws, "leave");
     await w.settle();
+    assert.equal(logged.filter(l => l.includes("not kept")).length >= 1, true, "alone, there's nobody's last word to wait for");
     const H2 = await w.host("Maw");
     const K = await w.join("Kyle_K", H2);
     await H2.report();
     await K.report();
     skew += 30 * SEC;
     await killAll([H2, K], 2, 1);
-    await H2.report({ end: "left" });
-    await w.say(H2.ws, "leave");
-    await w.settle();
+    await hostLeaves(w, H2, [K]);
     const H3 = await w.host("Maw");
     const K3 = await w.join("Kyle_K", H3);
     await H3.report();
     await K3.report();
     skew += 5 * MIN;
-    await H3.report({ end: "left" });
-    await w.say(H3.ws, "leave");
-    await w.settle();
+    await hostLeaves(w, H3, [K3]);
     assert.equal(env.LADDER.calls, 0);
     assert.equal(logged.filter(l => l.includes("not kept")).length >= 3, true);
 });
@@ -627,9 +698,7 @@ await check("a game with a password is recorded, but listed and posted nowhere",
     }
     skew += 3 * MIN;
     await killAll([H, K, B], 2, 1);
-    await H.report({ end: "left" });
-    await w.say(H.ws, "leave");
-    await w.settle();
+    await hostLeaves(w, H, [K, B]);
     const m = env.LADDER.rows("SELECT * FROM matches")[0];
     assert.deepEqual([m.locked, m.counted, m.players], [1, 0, 3]);
     assert.equal((await w.status()).match, 0);
