@@ -532,10 +532,6 @@ export class Ladder {
         // know there's a new one (status); 0 before the first.
         this.latest = 0;
         this.rates = new Map();   // ws -> {n, at}
-        // room id -> the sockets that reported its match, and unsaved match's
-        // n -> the same, to tell once it's saved. In memory only.
-        this.socks = new Map();
-        this.toTell = new Map();
         this.hashes = new Map();  // browser key -> its SHA-256
         this.ready = false;       // whether D1 has the tables, as far as this one knows
         // Reports and endings are worked through one at a time, in the order
@@ -603,16 +599,18 @@ export class Ladder {
             ip: (sock && this.lobby.conn(sock).ip) || "",
         }));
         const info = this.lobby.roomInfo(room);
-        if (!this.socks.has(room.id))
-            this.socks.set(room.id, new Set());
-        this.socks.get(room.id).add(ws);
+        // Which match this socket's game reports, kept on the socket itself
+        // (m: the room and its seat's key): the lobby sleeps between
+        // messages and forgets what's only in memory, and the game is told
+        // once the match is saved, also after it has left the room.
+        const mine = seats.find(s => s.id === c.id);
+        if (mine && !(c.m && c.m[0] === room.id && c.m[1] === mine.key))
+            this.lobby.saveConn(ws, { ...c, m: [room.id, mine.key] });
         return this.later(() => this.take(room.id, c.id, seats, info, r, now));
     }
 
     forget(ws) {
         this.rates.delete(ws);
-        for (const set of [...this.socks.values(), ...this.toTell.values()])
-            set.delete(ws);
     }
 
     async take(roomId, seatId, seats, info, r, now) {
@@ -775,7 +773,6 @@ export class Ladder {
             if (m && !m.done)
                 this.finish(m, "room closed", now);
             this.matches.delete(room.id);
-            this.socks.delete(room.id);
             this.lobby.ctx.storage.delete("match:" + room.id);
         });
     }
@@ -825,8 +822,10 @@ export class Ladder {
             console.log(`ladder: room ${m.room}: ${m.map} not kept (${m.players.length} players, ${m.kills.length} kills, ${why})`);
             return;
         }
-        const u = { n: this.nextUnsaved++, rec, tries: 0, at: 0 };
-        this.toTell.set(u.n, new Set(this.socks.get(m.room) || []));
+        // tell: the games to tell once it's saved, by the mark on their
+        // sockets (report).
+        const u = { n: this.nextUnsaved++, rec, tries: 0, at: 0,
+                    tell: { room: m.room, keys: m.players.filter(p => p.reports).map(p => p.key) } };
         this.unsaved.push(u);
         storage.put("matchdone:" + u.n, u);
         this.later(() => this.saveAll());
@@ -854,7 +853,6 @@ export class Ladder {
                 console.log(`ladder: ${u.rec.map} not saved (${e.message}), ${gaveUp ? "given up" : "trying again in a minute"}`);
                 if (gaveUp) {
                     this.unsaved = this.unsaved.filter(x => x !== u);
-                    this.toTell.delete(u.n);
                     storage.delete("matchdone:" + u.n);
                 } else {
                     storage.put("matchdone:" + u.n, u);
@@ -868,11 +866,11 @@ export class Ladder {
                         `${rec.secs} s, ${rec.kills} kills (${rec.confirmed} seen by two games), ` +
                         `scoreboard ${rec.detail.agree.sbSame}/${rec.detail.agree.sbRows} the same, ` +
                         `${rec.counted ? "counts" : "listed only"}, ${rec.detail.why}`);
-            for (const ws of this.toTell.get(u.n) || []) {
-                if (this.lobby.conns.has(ws))
+            for (const ws of u.tell ? this.lobby.ctx.getWebSockets() : []) {
+                const mark = this.lobby.conn(ws).m;
+                if (mark && mark[0] === u.tell.room && u.tell.keys.includes(mark[1]))
                     this.lobby.send(ws, `matched ${id}`);
             }
-            this.toTell.delete(u.n);
             // The page's lists are of matches anyone could have joined.
             if (!rec.locked && id > this.latest) {
                 this.latest = id;

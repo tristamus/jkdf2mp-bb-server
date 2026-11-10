@@ -466,11 +466,18 @@ await check("the next level in the same room is another match, and so is one aft
     H.world = J.world = w2;
     skew += 90 * SEC;
     await killAll([H, J], 1, J.id, 1);
+    for (const g of [H, J])
+        g.ws.take();
     await H.report({ end: "left" });
     await w2.say(H.ws, "leave");
     await w2.settle();
     const m = env.LADDER.rows("SELECT * FROM matches ORDER BY id");
     assert.equal(m.length, 2);
+    // Which games to tell is kept on their sockets, so the restart, which
+    // the lobby does whenever it has slept, doesn't lose it, nor does the
+    // room ending.
+    assert.deepEqual([H, J].map(g => g.ws.take().filter(l => l.startsWith("matched"))), Array(2).fill([`matched ${m[1].id}`]),
+                     "both games are told, after the restart and with the room gone");
     assert.deepEqual([m[1].map, m[1].title, m[1].players, m[1].kills, m[1].confirmed, m[1].ended, m[1].counted, m[1].secs],
                      ["m4.jkl", "Canyon Oasis", 2, 2, 2, "left", 1, 180]);
     const rows = env.LADDER.rows("SELECT name, kills, won, place FROM match_players WHERE match_id = ? ORDER BY slot", m[1].id);
