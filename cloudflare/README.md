@@ -269,8 +269,8 @@ in a room. The lobby puts the reports together, counting a kill once however man
 when the level ends writes the match to D1: one row for the match, one for each player, and the
 kills in order. It keeps how many games reported and how many kills two games or more saw, and
 marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
-kills were seen by two games and it had no password. Nothing ranks players yet; `counted` is for
-when something does.
+kills were seen by two games, it had no password and no two of its players had the same browser key.
+The standings add up only the matches that are `counted`.
 
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
@@ -286,14 +286,20 @@ A player is a browser key: 32 hex digits the page gets from `POST /ladder/key`, 
 sets as a cookie (`jkpk`, kept 400 days and set again on each visit) so it outlasts a browser
 clearing what pages keep. There are no accounts. D1 only ever gets the key's SHA-256, with the name
 the player last used. A player whose page says not to record them is in the match with no name and
-no key. A browser that clears its cookies and site data starts a new player; two records can be
-joined by hand (below).
+no key, and so is one whose page never asked for a key (a tab opened before the record was on). They
+are in no standings and have no page of their own.
+
+A browser that clears its cookies and site data gets a new key. So that the record isn't lost with
+it, a key D1 has never had becomes another key of a record when it plays under that record's name
+(below).
 
 | Path | What it is |
 | --- | --- |
 | `/match/<id>` | A match: scoreboard, who killed whom, mod and map, and how many games reported it |
 | `/matches` | The matches, newest first; `?game=jk` or `mots` for one game's |
-| `/ladder/recent` | The latest matches of each game, as JSON, for the landing page's lists |
+| `/players` | The standings of a game: `?game=`, `?period=week`, `month` or `all` (all three without), `?sort=` a column, `?dir=asc` |
+| `/player/<id>` | A player: what they did in a game over a period, their rivals, what they play and their latest matches |
+| `/ladder/recent` | For the landing page, as JSON: the latest matches of each game, each game's top ten over each period, and who's asking |
 | `/ladder/key` | `POST`: the page's player's key |
 
 The pages are made for each request, in the landing page's two looks, and ask search engines not to
@@ -325,27 +331,123 @@ post can't mention anyone.
 npx wrangler secret put DISCORD_WEBHOOK
 ```
 
-By hand, with `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`:
+`npx wrangler d1 export jkdf2mp-ladder --remote --output=ladder-backup.sql` saves all of it as a
+file, and D1's Time Travel can put the database back as it was at any minute of the last 30 days.
+
+`node test/ladder.mjs` checks it, with Node's own SQLite standing in for D1.
+
+### Standings and player pages
+
+The standings are per game, over this week, this month and all time. A week starts on Monday and a
+month on its first day, at 3 in the morning in `America/Los_Angeles` (`ZONE` and `TURN_HOUR` in
+`src/ladder-pages.js`), so an evening's play in the Americas falls in one week. Players are ranked by
+score, which is kills less suicides, as the game's own scoreboard has it. Any column sorts the table,
+but a kill to death ratio takes its place only with 30 kills and deaths or more in the period
+(`KD_MIN`); under that it's shown with a mark and sorted after the rest.
+
+A player's page has their totals for a game and a period, who killed them most and whom they killed
+most (from their latest 50 matches of the period), how their kills came, the levels and mods they
+play, and their latest ten matches. A record taken off the pages (`hidden`) answers 404, and the id
+of a key that was joined to a record goes to that record's page.
+
+The landing page shows the top ten of each game in a section under the rooms and the top five in a
+box in its sidebar, from `/ladder/recent`. That answer also says who's asking, by the `jkpk` cookie:
+their record's id and name, their latest match and their place on each board, so the page can link
+"Your record" and "Your last match" for a player whose game left before the match was saved.
+
+Adding up the standings reads every match's rows, and D1 counts the rows a query reads. So they're
+added up once and kept in D1, in `ladder_cache`: six rows, one for each game and period, under a
+stamp of what they depend on (the latest match, when the week and the month began, and the day). A
+page reads the six rows, and the first page after a match is saved adds them up again. A player's
+page reads, besides, that player's own matches of the period.
+
+So a change made by hand doesn't show in the standings at once. It shows after the next saved
+match, the next day (UTC), or at once after:
+
+```
+DELETE FROM ladder_cache;
+```
+
+### A new browser under a known name
+
+A browser that lost its key (cleared cookies and site data, another browser, another computer) gets
+a new one. When a match is saved, a key D1 has never had becomes another key of an existing record
+(`merged_into`) if all of this holds:
+
+- the name it played under is the name exactly one record on the pages last used, whatever the
+  letters' case;
+- the name has three characters or more and isn't one many players would have (`COMMON_NAMES` in
+  `src/ladder.js`: "Player", "Kyle", "Jedi" and the like);
+- no other player in that match has the same name;
+- that record's player isn't in the match under a key of their own.
+
+From then on that browser's matches count for the record, under either key. The lobby logs each
+join (`a new browser joins record <id> by its name`).
+
+It means a name is all it takes: someone who plays one match under another player's name, from a
+browser the lobby hasn't seen, adds that match to their record, good or bad. There are no accounts,
+so nothing stops that; it's the price of a record that outlasts a cleared browser. To undo a join,
+free the key: its matches follow it off the record.
+
+```
+-- 46 was joined to 45 by its name: make it a player of its own again
+UPDATE players SET merged_into = NULL WHERE id = 46;
+DELETE FROM ladder_cache;
+```
+
+`LADDER_JOIN_NAMES = "0"` under `[vars]` turns joining off: every new key is then a new player, and
+two records are joined only by hand.
+
+### By hand
+
+With `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`. After any of the first
+three, `DELETE FROM ladder_cache;` shows it in the standings at once.
 
 ```
 -- Take a match, or a player's name, off the pages
 UPDATE matches SET hidden = 1 WHERE id = 123;
 UPDATE players SET hidden = 1 WHERE id = 45;
--- One player with two records (a new browser): 46's matches count for 45 from now on
-UPDATE players SET merged_into = 45 WHERE id = 46;
-UPDATE match_players SET player_id = 45 WHERE player_id = 46;
+-- One player with two records: 46's matches, and those of any key joined to 46, count for 45
+UPDATE players SET merged_into = 45 WHERE id = 46 OR merged_into = 46;
 -- The matches of the last week by mod
 SELECT mod, COUNT(*) FROM matches WHERE ended_at > (unixepoch() - 7 * 86400) * 1000 GROUP BY mod;
 ```
 
-`npx wrangler d1 export jkdf2mp-ladder --remote --output=ladder-backup.sql` saves all of it as a
-file, and D1's Time Travel can put the database back as it was at any minute of the last 30 days.
+### What it costs
 
-What it costs: a game's reports are a few WebSocket messages a minute (one within two seconds of a
-kill, else one every 30 s), beside the thousands a minute of a match that goes through the lobby. A
-match is a handful of rows in D1, whose paid plan includes 50 million rows written a month.
+A game's reports are a few WebSocket messages a minute (one within two seconds of a kill, else one
+every 30 s), beside the thousands a minute of a match that goes through the lobby. A match is a
+handful of rows in D1.
 
-`node test/ladder.mjs` checks it, with Node's own SQLite standing in for D1.
+D1's free plan allows 5 million rows read and 100,000 rows written a day, and 5 GB. Past either daily
+limit, queries fail until 00:00 UTC: matches aren't saved (the lobby tries five times, a minute
+apart, then drops the match) and the pages answer an error. Workers Paid includes 25 billion rows
+read and 50 million written a month. (https://developers.cloudflare.com/d1/platform/pricing/)
+
+What reads rows: a match page reads that match's rows, a list its 30 matches, the standings and the
+landing page's boards the six kept rows, and a player's page that player's matches of the period and
+the players of their latest 50. The one large read is adding the standings up again after a match:
+each game's matches, their player rows and those players' records for the all-time board, and the
+week's and the month's again for theirs. It grows with the record. By that count, not measured, a
+thousand matches of six players come to 20,000 to 40,000 rows after each match, so a hundred matches
+a day would use most of the free plan's 5 million and a lobby that busy wants Workers Paid. The
+Cloudflare dashboard shows a database's rows read (D1, the database, Metrics).
+
+The pages ask search engines not to keep them or follow their links (`noindex, nofollow`), which
+keeps well-behaved crawlers off the player pages; nothing stops one that doesn't ask.
+
+### Known limits
+
+- The games report, and nothing checks them (above). `counted` needs two games to agree, no more.
+- A kill is counted once when two games saw it within 5 seconds of each other (`WINDOW_MS`). When the
+  victim's own game isn't reporting (an old tab) and the two games that saw it are further apart
+  than that, it's counted twice.
+- A game whose connection to the lobby is down when its level ends can't send its last report. The
+  kills only it saw while the connection was down and, from the host, the final scoreboard are
+  lost; the match is saved from what the other games sent and the last scoreboard that arrived.
+- A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
+  game told could change who holds them.
+- A player with no key has no record: the match shows them, the standings don't.
 
 ## Imperial relay games
 
