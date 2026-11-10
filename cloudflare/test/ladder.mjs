@@ -22,7 +22,8 @@ export async function resolve(specifier, context, next) {
 }`));
 const { FakeStorage, FakeCtx } = await import("./cfstub.mjs");
 const { Lobby, default: worker } = await import("../src/lobby.js");
-const { cleanReport, discordMessage, hashKey, MAX_REPORT_B64 } = await import("../src/ladder.js");
+const { cleanReport, discordMessage, hashKey, joinableName, MAX_REPORT_B64 } = await import("../src/ladder.js");
+const { periodStart } = await import("../src/ladder-pages.js");
 
 const logged = [];
 const realLog = console.log;
@@ -259,6 +260,48 @@ async function hostLeaves(w, H, others = [], more = {}) {
     await w.alarm();
 }
 
+// A whole match in a room of its own, which everyone leaves afterwards:
+// players are [name, browser key or null], the host first; kills are [victim's
+// seat, killer's seat (0 for nobody), kind]. Returns the match's number, 0 for
+// one that wasn't kept.
+async function playMatch(w, players, kills, opts = {}) {
+    const rules = { mode: opts.mode || 0, sl: 0, tl: 0 };
+    const H = await w.host(players[0][0], { ...opts, pk: players[0][1] });
+    const all = [H];
+    for (const [name, pk] of players.slice(1))
+        all.push(await w.join(name, H, { pk, game: opts.game, password: opts.password }));
+    for (const g of all) {
+        g.since = Date.now();
+        await g.report({ rules });
+    }
+    skew += (opts.secs || 180) * SEC;
+    for (const [victim, killer, kind = 1] of kills)
+        await killAll(all, victim, killer, kind);
+    const newest = () => {
+        try {
+            return w.env.LADDER.rows("SELECT COALESCE(MAX(id), 0) AS id FROM matches")[0].id;
+        } catch (e) {
+            return 0;
+        }
+    };
+    const before = newest();
+    await H.report({ end: "level", rules });
+    for (const g of all.slice(1))
+        await g.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    for (const g of all.reverse())
+        await w.say(g.ws, "leave");
+    await w.settle();
+    return newest() > before ? newest() : 0;
+}
+
+// A page's text: its tags gone, its spaces single.
+function textOf(html) {
+    return html.replace(/<(script|style)[^>]*>[^]*?<\/\1>/g, "").replace(/<[^>]+>/g, " ").replace(/&middot;/g, "|")
+        .replace(/&nbsp;/g, " ").replace(/&dagger;/g, "+").replace(/&times;/g, "x").replace(/&[a-z]+;/g, " ").replace(/\s+/g, " ");
+}
+
 let failed = 0;
 async function check(name, fn) {
     try {
@@ -433,15 +476,22 @@ await check("its page shows it, with every name escaped and nothing loaded from 
     assert.ok(html.includes("Max rank 4"));
     assert.ok(html.includes("Score limit 5"));
     assert.ok(html.includes("Maw wins"));
-    assert.match(html, /<tr class="you">\s*<td class="num"><span class="place p2">2<\/span><\/td>\s*<td class="name"><b>Kyle_K<\/b> <span class="tag">You<\/span>/);
+    assert.match(html, /<tr class="you">\s*<td class="num"><span class="place p2">2<\/span><\/td>\s*<td class="name"><b><a href="\/player\/2\?game=jk">Kyle_K<\/a><\/b> <span class="tag">You<\/span>/);
     assert.match(html, /<meta property="og:title" content="Nar Shaddaa Loading Terminal: Maw wins">/);
-    assert.match(html, /<meta name="robots" content="noindex">/);
+    assert.match(html, /<meta name="robots" content="noindex, nofollow">/);
     assert.equal(res.headers["Cache-Control"], "private, max-age=30");
     // Who killed whom: Maw's row, then Kyle's.
     assert.match(html, /<th scope="row">Maw<\/th><td class="self"><\/td><td>1<\/td><td class="top">2<\/td>/);
     assert.match(html, /<th scope="row">Kyle_K<\/th><td class="top">2<\/td><td class="self">1<\/td><td>0<\/td>/);
     const other = await w.page(`/match/${firstId}`);
     assert.equal(other.body.includes('class="tag">You'), false, "nobody's row is marked without their key");
+    // Highlights name everyone who shares one: Maw and Kyle both had two in
+    // a life, and all three died twice.
+    const text = textOf(html);
+    assert.ok(text.includes("Longest streak Maw and Kyle_K, 2 in one life each"), text);
+    assert.ok(text.includes("Most saber kills Maw, 2"));
+    assert.ok(text.includes("Most deaths 3 players, 2 each"));
+    assert.ok(text.includes("Most suicides Kyle_K, 1"));
 });
 
 await check("the list has it, by game, and a missing match is a 404", async () => {
@@ -657,6 +707,69 @@ await check("a host that leaves ends its room, and the other games still get the
     assert.equal([...w.storage.m.keys()].filter(k => k.startsWith("match")).length, 0, "nothing of it is left in storage");
 });
 
+await check("a game's last word is heard when it comes while the lobby is busy with something else", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, K]) {
+        g.since = Date.now();
+        await g.report();
+    }
+    skew += 3 * MIN;
+    await killAll([H, K], 2, 1);
+    // The record is in the middle of something, as when D1 takes its time
+    // over another room's match.
+    let free;
+    w.lobby.ladder.later(() => new Promise(r => { free = r; }));
+    await new Promise(r => setImmediate(r));
+    assert.equal(typeof free, "function");
+    // The host kills once more and quits, and the other game says what it saw
+    // and that it's over, all before the lobby gets to any of it.
+    const waiting = [H.saw([[2, 1, 0]], { end: "left" })];
+    await w.say(H.ws, "leave");
+    waiting.push(K.saw([[2, 1, 1]], { end: "left" }));
+    free();
+    await Promise.all(waiting);
+    await w.settle();
+    skew += 2 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches")[0];
+    assert.ok(m, "the match is saved");
+    assert.deepEqual([m.players, m.reporters, m.kills, m.confirmed, m.ended], [2, 2, 2, 2, "left"]);
+    assert.equal(JSON.parse(m.detail).why, "room closed");
+    assert.deepEqual(env.LADDER.rows("SELECT name, kills, deaths FROM match_players ORDER BY slot").map(r => [r.name, r.kills, r.deaths]),
+                     [["Maw", 2, 0], ["Kyle_K", 0, 2]]);
+});
+
+await check("a weapon highlight is left out when kills of a kind nobody told could change it", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    // An older game: it reports nothing, so nobody says what killed its player.
+    await w.join("Boc", H);
+    for (const g of [H, K]) {
+        g.since = Date.now();
+        await g.report();
+    }
+    skew += 3 * MIN;
+    await killAll([H, K], 2, 1, 1);
+    await killAll([H, K], 3, 1);
+    skew += 10 * SEC;
+    await killAll([H, K], 3, 1);
+    await H.report({ end: "level" });
+    await K.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT id, kills FROM matches")[0];
+    assert.equal(m.kills, 3);
+    const text = textOf((await w.page(`/match/${m.id}`)).body);
+    assert.ok(text.includes("Lightsaber 1 Not known 2"), text);
+    assert.equal(text.includes("Most saber kills"), false, "Maw's one saber kill leads by less than the two unknown");
+    assert.ok(text.includes("Most deaths Boc, 2"));
+});
+
 await check("a short match, a match alone and one nobody died in aren't kept", async () => {
     const env = newEnv();
     const w = await new World(env).start();
@@ -836,6 +949,227 @@ await check("a player's key: the cookie first, then the page's own, then a new o
     assert.equal((await w.page("/ladder/key")).status, 405);
     assert.equal((await post({}, "x".repeat(600))).status, 200, "a body that isn't a key is as none");
     assert.equal(env.LADDER.calls, 0, "a key touches no database");
+});
+
+await check("a week begins on Monday at three in the morning, Pacific time, summer and winter", () => {
+    const utc = (...a) => Date.UTC(...a);
+    // Tuesday 10 November 2026, half past midnight there: Monday the 9th at 3, winter time.
+    assert.equal(periodStart("week", utc(2026, 10, 10, 8, 30)), utc(2026, 10, 9, 11));
+    // A minute before it turns, it's still the week before.
+    assert.equal(periodStart("week", utc(2026, 10, 9, 10, 59)), utc(2026, 10, 2, 11));
+    assert.equal(periodStart("week", utc(2026, 10, 9, 11, 0)), utc(2026, 10, 9, 11));
+    // Summer time, and the week the clocks go back in.
+    assert.equal(periodStart("week", utc(2026, 6, 15, 19)), utc(2026, 6, 13, 10));
+    assert.equal(periodStart("week", utc(2026, 10, 1, 20)), utc(2026, 9, 26, 10));
+    // A month: its first day at 3, and before that hour still last month.
+    assert.equal(periodStart("month", utc(2026, 10, 10, 8, 30)), utc(2026, 10, 1, 11));
+    assert.equal(periodStart("month", utc(2026, 2, 1, 10)), utc(2026, 1, 1, 11));
+    assert.equal(periodStart("month", utc(2026, 6, 15, 19)), utc(2026, 6, 1, 10));
+    assert.equal(periodStart("all", utc(2026, 10, 10)), 0);
+    assert.equal(periodStart("nonsense", utc(2026, 10, 10)), 0);
+    for (let day = 0; day < 400; day += 3) {
+        const now = utc(2026, 0, 1, 5, 17) + day * 24 * 60 * MIN;
+        const at = new Date(periodStart("week", now));
+        const there = at.toLocaleString("en-US", { timeZone: "America/Los_Angeles", weekday: "long", hour: "numeric", minute: "2-digit" });
+        assert.equal(there, "Monday 3:00 AM");
+        assert.ok(at <= now && now - at < 7 * 24 * 60 * MIN + 2 * 60 * MIN);
+    }
+});
+
+await check("the standings add up the matches that count, one game and one period at a time", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const boc = "<b>Boc`s</b>";
+    // From a Tuesday, so the first match is last week's and the others this
+    // week's, whenever this runs.
+    skew += ((2 - new Date(Date.now()).getUTCDay() + 7) % 7) * 24 * 60 * MIN;
+    // Old: Maw 3, Kyle 3 (one of them Maw), so nobody won; Boc killed twice and once by himself.
+    const first = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], [boc, KEYS.boc]],
+                                  [[2, 1], [2, 1], [2, 1, 4], [1, 2, 2], [3, 0, 5], [3, 2, 2], [3, 2, 2]]);
+    skew += 8 * 24 * 60 * MIN;
+    const second = await playMatch(w, [["Kyle_K", KEYS.kyle], ["Maw", KEYS.maw]], [[2, 1], [2, 1], [1, 2]],
+                                   { title: "Canyon Oasis", map: "m4.jkl", tail: modTail("SBX 4.5", MOD_FP, null) });
+    const sith = await playMatch(w, [["Maw", KEYS.maw], ["Jan", KEYS.jan]], [[1, 2], [1, 2]], { game: "mots" });
+    // Too short to count, and one with a password.
+    const short = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1]], { secs: 70 });
+    const locked = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]], { password: "hush" });
+    assert.ok(first && second && sith && short && locked);
+    assert.deepEqual(env.LADDER.rows("SELECT counted FROM matches ORDER BY id").map(r => r.counted), [1, 1, 1, 0, 0]);
+    const [maw, kyle, bocId, jan] = env.LADDER.rows("SELECT id FROM players ORDER BY id").map(r => r.id);
+
+    // No period asked for: the shortest anyone played in.
+    const week = await w.page("/players", { Cookie: `jkpk=${KEYS.maw}` });
+    assert.equal(week.status, 200);
+    const rowsOf = html => [...html.matchAll(/<tr(?: class="you")?>\s*<td class="num">[^]*?<\/tr>/g)].map(r => textOf(r[0]).trim());
+    assert.deepEqual(rowsOf(week.body), ["1 Kyle_K 2 2 1 0 2.00 + 1 1 3 min", "2 Maw You 1 1 2 0 0.50 + 1 0 3 min"]);
+    assert.ok(textOf(week.body).includes("This Week | 2 players | 1 match | 3 kills"));
+    assert.match(week.body, /<a href="\/players\?period=week" aria-current="page">This Week<\/a>/);
+    assert.match(week.body, new RegExp(`<tr class="you">\\s*<td class="num"><span class="place p2">2</span></td>\\s*<td class="name"><a href="/player/${maw}\\?game=jk&amp;period=week">Maw</a>`));
+    assert.ok(week.body.includes("Fewer than 30 kills and deaths this week"));
+    // All time, with a name that isn't markup and the worst score last.
+    const all = await w.page("/players?period=all");
+    assert.deepEqual(rowsOf(all.body), ["1 Kyle_K 5 5 4 0 1.25 + 2 1 6 min", "2 Maw 4 4 3 0 1.33 + 2 0 6 min",
+                                        "3 b Boc`s /b -1 0 3 1 0.00 + 1 0 3 min"]);
+    assert.equal(all.body.includes("<b>Boc"), false);
+    assert.ok(all.body.includes("&lt;b&gt;Boc`s&lt;/b&gt;</a>"));
+    const namesOf = html => [...html.matchAll(/<td class="name"><a [^>]*>([^<]*)<\/a>/g)].map(r => r[1][0]);
+    assert.equal(all.body.includes('class="tag">You'), false);
+    // By another column, and the other way up.
+    assert.deepEqual(namesOf((await w.page("/players?period=all&sort=deaths")).body), ["K", "M", "&"]);
+    assert.deepEqual(namesOf((await w.page("/players?period=all&sort=deaths&dir=asc")).body), ["M", "&", "K"]);
+    assert.deepEqual(namesOf((await w.page("/players?period=all&sort=name&dir=asc")).body), ["&", "K", "M"]);
+    assert.deepEqual(namesOf((await w.page("/players?period=all&sort=wins")).body), ["K", "M", "&"]);
+    // Nobody has 30 kills and deaths, so by K/D nobody has a place.
+    assert.equal(((await w.page("/players?period=all&sort=kd")).body.match(/<td class="num">&ndash;<\/td>/g) || []).length, 3);
+    assert.equal((await w.page("/players?sort=nonsense&period=nonsense")).status, 200);
+    // The other game.
+    const mots = await w.page("/players?game=mots");
+    assert.deepEqual(rowsOf(mots.body), ["1 Jan 2 2 0 0 2.00 + 1 1 3 min", "2 Maw 0 0 2 0 0.00 + 1 0 3 min"]);
+    assert.ok(mots.body.includes("Mysteries of the Sith standings"));
+    assert.equal(week.headers["Cache-Control"], "private, max-age=30");
+    assert.equal(/ style="/.test(all.body), false);
+
+    // The landing page's lists: each game's leaders over each period, where
+    // the viewer stands in them, and the viewer's own latest match (the one
+    // with a password, which is in no list).
+    const lists = JSON.parse((await w.page("/ladder/recent", { Cookie: `jkpk=${KEYS.maw}` })).body);
+    assert.equal(lists.top.jk1.period, "week");
+    assert.deepEqual(lists.top.jk1.week, { of: 2, matches: 1, you: { rank: 2, score: 1 }, players: [
+        { id: kyle, name: "Kyle_K", score: 2, kills: 2, deaths: 1, matches: 1 }, { id: maw, name: "Maw", score: 1, kills: 1, deaths: 2, matches: 1 }] });
+    assert.deepEqual([lists.top.jk1.all.of, lists.top.jk1.all.matches, lists.top.jk1.all.you], [3, 2, { rank: 2, score: 4 }]);
+    assert.deepEqual(lists.top.jk1.all.players.map(p => p.name), ["Kyle_K", "Maw", boc]);
+    assert.deepEqual(lists.top.mots.week.players.map(p => p.name), ["Jan", "Maw"]);
+    assert.deepEqual(lists.you, { id: maw, name: "Maw", last: locked });
+    const nobody = JSON.parse((await w.page("/ladder/recent")).body);
+    assert.deepEqual([nobody.you, nobody.top.jk1.week.you], [null, null]);
+    assert.equal(lists.games.jk1.some(m => m.id === locked), false);
+
+    // The standings were added up once and kept: a page reads them in one
+    // round trip, whatever it sorts by.
+    assert.deepEqual(env.LADDER.rows("SELECT key FROM ladder_cache ORDER BY key").map(r => r.key),
+                     ["board:jk1:all", "board:jk1:month", "board:jk1:week", "board:mots:all", "board:mots:month", "board:mots:week"]);
+    const calls = env.LADDER.calls;
+    await w.page("/players?period=all&sort=kills");
+    await w.page("/ladder/recent", { Cookie: `jkpk=${KEYS.kyle}` });
+    assert.equal(env.LADDER.calls - calls, 2);
+
+    // A player: what they did, who they met, and their matches.
+    const page = await w.page(`/player/${kyle}?game=jk&period=all`, { Cookie: `jkpk=${KEYS.kyle}` });
+    assert.equal(page.status, 200);
+    const text = textOf(page.body);
+    assert.match(page.body, /<h2>Kyle_K <span class="tag">You<\/span><\/h2>/);
+    assert.ok(text.includes("1st of 3 all time | Jedi Knight | last played"), text.slice(0, 900));
+    assert.ok(text.includes("Score 5 Kills 5 Deaths 4 Suicides 0 K/D 1.25 + Matches 2 Wins 1 Time 6 min Best match 3 kills Best streak 3"), text.slice(0, 1200));
+    assert.ok(text.includes("+ Fewer than 30 kills and deaths all time: K/D is shown but takes no place in the standings."));
+    assert.ok(text.includes("Nemesis Maw , killed by them 4x"));
+    assert.ok(text.includes("Favorite target Maw , killed 3x"));
+    assert.ok(text.includes("First bloods 1"));
+    assert.ok(text.includes("Win rate 50%"));
+    assert.ok(text.includes("Matches hosted 1"));
+    assert.ok(text.includes("Lightsaber 2 40% Shots 3 60%"), text);
+    assert.ok(text.includes("Canyon Oasis 1 match") && text.includes("SBX 4.5 1 match") && text.includes("No mod 1 match"));
+    assert.ok(text.includes("Against Killed them Killed by them Difference Maw 3 4 -1 b Boc`s /b 2 0 +2 From 2 matches all time."));
+    assert.match(page.body, new RegExp(`<td><a href="/player/${maw}\\?game=jk">Maw</a></td><td class="num">3</td><td class="num">4</td>\\s*<td class="num down">-1</td>`));
+    // Their matches, the short one marked and the one with a password left out.
+    assert.ok(page.body.includes(`/match/${short}`) && text.includes("Not counted"));
+    assert.equal(page.body.includes(`/match/${locked}`), false);
+    assert.equal(page.body.split("<aside")[0].includes(`/match/${sith}`), false, "another game's match isn't in this game's list");
+    assert.equal(page.body.includes("<b>Boc"), false);
+    assert.equal(/ style="/.test(page.body), false);
+    assert.equal(/ on[a-z]+="/.test(page.body), false);
+    // Without a game it's the one they played last; this week Kyle has one match.
+    const now = textOf((await w.page(`/player/${kyle}`)).body);
+    assert.ok(now.includes("1st of 2 this week | Jedi Knight"), now.slice(0, 900));
+    assert.ok(textOf((await w.page(`/player/${maw}?game=mots`)).body).includes("2nd of 2 this week | Mysteries of the Sith"));
+    const none = await w.page(`/player/${jan}?game=jk`);
+    assert.ok(textOf(none.body).includes("Jan has no Jedi Knight matches that count all time."));
+    // A match's names lead to their players.
+    assert.ok((await w.page(`/match/${first}`)).body.includes(`<a href="/player/${bocId}?game=jk">&lt;b&gt;Boc\`s&lt;/b&gt;</a>`));
+    // Nobody by that number, a record taken off the pages, and other paths.
+    assert.equal((await w.page("/player/999")).status, 404);
+    env.LADDER.db.exec(`UPDATE players SET hidden = 1 WHERE id = ${bocId}`);
+    assert.equal((await w.page(`/player/${bocId}`)).status, 404);
+    assert.equal((await w.page(`/match/${first}`)).body.includes(`/player/${bocId}`), false);
+    // The standings are the kept ones until they're emptied, a match is
+    // saved or the day is over.
+    assert.equal(rowsOf((await w.page("/players?period=all")).body).length, 3);
+    env.LADDER.db.exec("DELETE FROM ladder_cache");
+    assert.equal(rowsOf((await w.page("/players?period=all")).body).length, 2);
+    env.LADDER.db.exec(`UPDATE players SET hidden = 0 WHERE id = ${bocId}`);
+    skew += 24 * 60 * MIN;
+    assert.equal(rowsOf((await w.page("/players?period=all")).body).length, 3, "added up again the next day");
+    // A new match is in them at once, and a new week starts empty.
+    await playMatch(w, [["Jan", KEYS.jan], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1], [2, 1]]);
+    assert.deepEqual(rowsOf((await w.page("/players?period=all")).body).map(r => r.split(" ").slice(0, 3).join(" ")),
+                     ["1 Kyle_K 5", "2 Maw 4", "3 Jan 3", "4 b Boc`s"]);
+    skew += 7 * 24 * 60 * MIN;
+    const later = JSON.parse((await w.page("/ladder/recent")).body);
+    assert.deepEqual([later.top.jk1.week.players, later.top.jk1.week.matches, later.top.jk1.all.of], [[], 0, 4]);
+    assert.notEqual(later.top.jk1.period, "week");
+    assert.equal((await w.page("/players", {}, { method: "POST" })).status, 405);
+    env.ASSETS = { fetch: async () => new Response("asset", { status: 200 }) };
+    assert.equal((await w.page("/player/abc")).body, "asset");
+    assert.equal((await w.page("/playersx")).body, "asset");
+});
+
+await check("a browser never seen before joins the record that has its name, and can be taken off it again", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const NEW = n => String(n).repeat(32);
+    const players = () => env.LADDER.rows("SELECT id, name, merged_into FROM players ORDER BY id").map(p => [p.id, p.name, p.merged_into]);
+    const board = async () => [...(await w.page("/players?period=all")).body.matchAll(/<td class="name"><a href="\/player\/(\d+)[^"]*">([^<]*)<\/a>[^]*?<td class="num[^"]*">(-?\d+)<\/td>\s*<td class="num[^"]*">(\d+)<\/td>/g)]
+        .map(r => [Number(r[1]), r[2], Number(r[4])]);
+    assert.deepEqual([joinableName("Maw"), joinableName(" player "), joinableName("Al"), joinableName("KYLE")], [true, false, false, false]);
+
+    const m1 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    // Maw from a browser the lobby never saw, in other letters: the same player.
+    const m2 = await playMatch(w, [["Kyle_K", KEYS.kyle], ["maw", NEW(5)]], [[1, 2], [1, 2], [1, 2]]);
+    assert.deepEqual(players(), [[1, "maw", null], [2, "Kyle_K", null], [3, "maw", 1]]);
+    assert.deepEqual(env.LADDER.rows("SELECT match_id, player_id FROM match_players WHERE name IN ('Maw', 'maw') ORDER BY match_id")
+        .map(r => [r.match_id, r.player_id]), [[m1, 1], [m2, 3]], "each row keeps the browser it came from");
+    assert.deepEqual(await board(), [[1, "maw", 5], [2, "Kyle_K", 0]]);
+    assert.ok(logged.some(l => l.includes(`match ${m2}: a new browser joins record 1 by its name`)));
+    // The new browser's player is "You" in the old browser's match, and its own number leads to the record.
+    assert.match((await w.page(`/match/${m1}`, { Cookie: `jkpk=${NEW(5)}` })).body, /<a href="\/player\/1\?game=jk">Maw<\/a><\/b> <span class="tag">You<\/span>/);
+    const moved = await w.page("/player/3?period=all");
+    assert.deepEqual([moved.status, moved.headers.Location], [302, "/player/1?period=all"]);
+    const page = textOf((await w.page("/player/1?period=all")).body);
+    assert.ok(page.includes("1st of 2 all time") && page.includes("this record has matches from 2 browsers"), page.slice(-600));
+    assert.ok(page.includes("Also played as Maw") === false, "the same name in other letters isn't another name");
+
+    // Not when the record's own browser is in the match: that's somebody else.
+    await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["maw ", NEW(6)]], [[2, 1], [3, 1]]);
+    assert.deepEqual(players().slice(3), [[4, "maw", null]]);
+    // Not two of one name in a match, which then are two records, and not a third of that name afterwards.
+    await playMatch(w, [["Twin", NEW(7)], ["Twin", NEW(8)], ["Kyle_K", KEYS.kyle]], [[3, 1], [3, 2]]);
+    await playMatch(w, [["Twin", NEW(9)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players().slice(4), [[5, "Twin", null], [6, "Twin", null], [7, "Twin", null]]);
+    // Not by a name anyone might have.
+    await playMatch(w, [["Player", NEW("a")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["Player", NEW("b")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players().slice(7), [[8, "Player", null], [9, "Player", null]]);
+    // A browser the lobby knows keeps its own record whatever it's called, and its record takes the new name.
+    await playMatch(w, [["Kyle_K", KEYS.maw], ["Jan", KEYS.jan]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players().slice(0, 3), [[1, "Kyle_K", null], [2, "Kyle_K", null], [3, "maw", 1]]);
+    assert.equal(players().length, 10);
+    // A record taken off the pages isn't joined.
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE name = 'Jan'");
+    await playMatch(w, [["Jan", NEW("c")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players().slice(10), [[11, "Jan", null]]);
+
+    // By hand: the new browser's matches become a record of their own again.
+    env.LADDER.db.exec("UPDATE players SET merged_into = NULL WHERE id = 3");
+    const split = await board();
+    assert.deepEqual(split.filter(r => r[0] === 1 || r[0] === 3), [[1, "Kyle_K", 6], [3, "maw", 3]]);
+    assert.equal((await w.page("/player/3?period=all")).status, 200);
+
+    // Turned off, every new browser is a new record.
+    const env2 = newEnv({ LADDER_JOIN_NAMES: "0" });
+    const w2 = await new World(env2).start();
+    await playMatch(w2, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w2, [["Maw", NEW(5)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(env2.LADDER.rows("SELECT name, merged_into FROM players ORDER BY id").map(p => [p.name, p.merged_into]),
+                     [["Maw", null], ["Kyle_K", null], ["Maw", null]]);
 });
 
 await check("a database with no tables yet shows an empty list, and one that's away says so", async () => {

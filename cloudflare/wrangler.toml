@@ -26,7 +26,7 @@ workers_dev = true
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/ladder/*"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day

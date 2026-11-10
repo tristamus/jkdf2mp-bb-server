@@ -57,14 +57,18 @@
 // it, or two games did, or the victim's game reports nothing at all (an older
 // build); a kill only a bystander reported while the victim's game was
 // reporting doesn't, as that's what a tab that stopped for a while sends
-// late. The match keeps how many of its kills two games agreed on.
+// late. (A known limit: when the victim's game reports nothing, two
+// bystanders that saw the kill more than WINDOW_MS apart make two of it.
+// Every build since the record began reports, so it's left as it is.) The
+// match keeps how many of its kills two games agreed on.
 //
 // A match is kept if two players or more were in it, it ran MIN_SECS or
 // longer and someone died. It counts for standings (counted) when it also ran
 // COUNT_SECS, two games or more reported, nine in ten of its kills were seen
 // by two games, it had no password, and no two of its players had the same
-// browser key (one person in two tabs). Nothing ranks yet; the numbers it's
-// worked out from are kept, so the rule can change.
+// browser key (one person in two tabs). The standings (src/ladder-pages.js)
+// add up the matches that count; the numbers it's worked out from are kept,
+// so the rule can change.
 //
 // Most matches are played with a mod, which everyone in the room runs (a
 // joiner's game is restarted into the host's, mods.js), so a match has one:
@@ -83,6 +87,17 @@
 //
 // A game in a room with a password is recorded like any other, but it's in no
 // list, isn't posted to Discord and doesn't count.
+//
+// Who a player is: their browser's key, which the lobby gives out and the
+// browser keeps in a cookie and in the page's storage. A browser that lost it
+// (its cookies and site data cleared), another browser or another computer
+// comes with a new key, and there are no accounts to say whose it is. So a
+// key never seen before that plays under the name of exactly one record is
+// taken for that record's player (saveRecord; LADDER_JOIN_NAMES = "0" turns
+// it off). A name proves nothing: anyone can add matches to a record by
+// playing under its name. What keeps that mendable is that every match row
+// names the key it came from, so one key's matches can be taken off a record
+// again by hand (README.md, "The match record").
 
 export const MAX_REPORT_B64 = 24 * 1024;
 const MAX_EVENTS = 64;
@@ -111,6 +126,13 @@ const SAVE_RETRY_MS = 60 * 1000;
 // Reports from one connection: this many at once, then one a second.
 const RATE_BURST = 20;
 const RATE_MS = 1000;
+// A new browser key isn't joined to a record by a name shorter than this, or
+// by one of these: what the game offers a new player, and names many would
+// pick.
+const JOIN_NAME_MIN = 3;
+const COMMON_NAMES = ["player", "player1", "player 1", "player2", "player 2", "new player", "noname", "no name", "unnamed",
+                      "anonymous", "unknown", "unknown player", "guest", "test", "tester", "host", "kyle", "kyle katarn",
+                      "katarn", "mara", "mara jade", "jedi", "sith", "jerec", "yun", "luke", "vader", "admin"];
 
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAP_RE = /^[A-Za-z0-9_.-]{1,32}$/;
@@ -129,11 +151,14 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // saves a match or shows a page (ensureSchema): every statement only makes
 // what isn't there yet. A column added here later needs an ALTER TABLE too.
 //
-// players: a player is a browser key, kept only as its SHA-256, with the name
-// it last played under. merged_into joins two records by hand: the matches of
-// a record with it set count for the record it names, and new matches played
-// with its key are written straight to that one. hidden takes its name off
-// the pages.
+// players: a row for each browser key, kept only as its SHA-256, with the
+// name it last played under. A row without merged_into is a player's record;
+// one with it is another key of the record it names (one level only: never a
+// row that is itself merged), put there by saveRecord when a new key came
+// under the record's name, or by hand. The record's own row has the name the
+// player last used under any of their keys. Setting merged_into back to NULL
+// makes that key's matches a record of their own again. hidden, on a record,
+// takes its name off the pages.
 //
 // matches: one row for each match. Times are ms since 1970. uid is made when
 // the match ends, so one saved twice is one row. counted says whether it
@@ -146,9 +171,16 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // pages.
 //
 // match_players: one row for each player in a match. slot is their number in
-// the match's detail. player_id is empty for a player whose game sent no key
-// (an older build, or one who asked not to be recorded, whose name is empty
-// too).
+// the match's detail. player_id is the players row of the key their game
+// sent, so whose match it is takes COALESCE(merged_into, id) of that row; it's
+// empty for a player whose game sent no key (an older build, or one who asked
+// not to be recorded, whose name is empty too).
+//
+// ladder_cache: the standings as last added up (ladder-pages.js), so a page
+// reads a few rows instead of every match: D1 counts each row a query looks
+// at, and stops answering for the day once an account has read its share.
+// Nothing in it is kept anywhere else: emptying it only makes the next page
+// add them up again.
 export const SCHEMA = [
     `CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY,
@@ -208,6 +240,12 @@ export const SCHEMA = [
         PRIMARY KEY (match_id, slot)
     )`,
     `CREATE INDEX IF NOT EXISTS match_players_player ON match_players (player_id, match_id)`,
+    `CREATE INDEX IF NOT EXISTS players_merged ON players (merged_into)`,
+    `CREATE TABLE IF NOT EXISTS ladder_cache (
+        key TEXT PRIMARY KEY,
+        stamp TEXT NOT NULL,
+        value TEXT NOT NULL
+    )`,
 ];
 
 export function ensureSchema(db) {
@@ -428,8 +466,18 @@ export function buildRecord(m, why, now) {
     };
 }
 
+// Whether a new key may be joined to a record by this name.
+export function joinableName(name) {
+    const n = name.trim().toLowerCase();
+    return Array.from(n).length >= JOIN_NAME_MIN && !COMMON_NAMES.includes(n);
+}
+
 // Writes a match and returns its id. Safe to run again for the same match.
-export async function saveRecord(db, rec) {
+// joinNames: a key D1 has never had, under a name that is exactly one
+// record's (whatever the letters' case), becomes another key of that record,
+// unless the name is too common to say anything, two of the match's players
+// have it, or the record's player is in the match under a key of their own.
+export async function saveRecord(db, rec, opts = {}) {
     const match = await db.prepare(
         `INSERT INTO matches (uid, game, map, title, episode, room_name, started_at, ended_at, secs, mode, score_limit,
                               time_limit, max_rank, players, reporters, kills, confirmed, locked, mod, mod_fp, pack,
@@ -443,20 +491,63 @@ export async function saveRecord(db, rec) {
               JSON.stringify(rec.detail))
         .first();
     const id = match.id;
+    const keyed = rec.rows.filter(r => r.pk);
+    // The keys D1 has already: each one's own row, and the record it's a key of.
+    const known = new Map();
+    if (keyed.length) {
+        const found = await db.batch(keyed.map(r => db.prepare(
+            "SELECT id, COALESCE(merged_into, id) AS record FROM players WHERE key_hash = ?").bind(r.pk)));
+        keyed.forEach((r, i) => {
+            if (found[i].results[0])
+                known.set(r.pk, found[i].results[0]);
+        });
+    }
+    // The new ones that are a known player's by their name.
+    const joins = new Map();
+    if (opts.joinNames) {
+        const lower = name => name.trim().toLowerCase();
+        const names = rec.rows.map(r => lower(r.name));
+        const fresh = keyed.filter((r, i) => !known.has(r.pk) && joinableName(r.name) &&
+                                             names.filter(n => n === lower(r.name)).length === 1 &&
+                                             keyed.findIndex(k => k.pk === r.pk) === i);
+        if (fresh.length) {
+            const found = await db.batch(fresh.map(r => db.prepare(
+                `SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL AND hidden = 0
+                 LIMIT 2`).bind(r.name.trim())));
+            const here = new Set([...known.values()].map(k => k.record));
+            fresh.forEach((r, i) => {
+                const records = found[i].results;
+                if (records.length === 1 && !here.has(records[0].id)) {
+                    joins.set(r.pk, records[0].id);
+                    console.log(`ladder: match ${id}: a new browser joins record ${records[0].id} by its name`);
+                }
+            });
+        }
+    }
     const statements = [];
-    for (const r of rec.rows) {
-        if (!r.pk)
+    const named = (record, r) => db.prepare("UPDATE players SET name = ?, last_at = ? WHERE id = ?")
+        .bind(r.name, rec.endedAt, record);
+    for (const r of keyed) {
+        const k = known.get(r.pk);
+        if (k) {
+            statements.push(named(k.id, r));
+            if (k.record !== k.id)
+                statements.push(named(k.record, r));
             continue;
+        }
+        const record = joins.get(r.pk) ?? null;
         statements.push(db.prepare(
-            `INSERT INTO players (key_hash, name, first_at, last_at) VALUES (?, ?, ?, ?)
+            `INSERT INTO players (key_hash, name, first_at, last_at, merged_into) VALUES (?, ?, ?, ?, ?)
              ON CONFLICT (key_hash) DO UPDATE SET name = excluded.name, last_at = excluded.last_at`)
-            .bind(r.pk, r.name, rec.endedAt, rec.endedAt));
+            .bind(r.pk, r.name, rec.endedAt, rec.endedAt, record));
+        if (record !== null)
+            statements.push(named(record, r));
     }
     for (const r of rec.rows) {
         statements.push(db.prepare(
             `INSERT OR REPLACE INTO match_players (match_id, slot, player_id, name, team, score, kills, deaths, suicides,
                                                    streak, secs, place, won, host, reported, kinds)
-             VALUES (?, ?, (SELECT COALESCE(merged_into, id) FROM players WHERE key_hash = ?), ?, ?, ?, ?, ?, ?, ?, ?,
+             VALUES (?, ?, (SELECT id FROM players WHERE key_hash = ?), ?, ?, ?, ?, ?, ?, ?, ?,
                      ?, ?, ?, ?, ?)`)
             .bind(id, r.slot, r.pk || null, r.name, r.team, r.score, r.kills, r.deaths, r.suicides, r.streak, r.secs,
                   r.place, r.won, r.host, r.reported, JSON.stringify(r.kinds)));
@@ -600,11 +691,17 @@ export class Ladder {
             // As the player with the mark's key, whoever sat in that seat
             // since, and only until its end: a player who left before has
             // said its last. Never the host: its end was its last word, and
-            // a host's line can open a match.
-            const pi = late.players.findIndex(p => p.key && p.key === c.m[1] && p.seat !== 1 && !p.left);
-            if (pi < 0)
-                return;
-            return this.later(() => this.take(c.m[0], late.players[pi].seat, [], { locked: false }, r, now, pi));
+            // a host's line can open a match. Looked up in its turn: the
+            // game's lines from before the room ended may still be waiting.
+            const [roomId, key] = c.m;
+            return this.later(() => {
+                const m = this.matches.get(roomId);
+                if (!m || m.done || !m.roomGone)
+                    return;
+                const pi = m.players.findIndex(p => p.key && p.key === key && p.seat !== 1 && !p.left);
+                if (pi >= 0)
+                    return this.take(roomId, m.players[pi].seat, [], { locked: false }, r, now, pi);
+            });
         }
         // The seats as they are now: by the time it's worked through, its
         // game may have left.
@@ -794,8 +891,14 @@ export class Ladder {
     // for them CLOSE_MS at most, as after the host's end of a level, and
     // closes as soon as each has said its last (take).
     roomEnded(room) {
-        if (!this.matches.has(room.id))
+        const open = this.matches.get(room.id);
+        if (!open)
             return;
+        // Marked at once, not in its turn: the other games' last lines can
+        // come while the lobby is still working through what came before
+        // (report).
+        if (!open.done)
+            open.roomGone = true;
         const now = Date.now();
         this.later(() => {
             const m = this.matches.get(room.id);
@@ -885,7 +988,9 @@ export class Ladder {
                     await ensureSchema(this.lobby.env.LADDER);
                     this.ready = true;
                 }
-                id = await saveRecord(this.lobby.env.LADDER, u.rec);
+                // LADDER_JOIN_NAMES = "0" keeps every new key a record of its own.
+                id = await saveRecord(this.lobby.env.LADDER, u.rec,
+                                      { joinNames: this.lobby.env.LADDER_JOIN_NAMES !== "0" });
             } catch (e) {
                 // The tables may be gone (another database bound).
                 this.ready = false;
