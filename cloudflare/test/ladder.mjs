@@ -1295,6 +1295,10 @@ await check("a player whose game sent no key counts for the one record that has 
     // Not when the record's player is in the match with their key: that's somebody else.
     const m4 = await playMatch(w, [["Maw", KEYS.maw], ["Drum", NEW(5)], ["Drum", null, "silent"]], [[3, 1], [2, 1]]);
     assert.deepEqual(lines(env, "Drum").slice(3), [[m4, 3, "key"], [m4, null, null]]);
+    // Not when two in the match have the name and neither a key: which of them would it be.
+    const mTwo = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Drum", null, "silent"], ["drum", null, "silent"]],
+                                 [[3, 1], [4, 2]]);
+    assert.deepEqual(lines(env, "Drum").slice(5), [[mTwo, null, null], [mTwo, null, null]]);
     // Not by a name anyone might have, though one record has it.
     await playMatch(w, [["Maw", KEYS.maw], ["Player", NEW(6)]], [[2, 1], [2, 1]]);
     const m6 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Player", null, "silent"]], [[3, 1], [3, 2]]);
