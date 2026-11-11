@@ -781,6 +781,23 @@ export class Ladder {
         this.wake();
     }
 
+    // The name the host's game gives the level a room is on, for the
+    // landing page's list (Lobby.status): its match's, from the host's
+    // first report of the level on. "" before that, while the match is of
+    // another level than map (the room's entry's), and for a level that has
+    // no name of its own, which the game calls by its file's (wsrelay_
+    // matchTitle in the fork falls back to the key it looks up: the file's
+    // name without .jkl, in capitals).
+    title(roomId, map) {
+        const m = this.matches.get(roomId);
+        if (!m || !m.title || typeof map !== "string")
+            return "";
+        const file = map.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 32).toLowerCase();
+        if (m.map !== file || m.title.toLowerCase() === file.replace(/\.jkl$/, ""))
+            return "";
+        return m.title;
+    }
+
     later(fn) {
         this.queue = this.queue.then(fn).catch(e => console.log(`ladder: ${e && e.stack || e}`));
         return this.queue;
@@ -874,6 +891,9 @@ export class Ladder {
                 teams: null,
             };
             this.matches.set(roomId, m);
+            // Its level's name, for the landing page's list (title).
+            if (m.title)
+                this.lobby.statusChanged();
         }
         if (!m || m.done || m.map !== r.map)
             return;
@@ -901,8 +921,10 @@ export class Ladder {
         p.idle = r.idle;
         p.pk = r.anon ? "" : hash || p.pk;
         p.build = r.build || p.build;
-        if (r.title && (isHost || !m.title))
+        if (r.title && (isHost || !m.title) && r.title !== m.title) {
             m.title = r.title;
+            this.lobby.statusChanged();
+        }
         if (isHost && r.rules)
             m.rules = r.rules;
         for (const e of r.ev)
@@ -1091,8 +1113,9 @@ export class Ladder {
             this.matches.delete(m.room);
             storage.delete("match:" + m.room);
         } else {
-            // What's left says it's over, for a late report from its host.
-            const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map };
+            // What's left says it's over, for a late report from its host,
+            // and what its level is called while the room stays on it.
+            const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map, title: m.title || "" };
             this.matches.set(m.room, done);
             storage.put("match:" + m.room, done);
         }
