@@ -1285,9 +1285,14 @@ export class Lobby extends DurableObject {
             const game = host.game || guessGame(info.episode);
             online += names.length;
             byGame[game].online += names.length;
+            // The level's name as the host's game shows it, once its match
+            // report has said (src/ladder.js); the page names the retail
+            // levels itself before that.
+            const title = this.ladder.title(room.id, info.map);
             games.push({
                 id: room.id, name: info.name, game,
-                map: info.map, episode: info.episode, mod: info.mod, locked: info.locked || !!room.pw,
+                map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
+                locked: info.locked || !!room.pw,
                 players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room),
             });

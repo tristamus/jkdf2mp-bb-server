@@ -1383,5 +1383,65 @@ await check("a database with no tables yet shows an empty list, and one that's a
     assert.equal((await w.page("/")).body, "asset");
 });
 
+await check("the page's status names the level a room is on, from its host's report, and follows it", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    // A page watching, as the landing page does: it hears each change.
+    const page = await w.connect();
+    await w.say(page, "watch");
+    const heard = () => page.take().filter(l => l.startsWith("status "))
+        .map(l => JSON.parse(Buffer.from(l.slice(7), "base64").toString()).games.map(g => [g.map, g.title]));
+    heard();
+    const H = await w.host("Maw", { map: "m10.jkl", title: "Canyon Oasis" });
+    assert.deepEqual(heard().pop(), [["m10.jkl", undefined]], "no name before its host's game has said");
+    H.since = Date.now();
+    await H.report();
+    await w.settle();
+    assert.deepEqual(heard(), [[["m10.jkl", "Canyon Oasis"]]], "the page is told as soon as it has said");
+    // Another game's word doesn't change what its host's said.
+    const K = await w.join("Kyle_K", H, { title: "Something else" });
+    K.since = Date.now();
+    await K.report();
+    await w.settle();
+    assert.deepEqual((await w.status()).games.map(g => g.title), ["Canyon Oasis"]);
+    heard();
+    // The next level: its entry first, then its report.
+    await w.say(H.ws, "update " + entry({ map: "M4.JKL" }));
+    assert.deepEqual(heard().pop(), [["M4.JKL", undefined]], "the level before's name isn't this one's");
+    H.lv = 2;
+    H.since = Date.now();
+    H.opts = { ...H.opts, map: "M4.JKL", title: "Bespin Mining Station" };
+    await H.report();
+    await w.settle();
+    assert.deepEqual(heard().pop(), [["M4.JKL", "Bespin Mining Station"]], "the file's name matches whatever its case");
+    // Its match ends (the host's end of the level) while the room stays on
+    // it: the name stays, and across a restart.
+    await H.report({ end: "level" });
+    await K.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    assert.equal(w.lobby.ladder.matches.get(H.room).done, true);
+    assert.deepEqual((await w.status()).games.map(g => g.title), ["Bespin Mining Station"]);
+    const w2 = await new World(env, w.storage).start(w.ctx.sockets);
+    assert.deepEqual((await w2.status()).games.map(g => g.title), ["Bespin Mining Station"], "after a restart");
+    for (const g of [K, H])
+        await w2.say(g.ws, "leave");
+    await w2.settle();
+    // A level with no name of its own: the game falls back to its file's
+    // name in capitals, which isn't one.
+    const N = await w2.host("Boc", { map: "apg_castle.jkl", title: "APG_CASTLE" });
+    N.since = Date.now();
+    await N.report();
+    await w2.settle();
+    const nameless = (await w2.status()).games.find(g => g.id === N.room);
+    assert.deepEqual([nameless.map, "title" in nameless], ["apg_castle.jkl", false]);
+    // Without the record nothing has a name: the page names the retail
+    // levels itself.
+    const w3 = await new World({ SITE: "", MOVED_FROM: "" }).start();
+    const O = await w3.host("Jan", { map: "m10.jkl", title: "Canyon Oasis" });
+    await O.report();
+    assert.equal("title" in (await w3.status()).games[0], false);
+});
+
 console.log(failed ? `\n${failed} check(s) failed` : "\nall checks passed");
 process.exit(failed ? 1 : 0);
