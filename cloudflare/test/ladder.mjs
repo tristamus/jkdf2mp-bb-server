@@ -713,6 +713,76 @@ await check("one browser in two seats doesn't count, and a game's next level isn
                      [["Kyle_K", 0], ["Boc", 0]]);
 });
 
+await check("a level closes as soon as every game has said it's over, and waits only so long for one that doesn't", async () => {
+    const rules = { mode: 0, sl: 0, tl: 0 };
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    const B = await w.join("Boc", H, { pk: KEYS.boc });
+    const all = [H, K, B];
+    for (const g of all) {
+        g.since = Date.now();
+        await g.report({ rules });
+    }
+    skew += 2 * MIN;
+    await killAll(all, 2, 1);
+    // One game's level ends a moment before the host's, and one a moment after: the match is open until the last has said so.
+    await K.report({ end: "level" });
+    skew += 1 * SEC;
+    await w.alarm();
+    await H.report({ end: "level", rules });
+    const ended = Date.now();
+    assert.ok(w.storage.alarm > ended + 10 * SEC, "the host's end alone gives the others their time");
+    skew += 2 * SEC;
+    await w.alarm();
+    assert.equal(env.LADDER.calls, 0, "one game hasn't said its last");
+    // Its last kill comes with its end, and counts.
+    await B.saw([[3, 1, 1]], { end: "level" });
+    await H.ws.take();
+    assert.ok(w.storage.alarm <= Date.now() + 1 * SEC, "now nothing more can come: it closes at the lobby's next alarm, a second on");
+    skew += 1 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches");
+    assert.equal(m.length, 1);
+    assert.deepEqual([m[0].ended, m[0].players, m[0].reporters, m[0].kills], ["level", 3, 3, 2]);
+    assert.equal(JSON.parse(m[0].detail).why, "level over");
+    assert.ok(m[0].ended_at - ended <= 4 * SEC, "seconds after the level ended, not a quarter of a minute");
+    assert.deepEqual(all.map(g => g.ws.take().filter(l => l.startsWith("matched"))), Array(3).fill([`matched ${m[0].id}`]),
+                     "and every game hears it while its score screen still shows");
+    // The next level in the room: a game goes quiet (its page closed) and never says it's over. The host's end closes the match
+    // after the time the others get, as before.
+    for (const g of all) {
+        g.lv = 2;
+        g.n = 0;
+        g.since = Date.now();
+        await g.report({ rules });
+    }
+    skew += 2 * MIN;
+    await killAll(all, 3, 2);
+    await H.report({ end: "level", rules });
+    await K.report({ end: "level" });
+    skew += 5 * SEC;
+    await w.alarm();
+    assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM matches")[0].n, 1, "still waiting for the third game");
+    skew += 11 * SEC;
+    await w.alarm();
+    assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM matches")[0].n, 2);
+    // A match only its host reports has nobody to wait for.
+    const solo = await new World(newEnv()).start();
+    const S = await solo.host("Maw", { pk: KEYS.maw });
+    const T = await solo.join("Kyle_K", S, { pk: KEYS.kyle });
+    S.since = Date.now();
+    await S.report({ rules });
+    skew += 2 * MIN;
+    await S.saw([[T.id, 1, 0]]);
+    await S.report({ end: "level", rules });
+    assert.ok(solo.storage.alarm <= Date.now() + 1 * SEC);
+    skew += 1 * SEC;
+    await solo.alarm();
+    assert.equal(solo.env.LADDER.rows("SELECT COUNT(*) AS n FROM matches")[0].n, 1);
+});
+
 await check("a host that leaves ends its room, and the other games still get their last word", async () => {
     const env = newEnv();
     const w = await new World(env).start();

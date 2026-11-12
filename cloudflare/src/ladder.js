@@ -120,7 +120,7 @@ const WINDOW_MS = 5000;
 // How far back a new report looks for the kill it's about.
 const SCAN = 256;
 // After the host's game says its level is over, how long the others have to
-// say so too.
+// say so too. The match closes as soon as the last of them has (take).
 const CLOSE_MS = 15 * 1000;
 // A match nobody has reported on for this long is over.
 const IDLE_MS = 5 * 60 * 1000;
@@ -991,8 +991,12 @@ export class Ladder {
             m.ended = r.end;
             m.closing = now + CLOSE_MS;
         }
-        // Its room is gone and that was the last game to say its last.
-        if (m.roomGone && this.saidAll(m))
+        // That was the last game to say its last, of a level its host has
+        // ended or a room that's gone: nothing more can come for it, so it
+        // closes now, not CLOSE_MS later. The games hear it's saved while
+        // their score screens still show, which is when their pictures go
+        // (ladder-shots.js).
+        if ((m.roomGone || m.ended) && this.saidAll(m))
             m.closing = now;
         this.lobby.ctx.storage.put("match:" + roomId, m);
         this.wake();
