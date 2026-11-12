@@ -152,6 +152,7 @@ export const NAME_KEY = "name:";
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAP_RE = /^[A-Za-z0-9_.-]{1,32}$/;
 const KEY_RE = /^[0-9a-f]{32}$/;
+export const KEY_COOKIE = "jkpk";
 const BUILD_RE = /^[0-9a-f]{7,16}$/;
 const HIDDEN_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
 const ENDS = ["level", "left"];
@@ -199,6 +200,16 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // at, and stops answering for the day once an account has read its share.
 // Nothing in it is kept anywhere else: emptying it only makes the next page
 // add them up again.
+//
+// match_shots: one row for each screenshot on a match's page
+// (src/ladder-shots.js), whose bytes are in the SHOTS bucket under
+// m/<match_id>/<id>.jpg and .t.jpg. slot and player_id are its player's line
+// in the match and the players row of the key that sent it. taken is the
+// sender's own stamp of the picture, so one sent twice is one row; secs is
+// how far into the match it was taken, going by what the sender said. final
+// marks the game's own picture of the final scoreboard, one a match. hidden
+// takes it off the page and stops it being served. Empty, and nothing reads
+// it, in a lobby without the bucket.
 export const SCHEMA = [
     `CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY,
@@ -266,6 +277,24 @@ export const SCHEMA = [
         stamp TEXT NOT NULL,
         value TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS match_shots (
+        id TEXT PRIMARY KEY,
+        match_id INTEGER NOT NULL,
+        slot INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        taken INTEGER NOT NULL,
+        secs INTEGER NOT NULL,
+        final INTEGER NOT NULL DEFAULT 0,
+        w INTEGER NOT NULL,
+        h INTEGER NOT NULL,
+        bytes INTEGER NOT NULL,
+        thumb_bytes INTEGER NOT NULL,
+        added_at INTEGER NOT NULL,
+        hidden INTEGER NOT NULL DEFAULT 0
+    )`,
+    // A match's pictures, and one picture sent twice.
+    `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_once ON match_shots (match_id, player_id, taken)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_final ON match_shots (match_id) WHERE final = 1`,
 ];
 
 export function ensureSchema(db) {
@@ -351,6 +380,18 @@ export function cleanReport(b64) {
 
 function toHex(bytes) {
     return [...bytes].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+// The player key in a request's cookie (/ladder/key sets it), or "".
+export function cookieKey(request) {
+    for (const part of (request.headers.get("Cookie") || "").split(";")) {
+        const eq = part.indexOf("=");
+        if (eq > 0 && part.slice(0, eq).trim() === KEY_COOKIE) {
+            const value = part.slice(eq + 1).trim();
+            return KEY_RE.test(value) ? value : "";
+        }
+    }
+    return "";
 }
 
 // What D1 keeps of a browser key.

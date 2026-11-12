@@ -20,13 +20,14 @@ workers_dev = true
 # script (tools/build-kit.mjs) makes them, also those of the last kits, for
 # pages opened before a deploy; the room pictures in rooms/; and _headers.
 # /relay, /summary, /imperial-games, the page itself (so it can be sent on
-# from an old address), e/ (src/engine.js) and the match record's pages
-# (src/ladder-pages.js) run the Worker, and so does a path with no file; the
-# rest is served straight from Cloudflare.
+# from an old address), e/ (src/engine.js), the match record's pages
+# (src/ladder-pages.js) and its screenshots (src/ladder-shots.js) run the
+# Worker, and so does a path with no file; the rest is served straight from
+# Cloudflare.
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*", "/shot/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -63,6 +64,18 @@ binding = "LADDER"
 database_name = "jkdf2mp-ladder"
 database_id = "d17bff22-b11d-4f1b-8414-a01b190eec2d"
 
+# Screenshots on match pages (src/ladder-shots.js): an R2 bucket for the
+# pictures players' pages send of their matches. Without this block, or with
+# LADDER_SHOTS = "0" below, the lobby takes none and the match pages are as
+# they were; the pictures already there stay in the bucket. The account needs
+# R2 added once (dashboard, Storage & databases > R2), then
+# `npx wrangler r2 bucket create jkdf2mp-shots` makes the bucket. A deploy
+# with this block fails until the bucket is there. README.md, Screenshots on
+# match pages.
+[[r2_buckets]]
+binding = "SHOTS"
+bucket_name = "jkdf2mp-shots"
+
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
 tag = "v1"
@@ -90,6 +103,11 @@ IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 # From this time, older games no longer get room passwords (kit 90 README, Settings).
 PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
+# "0" stops the lobby taking and showing screenshots while the bucket stays
+# bound. SHOTS_CONTACT is where the match pages say to ask for a picture to be
+# taken down: an https address, or a line of text.
+# LADDER_SHOTS = "0"
+# SHOTS_CONTACT = ""
 # The match record's Discord post (the DISCORD_WEBHOOK secret) is for matches
 # of this many players or more, and links to the match's page here; without
 # MATCH_LINKS, at SITE.
@@ -126,6 +144,11 @@ dataset = "jkdf2mp_beta_summaries"
 binding = "LADDER"
 database_name = "jkdf2mp-ladder-beta"
 database_id = "5e3266ed-0d04-4c94-a643-156a4b00cc18"
+
+# Its own pictures (`npx wrangler r2 bucket create jkdf2mp-shots-beta`).
+[[env.beta.r2_buckets]]
+binding = "SHOTS"
+bucket_name = "jkdf2mp-shots-beta"
 
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"
