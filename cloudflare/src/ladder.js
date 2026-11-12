@@ -120,7 +120,7 @@ const WINDOW_MS = 5000;
 // How far back a new report looks for the kill it's about.
 const SCAN = 256;
 // After the host's game says its level is over, how long the others have to
-// say so too.
+// say so too. The match closes as soon as the last of them has (take).
 const CLOSE_MS = 15 * 1000;
 // A match nobody has reported on for this long is over.
 const IDLE_MS = 5 * 60 * 1000;
@@ -152,6 +152,7 @@ export const NAME_KEY = "name:";
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const MAP_RE = /^[A-Za-z0-9_.-]{1,32}$/;
 const KEY_RE = /^[0-9a-f]{32}$/;
+export const KEY_COOKIE = "jkpk";
 const BUILD_RE = /^[0-9a-f]{7,16}$/;
 const HIDDEN_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
 const ENDS = ["level", "left"];
@@ -199,6 +200,20 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // at, and stops answering for the day once an account has read its share.
 // Nothing in it is kept anywhere else: emptying it only makes the next page
 // add them up again.
+//
+// match_shots: one row for each screenshot on a match's page
+// (src/ladder-shots.js), whose bytes are in the SHOTS bucket under
+// m/<match_id>/<id>.jpg and .t.jpg. slot and player_id are its player's line
+// in the match and the players row of the key that sent it. taken is the
+// sender's own stamp of the picture, so one sent twice is one row; secs is
+// how far into the match it was taken, going by what the sender said. final
+// marks the game's own picture of the final scoreboard, one a match. hidden
+// takes it off the page and stops it being served. Empty, and nothing reads
+// it, in a lobby without the bucket.
+//
+// shot_total: one row, the bytes of every row in match_shots, kept as rows
+// come and go so the lobby can stop taking pictures at a size (SHOTS_MAX_GB)
+// without adding them all up each time.
 export const SCHEMA = [
     `CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY,
@@ -266,6 +281,26 @@ export const SCHEMA = [
         stamp TEXT NOT NULL,
         value TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS match_shots (
+        id TEXT PRIMARY KEY,
+        match_id INTEGER NOT NULL,
+        slot INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        taken INTEGER NOT NULL,
+        secs INTEGER NOT NULL,
+        final INTEGER NOT NULL DEFAULT 0,
+        w INTEGER NOT NULL,
+        h INTEGER NOT NULL,
+        bytes INTEGER NOT NULL,
+        thumb_bytes INTEGER NOT NULL,
+        added_at INTEGER NOT NULL,
+        hidden INTEGER NOT NULL DEFAULT 0
+    )`,
+    // A match's pictures, and one picture sent twice.
+    `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_once ON match_shots (match_id, player_id, taken)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_final ON match_shots (match_id) WHERE final = 1`,
+    `CREATE TABLE IF NOT EXISTS shot_total (id INTEGER PRIMARY KEY CHECK (id = 1), bytes INTEGER NOT NULL)`,
+    `INSERT OR IGNORE INTO shot_total (id, bytes) VALUES (1, 0)`,
 ];
 
 export function ensureSchema(db) {
@@ -351,6 +386,18 @@ export function cleanReport(b64) {
 
 function toHex(bytes) {
     return [...bytes].map(x => x.toString(16).padStart(2, "0")).join("");
+}
+
+// The player key in a request's cookie (/ladder/key sets it), or "".
+export function cookieKey(request) {
+    for (const part of (request.headers.get("Cookie") || "").split(";")) {
+        const eq = part.indexOf("=");
+        if (eq > 0 && part.slice(0, eq).trim() === KEY_COOKIE) {
+            const value = part.slice(eq + 1).trim();
+            return KEY_RE.test(value) ? value : "";
+        }
+    }
+    return "";
 }
 
 // What D1 keeps of a browser key.
@@ -944,8 +991,12 @@ export class Ladder {
             m.ended = r.end;
             m.closing = now + CLOSE_MS;
         }
-        // Its room is gone and that was the last game to say its last.
-        if (m.roomGone && this.saidAll(m))
+        // That was the last game to say its last, of a level its host has
+        // ended or a room that's gone: nothing more can come for it, so it
+        // closes now, not CLOSE_MS later. The games hear it's saved while
+        // their score screens still show, which is when their pictures go
+        // (ladder-shots.js).
+        if ((m.roomGone || m.ended) && this.saidAll(m))
             m.closing = now;
         this.lobby.ctx.storage.put("match:" + roomId, m);
         this.wake();

@@ -37,10 +37,16 @@
 // to this site, which is where that one sends its page view (/cdn-cgi/rum).
 // A match in a game with a password has its page, but isn't in any list. Each
 // match says its mod and whether its level is a custom one.
+//
+// A lobby that takes screenshots (src/ladder-shots.js, the SHOTS bucket) shows
+// a match's on its page, which may then load pictures from this site and
+// nowhere else, and /ladder/recent says so ("shots", its limits) for the
+// landing page to send them. Its routes are answered from here too.
 
-import { COUNT_AGREE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, ensureSchema, hashKey, winnerOf } from "./ladder.js";
+import { COUNT_AGREE, KEY_COOKIE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, cookieKey, ensureSchema, hashKey,
+         winnerOf } from "./ladder.js";
+import { SHOTS, shotRoute, shotsOn, shotsQuery } from "./ladder-shots.js";
 
-const KEY_COOKIE = "jkpk";
 // Chrome keeps a cookie 400 days at most, so each visit sets it again.
 const KEY_COOKIE_S = 400 * 24 * 60 * 60;
 const MAX_KEY_BODY = 256;
@@ -72,6 +78,8 @@ const GAMES_LONG = { jk1: "Jedi Knight: Dark Forces II", mots: "Jedi Knight: Mys
 // ?game= as people would type it.
 const GAME_PARAM = { jk: "jk1", jk1: "jk1", mots: "mots" };
 const KIND_NAMES = ["", "Lightsaber", "Shots", "Explosions", "Force", "Other"];
+// A screenshot taken within this many seconds of a kill is shown with it.
+const SHOT_KILL_SECS = 5;
 // The games' own episodes, by name (maps.js in the OpenJKDF2 fork): a level
 // from any other is a custom one.
 const RETAIL_EPISODES = ["jk1", "jk1ctf", "jk1mp", "jk1demo", "jk1mpdem", "jk1mpdemo", "jkm", "jkm_kfy", "jkm_mp", "jkm_saber"];
@@ -93,17 +101,6 @@ function isObject(v) {
 
 function toHex(bytes) {
     return [...bytes].map(x => x.toString(16).padStart(2, "0")).join("");
-}
-
-function cookieKey(request) {
-    for (const part of (request.headers.get("Cookie") || "").split(";")) {
-        const eq = part.indexOf("=");
-        if (eq > 0 && part.slice(0, eq).trim() === KEY_COOKIE) {
-            const value = part.slice(eq + 1).trim();
-            return KEY_RE.test(value) ? value : "";
-        }
-    }
-    return "";
 }
 
 // POST /ladder/key, from a page on this address.
@@ -143,6 +140,9 @@ async function keyRoute(request) {
 // the LADDER binding.
 export async function ladderRoute(request, env, url) {
     const path = url.pathname;
+    const shot = await shotRoute(request, env, url);
+    if (shot)
+        return shot;
     if (!env.LADDER || !(path === "/ladder/key" || path === "/ladder/recent" || path === "/matches" || path === "/players" ||
                          path.startsWith("/match/") || path.startsWith("/player/")))
         return null;
@@ -158,10 +158,11 @@ export async function ladderRoute(request, env, url) {
     const key = path === "/matches" ? "" : cookieKey(request);
     const viewer = key ? await hashKey(key) : "";
     const now = Date.now();
-    const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer)
+    const shots = shotsOn(env);
+    const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer, { shots, origin: url.origin, contact: env.SHOTS_CONTACT || "", now })
                      : pl ? playerPage(env.LADDER, Number(pl[1]), url, viewer, now)
                      : path === "/players" ? playersPage(env.LADDER, url, viewer, now)
-                     : path === "/matches" ? matchesPage(env.LADDER, url) : recentMatches(env.LADDER, viewer, now);
+                     : path === "/matches" ? matchesPage(env.LADDER, url) : recentMatches(env.LADDER, viewer, now, shots);
     try {
         try {
             return await show();
@@ -315,8 +316,9 @@ function sideList(list, here) {
 // of, matches, you}: its first TOP players, how many players and matches it
 // has in all, and where the viewer stands in it ({rank, score}, or null). you
 // is the viewer by their browser's cookie, with their latest match's number,
-// or null for a browser the record doesn't know.
-export async function recentMatches(db, viewerHash = "", now = Date.now()) {
+// or null for a browser the record doesn't know. shots, only from a lobby
+// that takes screenshots, has its limits for them (ladder-shots.js, SHOTS).
+export async function recentMatches(db, viewerHash = "", now = Date.now(), shots = false) {
     const ids = Object.keys(GAMES);
     const statements = ids.flatMap(game => listQueries(db, game, 0, RECENT));
     if (viewerHash) {
@@ -350,11 +352,87 @@ export async function recentMatches(db, viewerHash = "", now = Date.now()) {
         }
     });
     // Kept a little while by the browser: every page asks when a match ends.
-    return json(200, { v: 1, games, top, you }, { "Cache-Control": "private, max-age=10" });
+    return json(200, { v: 1, games, top, you, ...(shots ? { shots: SHOTS } : {}) }, { "Cache-Control": "private, max-age=10" });
 }
 
-// GET /match/<id>
-export async function matchPage(db, id, viewerHash) {
+// A match's screenshots, as a card for its page: the game's own picture of
+// the final scoreboard first, then the players' in the order they were
+// taken, each with who took it, how far into the match, and the kill it was
+// taken around, if any. shots are match_shots rows; rows, names and linked
+// are the match's players as its page has them; kills the detail's. The
+// viewer (you, their record) can take the ones their browser sent off again.
+function shotsCard(shots, rows, names, linked, kills, contact, recent, you) {
+    if (!shots.length && !recent)
+        return "";
+    const index = new Map(rows.map((r, i) => [r.slot, i]));
+    const named = slot => index.has(slot) ? names[index.get(slot)] : "a player";
+    const clock = secs => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+    const around = secs => {
+        let best = null;
+        for (const k of kills) {
+            const off = Math.abs(k[0] - secs);
+            if (off <= SHOT_KILL_SECS && (!best || off < Math.abs(best[0] - secs)))
+                best = k;
+        }
+        if (!best || !index.has(best[1]))
+            return "";
+        return best[2] < 0 || best[2] === best[1] || !index.has(best[2]) ? `About when ${named(best[1])} died`
+                                                                         : `About when ${named(best[2])} killed ${named(best[1])}`;
+    };
+    const theirs = shots.filter(s => !s.final);
+    const final = shots.some(s => s.final);
+    const takers = new Set(theirs.map(s => s.slot)).size;
+    const tally = [theirs.length ? `${theirs.length} from ${count(takers, "player")}` : "", final ? "the final scoreboard" : ""]
+        .filter(Boolean).join(", and ");
+    const tiles = shots.map((s, n) => {
+        const i = index.has(s.slot) ? index.get(s.slot) : -1;
+        const who = s.final ? "Final scoreboard" : named(s.slot);
+        const at = s.final ? "" : `${clock(s.secs)} in`;
+        const cap = s.final ? "As the game showed it when the level ended" : around(s.secs);
+        // The small copy's size, for the room it takes before it loads.
+        const scale = SHOTS.thumbEdge / Math.max(s.w, s.h, 1);
+        const alt = s.final ? "The final scoreboard, as the game showed it" : `Screenshot by ${who}, ${at.replace(" in", " into the match")}`;
+        return `
+            <li class="shot${s.final ? " final" : ""}">
+              <a href="/shot/${s.id}.jpg" data-shot="${n}" data-what="${esc([who, at, cap].filter(Boolean).join(" \u00b7 "))}"><img
+                src="/shot/${s.id}.t.jpg" width="${Math.max(1, Math.round(s.w * scale))}" height="${Math.max(1, Math.round(s.h * scale))}"
+                loading="lazy" decoding="async" alt="${esc(alt)}"></a>
+              <span class="who"><b>${s.final ? who : i >= 0 ? linked(rows[i], i) : esc(who)}</b>${at ? ` <span class="at">${at}</span>` : ""}</span>
+              ${cap ? `<span class="cap">${esc(cap)}</span>` : ""}${you && s.rec === you ? `
+              <span class="mine">Sent from your browser. <button type="button" data-shot-off="${s.id}">Take it off</button></span>` : ""}
+            </li>`;
+    }).join("");
+    const link = /^https:\/\/[^\s"'<>]+$/.test(contact) ? `<a href="${esc(contact)}" rel="noopener">${esc(contact.replace(/^https:\/\//, ""))}</a>`
+                                                         : esc(contact);
+    return `
+          <section class="card wide" id="screenshots"><h3>Screenshots${tally ? ` <span class="count">${tally}</span>` : ""}</h3><div class="body">
+            ${shots.length ? `<ul class="shot-grid">${tiles}
+            </ul>` : `<p class="none">None yet. A screenshot one of its players takes in the game (F8 or F12) shows up here.</p>`}
+            <p class="later">${shots.length ? `Taken in this match by its players and sent from their own browsers${final ? "; the final scoreboard is the game's own picture" : ""}. ` : ""}${contact ? `To have a picture taken down: ${link}` : ""}</p>
+          </div></section>`;
+}
+
+// The page's full-size view of them: one at a time, with the next and the
+// one before a click or an arrow key away. Without its script a picture's
+// link opens the picture itself.
+const SHOT_VIEW = `
+      <dialog class="shot-view" id="shot-view" aria-label="Screenshot">
+        <div class="bar">
+          <span class="what" id="shot-what"></span>
+          <a id="shot-full" href="/matches" target="_blank" rel="noopener">Open full size</a>
+          <button type="button" data-shot-close>Close</button>
+        </div>
+        <div class="stage">
+          <button type="button" class="step" data-shot-step="-1" aria-label="The screenshot before">&lsaquo;</button>
+          <img id="shot-img" alt="">
+          <button type="button" class="step" data-shot-step="1" aria-label="The next screenshot">&rsaquo;</button>
+        </div>
+      </dialog>`;
+
+// GET /match/<id>. opts: shots (the lobby takes screenshots), origin (this
+// site's, for the picture a link's preview shows), contact (where to ask for
+// a picture to be taken down), now.
+export async function matchPage(db, id, viewerHash, opts = {}) {
     const statements = [
         db.prepare("SELECT * FROM matches WHERE id = ? AND hidden = 0").bind(id),
         db.prepare(`SELECT mp.*, c.id AS pid, COALESCE(c.hidden, 0) AS hidden
@@ -364,6 +442,9 @@ export async function matchPage(db, id, viewerHash) {
     ];
     if (viewerHash)
         statements.push(viewerQuery(db, viewerHash));
+    // Last, so the others stay where they are.
+    if (opts.shots)
+        statements.push(shotsQuery(db, id));
     const answers = await db.batch(statements);
     const m = answers[0].results[0];
     const side = `<aside class="ladder-side" aria-label="Latest matches"><h2>Latest matches</h2>
@@ -377,6 +458,7 @@ export async function matchPage(db, id, viewerHash) {
     }
     const rows = answers[1].results;
     const you = viewerHash && answers[4].results[0] ? answers[4].results[0].id : 0;
+    const shots = opts.shots ? answers.at(-1).results.slice(0, SHOTS.perMatch) : [];
     const detail = parse(m.detail, {});
     const names = shownNames(rows);
     // slot -> the name shown, for the detail's numbers.
@@ -551,14 +633,18 @@ export async function matchPage(db, id, viewerHash) {
           <section class="card wide"><h3>Who killed whom</h3><div class="body">
             <div class="scroll">${matrix}</div>
             <p class="later">Rows killed columns. A player's own square is their suicides.</p>
-          </div></section>
+          </div></section>${opts.shots ? shotsCard(shots, rows, names, linked, Array.isArray(detail.kills) ? detail.kills : [], opts.contact || "",
+                                                  (opts.now || Date.now()) - m.ended_at < SHOTS.days * DAY_MS, you) : ""}
         </div>
         <p class="foot">${how}</p>
       </div>
-      ${side}`;
+      ${side}${shots.length ? SHOT_VIEW : ""}`;
     return page(200, `${title} - jkdf2mp match ${id}`, `${GAMES_LONG[m.game] || GAMES_LONG.jk1} - Match ${id}`, body, {
         description: `${gameName}${m.mod ? " with " + m.mod : ""}, ${count(m.players, "player")}, ${length(m.secs)}. ${top}`,
-        ogTitle: title, path: `/match/${id}`,
+        ogTitle: title, path: `/match/${id}`, images: !!opts.shots,
+        // What a link to the match shows where it's pasted: its final
+        // scoreboard, else its first picture.
+        image: shots.length && opts.origin ? `${opts.origin}/shot/${shots[0].id}.jpg` : "",
     });
 }
 
@@ -1228,6 +1314,35 @@ main { padding: 12px 8px 24px; }
 .matrix thead td { border: 0; }
 .matrix td.self { color: #9aa; background-color: #101010; }
 .matrix td.top { color: var(--gold); font-weight: bold; }
+.card h3 .count { margin-left: 6px; color: var(--muted); font-weight: normal; text-transform: none; letter-spacing: 0; }
+.card .none { margin: 2px 0 0; color: var(--muted); }
+.shot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 10px;
+  margin: 2px 0 0; padding: 0; list-style: none; }
+.shot { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.shot > a { display: block; border: 1px solid var(--card-edge); background-color: #000; }
+.shot > a:hover { border-color: var(--gold); }
+.shot.final > a { border-color: var(--gold); }
+.shot img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; }
+.shot .who { margin-top: 3px; overflow-wrap: anywhere; }
+.shot .at { margin-left: 4px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.shot .cap { color: #9aa; font-size: 11px; overflow-wrap: anywhere; }
+.shot .mine { color: var(--muted); font-size: 11px; }
+.shot .mine button { margin-left: 2px; padding: 0; border: 0; background: none; color: var(--gold); font: inherit;
+  text-decoration: underline; cursor: pointer; }
+.shot .mine button:disabled { color: var(--muted); text-decoration: none; cursor: default; }
+.shot-view { box-sizing: border-box; max-width: min(96vw, 1320px); max-height: 96vh; padding: 0; border: 2px solid #000;
+  background-color: #000; color: #fff; box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.45); }
+.shot-view::backdrop { background-color: rgba(0, 0, 0, 0.82); }
+.shot-view .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 4px 8px;
+  background-color: var(--teal); font: 12px Verdana, Geneva, sans-serif; }
+.shot-view .what { flex: 1; min-width: 0; font-weight: bold; overflow-wrap: anywhere; }
+.shot-view button { padding: 1px 8px; border: 1px solid var(--gold); background-color: transparent; color: var(--gold);
+  font: bold 12px Verdana, Geneva, sans-serif; cursor: pointer; }
+.shot-view button:hover { background-color: rgba(255, 204, 102, 0.2); }
+.shot-view .stage { display: flex; align-items: center; }
+.shot-view .stage img { display: block; flex: 1; min-width: 0; max-width: 100%; max-height: calc(96vh - 44px); object-fit: contain; }
+.shot-view .step { flex: none; align-self: stretch; width: 34px; border: 0; font-size: 24px; }
+.shot-view .step[disabled] { visibility: hidden; }
 .card td.count { white-space: nowrap; }
 .card td.soft:first-child { white-space: nowrap; padding-right: 8px; }
 .card table.versus { font-size: 12px; }
@@ -1295,15 +1410,22 @@ h3.part { margin: 18px 0 6px; color: var(--gold); font: bold 14px Verdana, Genev
   .tabs { margin-left: 0; }
   .cards.three, .cards.two { grid-template-columns: 1fr; }
   .banner a.play { padding: 6px 14px; font-size: 16px; }
+  .shot-view .step { width: 26px; }
+}
+/* A phone: two pictures side by side, the final scoreboard across both. */
+@media (max-width: 480px) {
+  .shot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 8px; }
+  .shot.final { grid-column: 1 / -1; }
 }
 @media (pointer: coarse) {
-  .style-pick button { min-height: 26px; }
+  .style-pick button, .shot-view .bar button { min-height: 26px; }
   .tabs a { padding: 4px 10px; }
 }
 `;
 
 // The page's own script: the look the landing page's setting picked (and the
-// buttons that change it), and times as the viewer's clock has them.
+// buttons that change it), times as the viewer's clock has them, and a
+// match's screenshots full size.
 const SCRIPT = `
 (function() {
   var KEY = 'jkdf2mp-page-style';
@@ -1336,7 +1458,72 @@ const SCRIPT = `
       if (el.dataset.as !== 'date') el.title = full;
     });
   }
-  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); });
+  // A match's screenshots: a click on one shows it full size on the page,
+  // with the others an arrow away. A click with a key held, or in a browser
+  // without <dialog>, follows the link to the picture itself.
+  function shotView() {
+    var view = document.getElementById('shot-view');
+    if (!view || !view.showModal) return;
+    var links = Array.prototype.slice.call(document.querySelectorAll('a[data-shot]'));
+    var img = document.getElementById('shot-img');
+    var at = 0;
+    function show(i) {
+      at = Math.max(0, Math.min(links.length - 1, i));
+      var a = links[at];
+      img.src = a.href;
+      img.alt = a.querySelector('img').alt;
+      document.getElementById('shot-what').textContent = a.dataset.what +
+        (links.length > 1 ? ' (' + (at + 1) + ' of ' + links.length + ')' : '');
+      document.getElementById('shot-full').href = a.href;
+      view.querySelectorAll('[data-shot-step]').forEach(function(b) {
+        var to = at + Number(b.dataset.shotStep);
+        b.disabled = to < 0 || to >= links.length;
+      });
+    }
+    document.addEventListener('click', function(ev) {
+      var t = ev.target;
+      if (!t.closest) return;
+      var a = t.closest('a[data-shot]');
+      if (a && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey || ev.button)) {
+        ev.preventDefault();
+        show(links.indexOf(a));
+        if (!view.open) view.showModal();
+        return;
+      }
+      var step = t.closest('[data-shot-step]');
+      if (step) return show(at + Number(step.dataset.shotStep));
+      // Its Close, and anywhere outside the picture's window.
+      if (t.closest('[data-shot-close]') || t === view) view.close();
+    });
+    view.addEventListener('keydown', function(ev) {
+      if (ev.key === 'ArrowLeft') show(at - 1);
+      else if (ev.key === 'ArrowRight') show(at + 1);
+    });
+    view.addEventListener('close', function() { img.removeAttribute('src'); });
+  }
+  // The viewer's own pictures on a match's page: Take it off asks once more
+  // on the button itself, then asks the lobby, and the page is read again.
+  function shotOff() {
+    document.addEventListener('click', function(ev) {
+      var b = ev.target.closest && ev.target.closest('[data-shot-off]');
+      if (!b || b.disabled) return;
+      if (!b.dataset.sure) {
+        b.dataset.sure = '1';
+        b.textContent = 'Take it off this page for everyone?';
+        return;
+      }
+      b.disabled = true;
+      b.textContent = 'Taking it off\u2026';
+      fetch('/ladder/shot/' + b.dataset.shotOff, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).then(function(res) {
+        if (res.status !== 200 && res.status !== 404) throw new Error(res.status);
+        location.reload();
+      }).catch(function() {
+        b.disabled = false;
+        b.textContent = "That didn't work. Try again";
+      });
+    });
+  }
+  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); shotView(); shotOff(); });
   document.addEventListener('click', function(ev) {
     var b = ev.target.closest && ev.target.closest('[data-page-style]');
     if (!b) return;
@@ -1362,7 +1549,9 @@ function page(status, title, windowTitle, body, opts = {}) {
 <meta property="og:site_name" content="jkdf2mp Game Rooms">
 <meta property="og:title" content="${esc(opts.ogTitle)}">
 <meta property="og:description" content="${esc(opts.description || "")}">
-<meta name="theme-color" content="#ffcc66">` : "";
+<meta name="theme-color" content="#ffcc66">${opts.image ? `
+<meta property="og:image" content="${esc(opts.image)}">
+<meta name="twitter:card" content="summary_large_image">` : ""}` : "";
     const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -1422,7 +1611,7 @@ function page(status, title, windowTitle, body, opts = {}) {
             // A match's page marks its viewer's row, so it's theirs alone.
             "Cache-Control": opts.noStore ? "no-store" : "private, max-age=30",
             "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; ` +
-                                       "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; " +
+                                       `connect-src 'self'; img-src ${opts.images ? "'self' " : ""}data:; base-uri 'none'; form-action 'none'; ` +
                                        "frame-ancestors 'none'",
             "X-Content-Type-Options": "nosniff",
             "Referrer-Policy": "same-origin",
