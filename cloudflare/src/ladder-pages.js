@@ -359,8 +359,9 @@ export async function recentMatches(db, viewerHash = "", now = Date.now(), shots
 // the final scoreboard first, then the players' in the order they were
 // taken, each with who took it, how far into the match, and the kill it was
 // taken around, if any. shots are match_shots rows; rows, names and linked
-// are the match's players as its page has them; kills the detail's.
-function shotsCard(shots, rows, names, linked, kills, contact, recent) {
+// are the match's players as its page has them; kills the detail's. The
+// viewer (you, their record) can take the ones their browser sent off again.
+function shotsCard(shots, rows, names, linked, kills, contact, recent, you) {
     if (!shots.length && !recent)
         return "";
     const index = new Map(rows.map((r, i) => [r.slot, i]));
@@ -397,7 +398,8 @@ function shotsCard(shots, rows, names, linked, kills, contact, recent) {
                 src="/shot/${s.id}.t.jpg" width="${Math.max(1, Math.round(s.w * scale))}" height="${Math.max(1, Math.round(s.h * scale))}"
                 loading="lazy" decoding="async" alt="${esc(alt)}"></a>
               <span class="who"><b>${s.final ? who : i >= 0 ? linked(rows[i], i) : esc(who)}</b>${at ? ` <span class="at">${at}</span>` : ""}</span>
-              ${cap ? `<span class="cap">${esc(cap)}</span>` : ""}
+              ${cap ? `<span class="cap">${esc(cap)}</span>` : ""}${you && s.rec === you ? `
+              <span class="mine">Sent from your browser. <button type="button" data-shot-off="${s.id}">Take it off</button></span>` : ""}
             </li>`;
     }).join("");
     const link = /^https:\/\/[^\s"'<>]+$/.test(contact) ? `<a href="${esc(contact)}" rel="noopener">${esc(contact.replace(/^https:\/\//, ""))}</a>`
@@ -632,7 +634,7 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
             <div class="scroll">${matrix}</div>
             <p class="later">Rows killed columns. A player's own square is their suicides.</p>
           </div></section>${opts.shots ? shotsCard(shots, rows, names, linked, Array.isArray(detail.kills) ? detail.kills : [], opts.contact || "",
-                                                  (opts.now || Date.now()) - m.ended_at < SHOTS.days * DAY_MS) : ""}
+                                                  (opts.now || Date.now()) - m.ended_at < SHOTS.days * DAY_MS, you) : ""}
         </div>
         <p class="foot">${how}</p>
       </div>
@@ -1324,6 +1326,10 @@ main { padding: 12px 8px 24px; }
 .shot .who { margin-top: 3px; overflow-wrap: anywhere; }
 .shot .at { margin-left: 4px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .shot .cap { color: #9aa; font-size: 11px; overflow-wrap: anywhere; }
+.shot .mine { color: var(--muted); font-size: 11px; }
+.shot .mine button { margin-left: 2px; padding: 0; border: 0; background: none; color: var(--gold); font: inherit;
+  text-decoration: underline; cursor: pointer; }
+.shot .mine button:disabled { color: var(--muted); text-decoration: none; cursor: default; }
 .shot-view { box-sizing: border-box; max-width: min(96vw, 1320px); max-height: 96vh; padding: 0; border: 2px solid #000;
   background-color: #000; color: #fff; box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.45); }
 .shot-view::backdrop { background-color: rgba(0, 0, 0, 0.82); }
@@ -1490,7 +1496,29 @@ const SCRIPT = `
     });
     view.addEventListener('close', function() { img.removeAttribute('src'); });
   }
-  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); shotView(); });
+  // The viewer's own pictures on a match's page: Take it off asks once more
+  // on the button itself, then asks the lobby, and the page is read again.
+  function shotOff() {
+    document.addEventListener('click', function(ev) {
+      var b = ev.target.closest && ev.target.closest('[data-shot-off]');
+      if (!b || b.disabled) return;
+      if (!b.dataset.sure) {
+        b.dataset.sure = '1';
+        b.textContent = 'Take it off this page for everyone?';
+        return;
+      }
+      b.disabled = true;
+      b.textContent = 'Taking it off\u2026';
+      fetch('/ladder/shot/' + b.dataset.shotOff, { method: 'DELETE', credentials: 'same-origin', cache: 'no-store' }).then(function(res) {
+        if (res.status !== 200 && res.status !== 404) throw new Error(res.status);
+        location.reload();
+      }).catch(function() {
+        b.disabled = false;
+        b.textContent = "That didn't work. Try again";
+      });
+    });
+  }
+  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); shotView(); shotOff(); });
   document.addEventListener('click', function(ev) {
     var b = ev.target.closest && ev.target.closest('[data-page-style]');
     if (!b) return;

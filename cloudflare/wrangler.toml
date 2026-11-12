@@ -105,9 +105,12 @@ IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # "0" stops the lobby taking and showing screenshots while the bucket stays
 # bound. SHOTS_CONTACT is where the match pages say to ask for a picture to be
-# taken down: an https address, or a line of text.
+# taken down: an https address, or a line of text. SHOTS_MAX_GB is how much
+# the lobby stores before it stops taking pictures: 8 when it isn't set,
+# under the 10 GB a month R2 stores without charge.
 # LADDER_SHOTS = "0"
 # SHOTS_CONTACT = ""
+# SHOTS_MAX_GB = "8"
 # The match record's Discord post (the DISCORD_WEBHOOK secret) is for matches
 # of this many players or more, and links to the match's page here; without
 # MATCH_LINKS, at SITE.

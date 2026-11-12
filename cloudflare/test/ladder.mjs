@@ -27,7 +27,7 @@ const { FakeStorage, FakeCtx } = await import("./cfstub.mjs");
 const { Lobby, default: worker } = await import("../src/lobby.js");
 const { cleanReport, discordMessage, hashKey, joinableName, MAX_REPORT_B64 } = await import("../src/ladder.js");
 const { periodStart } = await import("../src/ladder-pages.js");
-const { SHOTS, jpegSize, shotRoute } = await import("../src/ladder-shots.js");
+const { SHOTS, jpegSize, shotRoute, shotsRoom } = await import("../src/ladder-shots.js");
 
 const logged = [];
 const realLog = console.log;
@@ -1765,6 +1765,13 @@ await check("a picture is taken off again by its player, from any of their keys,
     const a = await sendShot(w, KEYS.maw, 60 * SEC, 1), b = await sendShot(w, KEYS.maw, 50 * SEC, 2);
     const remove = (shot, key, more = {}) => w.page(`/ladder/shot/${shot}`, { ...(key ? { Cookie: `jkpk=${key}` } : {}), ...more },
                                                     { method: "DELETE" });
+    // The match's page offers it to the one whose browser sent them, on each
+    // of theirs, and to nobody else.
+    const offered = async key => [...(await w.page(`/match/${id}`, key ? { Cookie: `jkpk=${key}` } : {})).body
+        .matchAll(/data-shot-off="([0-9a-f]{24})"/g)].map(m => m[1]).sort();
+    assert.deepEqual(await offered(KEYS.maw), [a.id, b.id].sort());
+    assert.deepEqual(await offered(KEYS.kyle), []);
+    assert.deepEqual(await offered(""), []);
     assert.equal((await remove(a.id, "")).status, 401);
     assert.equal((await remove(a.id, KEYS.kyle)).status, 404, "another player's isn't theirs to take off");
     assert.equal((await remove(a.id, KEYS.maw, { Origin: "https://elsewhere.test" })).status, 403);
@@ -1783,8 +1790,56 @@ await check("a picture is taken off again by its player, from any of their keys,
     // name joins their record) takes one off too.
     const other = "5".repeat(32);
     await playMatch(w, [["Maw", other], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.equal((await offered(other)).includes(b.id), true, "and is offered it");
     assert.equal((await remove(b.id, other)).status, 200);
     assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM match_shots WHERE id = ?", b.id)[0].n, 0);
+});
+
+await check("the lobby stops taking pictures at a size, and counts what comes and goes", async () => {
+    assert.equal(shotsRoom({}), 8e9, "8 GB, under what R2 stores without charge");
+    assert.equal(shotsRoom({ SHOTS_MAX_GB: "2.5" }), 2.5e9);
+    for (const bad of ["", "0", "-3", "lots", "Infinity"])
+        assert.equal(shotsRoom({ SHOTS_MAX_GB: bad }), 8e9, bad);
+    // Room for a picture and a bit: one sent as jpeg(1280, 720, 2000) with jpeg(480, 270, 500).
+    const one = jpeg(1280, 720, 2000).length + jpeg(480, 270, 500).length;
+    const env = shotEnv({ SHOTS_MAX_GB: String((one + 100) / 1e9) });
+    const w = await new World(env).start();
+    const id = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    const total = () => env.LADDER.rows("SELECT bytes FROM shot_total")[0].bytes;
+    const summed = () => env.LADDER.rows("SELECT COALESCE(SUM(bytes + thumb_bytes), 0) AS n FROM match_shots")[0].n;
+    assert.equal(total(), 0);
+    const a = await sendShot(w, KEYS.maw, 60 * SEC, 1);
+    assert.equal(a.status, 200);
+    assert.deepEqual([total(), summed()], [one, one]);
+    // Under the size, so one more goes in and takes it over: the size is where it stops, give or take a picture.
+    const b = await sendShot(w, KEYS.kyle, 55 * SEC, 2);
+    assert.equal(b.status, 200);
+    assert.deepEqual([total(), summed()], [2 * one, 2 * one]);
+    const stored = env.SHOTS.m.size;
+    // Now it says so before the picture is sent, and when one is sent anyway. Nothing is kept of that one.
+    assert.deepEqual(await askShot(w, KEYS.maw, 50 * SEC, 3), { status: 507, error: "room" });
+    assert.deepEqual(await sendShot(w, KEYS.maw, 50 * SEC, 3), { status: 507, error: "room" });
+    assert.deepEqual(await askShot(w, KEYS.maw, 16 * SEC, 3, true), { status: 507, error: "room" }, "the final scoreboard too");
+    assert.equal(env.SHOTS.m.size, stored);
+    assert.deepEqual([total(), summed()], [2 * one, 2 * one]);
+    // One it has is still answered as there, and still shown.
+    assert.equal((await askShot(w, KEYS.maw, 60 * SEC, 1)).id, a.id);
+    assert.equal((await w.page(`/shot/${a.id}.jpg`)).status, 200);
+    // Two sent at once into the last of the room: the statement that makes the row counts them one after the other.
+    const gone = await w.page(`/ladder/shot/${b.id}`, { Cookie: `jkpk=${KEYS.kyle}` }, { method: "DELETE" });
+    assert.equal(gone.status, 200);
+    assert.deepEqual([total(), summed()], [one, one], "taking one off gives its room back");
+    env.SHOTS.slow = 30;
+    const both = await Promise.all([sendShot(w, KEYS.maw, 50 * SEC, 3), sendShot(w, KEYS.kyle, 45 * SEC, 4)]);
+    env.SHOTS.slow = 0;
+    assert.deepEqual(both.map(r => r.status).sort(), [200, 507]);
+    assert.deepEqual([total(), summed()], [2 * one, 2 * one]);
+    assert.equal(env.SHOTS.m.size, stored, "the one that didn't get in is deleted again");
+    // Raised by hand, it takes pictures again.
+    env.SHOTS_MAX_GB = "1";
+    assert.equal((await sendShot(w, KEYS.maw, 40 * SEC, 5)).status, 200);
+    assert.deepEqual([total(), summed()], [3 * one, 3 * one]);
+    assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM match_shots WHERE match_id = ?", id)[0].n, 3);
 });
 
 await check("the final scoreboard: one a match, of a level its host ended, and none with an Anonymous player in it", async () => {

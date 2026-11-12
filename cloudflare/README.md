@@ -435,6 +435,83 @@ A name is all it takes here too, and less: nobody has to play. A line under a na
 soon as one record has that name, so a player who renames themselves to a name that has lines and
 no record gets those lines.
 
+### Screenshots on match pages
+
+With an R2 bucket bound as `SHOTS` too, a match's page shows the screenshots its players took in it
+(`src/ladder-shots.js`). Without the bucket, or with `LADDER_SHOTS = "0"`, none of it runs: the
+lobby doesn't tell pages it takes pictures, so they send none, and the match pages are as they were.
+
+A player's page already keeps the screenshots they take in a game (F8 or F12) in their own browser,
+under Your Screenshots. One taken in a level the lobby is told about is also marked to go on its
+match's page. When the level is over and the lobby has saved the match, the page asks the lobby
+where each one goes (`GET /ladder/shot?age=<ms>&taken=<ms>`) and sends it there
+(`POST`, the same address): a JPEG no longer than 1920 pixels on its longer side, and a small copy.
+The lobby works out the match itself, from the browser's key and how long ago the picture was taken;
+it never takes a match's number from a page. Nothing is sent during a level.
+
+The player decides. The prompt a game starts from has a box, "Share my screenshots on match pages",
+ticked to begin with, and so has Your Screenshots; nothing is sent before a game has started from a
+prompt that showed the box, or the player has changed it. Each screenshot there says where it is: on
+its match's page (Take it off), on its way (Keep it here), or only in the browser (Put it on its
+match's page). A match's page offers Take it off as well, on the pictures the viewer's own browser
+sent. A player who keeps their name off match pages sends nothing.
+
+When a level ends as a level does, the game also takes one picture of its score screen and the page
+sends it as the match's final scoreboard (`&final=1`). It isn't kept under Your Screenshots. A match
+keeps the first one that arrives, only when its host said the level ended, and never when one of its
+players is shown as Anonymous: that screen has everyone's name on it. It needs an engine that takes
+it (kit 102 or later); an older tab sends its player's own screenshots and no scoreboard.
+
+| Limit | |
+| --- | --- |
+| A player's pictures in one match | 12 |
+| Everyone's in one match, the final scoreboard aside | 60 |
+| A picture, and its small copy | 1.5 MB, 200 KB; 1920 and 480 pixels on the longer side |
+| How long after a match its pictures are taken | 7 days |
+| All pictures together | 8 GB, or `SHOTS_MAX_GB` |
+
+At the last one the lobby stops taking pictures (it answers 507, and pages keep theirs waiting) until
+some are deleted or the number is raised. Nothing deletes a picture for its age, so that's what
+keeps the bucket inside what R2 stores without charge (below).
+
+To set it up, once for each lobby. The Cloudflare account needs an R2 subscription first, added in
+the dashboard (Storage & databases, R2, Overview) through a checkout; usage past the free allowance
+is billed monthly. (https://developers.cloudflare.com/r2/get-started/)
+
+```
+npx wrangler r2 bucket create jkdf2mp-shots
+npx wrangler deploy
+```
+
+`wrangler.toml` names the bucket (`[[r2_buckets]]`, and `jkdf2mp-shots-beta` for the beta lobby). A
+deploy fails while the bucket it names doesn't exist. `SHOTS_CONTACT` (a var; an https address, or
+any text) is where a match's page says to ask for a picture to be taken down; without it the page
+says nothing about that.
+
+What the lobby checks is who sent a picture: a browser with a line in that match, under its key.
+The rest is the sender's word. A picture is whatever JPEG they sent, not necessarily one the game
+made, and it's placed in the match by the age they gave. So a picture is served as an image and
+nothing else, the limits above hold whatever a page sends, and the lobby's owner can take one down:
+
+```
+-- Off its page and no longer served, at once
+UPDATE match_shots SET hidden = 1 WHERE id = '<the 24 hex digits in its address>';
+-- A whole match's
+UPDATE match_shots SET hidden = 1 WHERE match_id = 123;
+```
+
+That leaves the bytes in the bucket. To delete them as well, delete the objects, then the rows, then
+set the total right (`--remote`: the commands' page doesn't say which of local and remote they act
+on without it, https://developers.cloudflare.com/workers/wrangler/commands/r2/):
+
+```
+npx wrangler r2 object delete jkdf2mp-shots/m/123/<id>.jpg --remote
+npx wrangler r2 object delete jkdf2mp-shots/m/123/<id>.t.jpg --remote
+npx wrangler d1 execute jkdf2mp-ladder --remote --command "DELETE FROM match_shots WHERE id = '<id>'; UPDATE shot_total SET bytes = (SELECT COALESCE(SUM(bytes + thumb_bytes), 0) FROM match_shots);"
+```
+
+Hiding a match (`UPDATE matches SET hidden = 1`, below) stops its pictures being served too.
+
 ### By hand
 
 With `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`. After any of the first
@@ -486,6 +563,14 @@ Cloudflare dashboard shows a database's rows read (D1, the database, Metrics).
 The pages ask search engines not to keep them or follow their links (`noindex, nofollow`), which
 keeps well-behaved crawlers off the player pages; nothing stops one that doesn't ask.
 
+Screenshots are in R2. Its free allowance is 10 GB stored, 1 million Class A operations (a picture
+sent is two) and 10 million Class B (a picture shown is one) a month; past it, storage is $0.015 a
+GB a month, Class A $4.50 and Class B $0.36 a million. Deleting and sending data out cost nothing.
+(https://developers.cloudflare.com/r2/pricing/) That page names nothing that stops R2 at its free
+allowance, which is why the lobby stops itself at 8 GB. At the limits above one match holds 102 MB
+at most; how big a real screenshot comes out hasn't been measured. Each picture sent is also three
+calls to D1 (one to ask, two to take it), and each one shown is one, which reads a row or two.
+
 ### Known limits
 
 - The games report, and nothing checks them (above). `counted` needs two games to agree, no more.
@@ -499,6 +584,16 @@ keeps well-behaved crawlers off the player pages; nothing stops one that doesn't
   game told could change who holds them.
 - A player with no key whose name is no record's, or the name of more than one, has no record: the
   match shows them, the standings don't.
+- A screenshot is its sender's word (above): the lobby knows whose browser sent it and that they
+  were in the match, not that the game made it or when.
+- A player's own screenshot shows what their screen showed, the names and the chat of the others
+  included, those of a player recorded as Anonymous too. Only the final scoreboard is held back for
+  a match with an Anonymous player.
+- In a team game the final scoreboard is the teams' score screen, the first one the game shows.
+- A picture deleted from Your Screenshots stays on its match's page (the page says so when asked to
+  delete). Its player takes it off on the match's page, from the same browser or another of theirs.
+- The count behind the 8 GB (`shot_total`) follows what the lobby adds and takes off. Rows deleted
+  by hand need it set right (above), and bytes left in the bucket by a failed delete aren't in it.
 
 ## Imperial relay games
 

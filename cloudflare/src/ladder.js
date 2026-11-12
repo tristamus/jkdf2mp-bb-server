@@ -210,6 +210,10 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // marks the game's own picture of the final scoreboard, one a match. hidden
 // takes it off the page and stops it being served. Empty, and nothing reads
 // it, in a lobby without the bucket.
+//
+// shot_total: one row, the bytes of every row in match_shots, kept as rows
+// come and go so the lobby can stop taking pictures at a size (SHOTS_MAX_GB)
+// without adding them all up each time.
 export const SCHEMA = [
     `CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY,
@@ -295,6 +299,8 @@ export const SCHEMA = [
     // A match's pictures, and one picture sent twice.
     `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_once ON match_shots (match_id, player_id, taken)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS match_shots_final ON match_shots (match_id) WHERE final = 1`,
+    `CREATE TABLE IF NOT EXISTS shot_total (id INTEGER PRIMARY KEY CHECK (id = 1), bytes INTEGER NOT NULL)`,
+    `INSERT OR IGNORE INTO shot_total (id, bytes) VALUES (1, 0)`,
 ];
 
 export function ensureSchema(db) {

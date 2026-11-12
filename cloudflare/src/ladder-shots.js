@@ -45,6 +45,11 @@
 // A picture is two objects in the bucket, m/<match>/<id>.jpg and
 // m/<match>/<id>.t.jpg, and a row in match_shots (ladder.js, SCHEMA). The id
 // is random, so a picture's address can't be guessed from its match's.
+//
+// Nothing here deletes a picture for its age, so the bucket only grows. The
+// lobby stops taking pictures when all of them together reach SHOTS_MAX_GB
+// (8 when it isn't set, under the 10 GB a month R2 stores without charge),
+// and says 507 "room" until some are deleted or the number is raised.
 
 import { cookieKey, ensureSchema, hashKey } from "./ladder.js";
 
@@ -76,6 +81,12 @@ const FINAL_WAIT_MS = 10 * 60 * 1000;
 // Whether this lobby takes pictures.
 export function shotsOn(env) {
     return !!(env.LADDER && env.SHOTS) && env.LADDER_SHOTS !== "0";
+}
+
+// How many bytes of pictures it keeps at most.
+export function shotsRoom(env) {
+    const gb = Number(env.SHOTS_MAX_GB);
+    return Math.round((gb > 0 && isFinite(gb) ? gb : 8) * 1e9);
 }
 
 function json(status, body) {
@@ -147,13 +158,14 @@ function objectKeys(match, id) {
 
 // Where a picture taken at `captured` by the key's player goes. An answer to
 // send as it is (res), or the match: {match, slot, player, secs, left, id}
-// with id the picture's when the lobby has this one already.
-async function place(db, keyHash, captured, taken, final, now) {
+// with id the picture's when the lobby has this one already. room: the bytes
+// of pictures the lobby keeps at most.
+async function place(db, keyHash, captured, taken, final, now, room) {
     const since = now - SHOTS.days * 24 * HOUR_MS;
     // A match it could be of began before `to` and ended after `from`.
     const from = final ? captured - FINAL_AFTER_MS : captured - SLACK_MS;
     const to = final ? captured + FINAL_BEFORE_MS : captured + SLACK_MS;
-    const [who, found] = await db.batch([
+    const [who, found, kept] = await db.batch([
         // The key's player, whether their record is hidden, and when their
         // latest match ended (match numbers go up with time).
         db.prepare(
@@ -178,6 +190,7 @@ async function place(db, keyHash, captured, taken, final, now) {
              FROM players p JOIN match_players mp ON mp.player_id = p.id JOIN matches m ON m.id = mp.match_id
              WHERE p.key_hash = ? AND m.hidden = 0 AND m.ended_at >= ? AND m.started_at <= ? AND m.ended_at >= ?
              ORDER BY mp.match_id DESC, mp.slot LIMIT 8`).bind(taken, keyHash, since, to, from),
+        db.prepare("SELECT bytes FROM shot_total WHERE id = 1"),
     ]);
     const player = who.results[0];
     // A match still being played, or closed a moment ago, isn't saved yet,
@@ -207,6 +220,9 @@ async function place(db, keyHash, captured, taken, final, now) {
                   left: Math.max(0, Math.min(SHOTS.perPlayer - m.mine, SHOTS.perMatch - m.total)), id: m.have || "" };
     if (m.have)
         return out;
+    // The lobby has all the pictures it keeps.
+    if ((kept.results[0] ? kept.results[0].bytes : 0) >= room)
+        return { res: refuse(507, "room") };
     if (final) {
         if (m.unnamed)
             return { res: refuse(409, "anonymous") };
@@ -244,7 +260,8 @@ async function takeShot(request, env, url, now) {
     if (age > SHOTS.days * 24 * HOUR_MS)
         return refuse(404, "none", { wait: false });
     const db = env.LADDER;
-    const placed = await place(db, await hashKey(key), now - age, taken, final, now);
+    const room = shotsRoom(env);
+    const placed = await place(db, await hashKey(key), now - age, taken, final, now, room);
     if (placed.res)
         return placed.res;
     const answer = id => json(200, { match: placed.match, secs: placed.secs, left: placed.left, ...(id ? { id } : {}) });
@@ -285,23 +302,30 @@ async function takeShot(request, env, url, now) {
         await gone();
         return refuse(503, "store");
     }
+    const size = full.bytes.length + thumb.bytes.length;
     try {
         // The limits again, in the statement that makes the row, so two
         // pictures sent at once can't both be the last one let in. One
-        // final a match is the table's own rule (match_shots_final).
-        const made = await db.prepare(
-            `INSERT INTO match_shots (id, match_id, slot, player_id, taken, secs, final, w, h, bytes, thumb_bytes, added_at)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-             WHERE ? = 1 OR ((SELECT COUNT(*) FROM match_shots WHERE match_id = ? AND player_id = ? AND final = 0) < ?
-                             AND (SELECT COUNT(*) FROM match_shots WHERE match_id = ? AND final = 0) < ?)
-             RETURNING id`)
-            .bind(id, placed.match, placed.slot, placed.player, taken, placed.secs, final ? 1 : 0, full.w, full.h,
-                  full.bytes.length, thumb.bytes.length, now,
-                  final ? 1 : 0, placed.match, placed.player, SHOTS.perPlayer, placed.match, SHOTS.perMatch)
-            .first();
-        if (!made) {
+        // final a match is the table's own rule (match_shots_final). The
+        // lobby's total goes up with the row, in the same transaction.
+        const [made, , total] = await db.batch([
+            db.prepare(
+                `INSERT INTO match_shots (id, match_id, slot, player_id, taken, secs, final, w, h, bytes, thumb_bytes, added_at)
+                 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                 WHERE (SELECT bytes FROM shot_total WHERE id = 1) < ?
+                   AND (? = 1 OR ((SELECT COUNT(*) FROM match_shots WHERE match_id = ? AND player_id = ? AND final = 0) < ?
+                                  AND (SELECT COUNT(*) FROM match_shots WHERE match_id = ? AND final = 0) < ?))
+                 RETURNING id`)
+                .bind(id, placed.match, placed.slot, placed.player, taken, placed.secs, final ? 1 : 0, full.w, full.h,
+                      full.bytes.length, thumb.bytes.length, now, room,
+                      final ? 1 : 0, placed.match, placed.player, SHOTS.perPlayer, placed.match, SHOTS.perMatch),
+            db.prepare("UPDATE shot_total SET bytes = bytes + ? WHERE id = 1 AND EXISTS (SELECT 1 FROM match_shots WHERE id = ?)")
+                .bind(size, id),
+            db.prepare("SELECT bytes FROM shot_total WHERE id = 1"),
+        ]);
+        if (!made.results[0]) {
             await gone();
-            return refuse(409, "full");
+            return (total.results[0] ? total.results[0].bytes : 0) >= room ? refuse(507, "room") : refuse(409, "full");
         }
     } catch (e) {
         await gone();
@@ -314,7 +338,7 @@ async function takeShot(request, env, url, now) {
         return have ? answer(have.id) : refuse(409, "have");
     }
     console.log(`ladder: match ${placed.match}: a ${final ? "final scoreboard" : "picture"} from slot ${placed.slot}, ` +
-                `${full.w}x${full.h}, ${full.bytes.length + thumb.bytes.length} bytes`);
+                `${full.w}x${full.h}, ${size} bytes`);
     return answer(id);
 }
 
@@ -335,8 +359,12 @@ async function removeShot(request, env, id) {
     if (!shot)
         return refuse(404, "none");
     // The row first: the page stops showing it at once, whatever becomes of
-    // the bytes.
-    await db.prepare("DELETE FROM match_shots WHERE id = ?").bind(id).run();
+    // the bytes. The lobby's total goes down with it.
+    await db.batch([
+        db.prepare(`UPDATE shot_total SET bytes = MAX(0, bytes - COALESCE((SELECT bytes + thumb_bytes FROM match_shots WHERE id = ?), 0))
+                    WHERE id = 1`).bind(id),
+        db.prepare("DELETE FROM match_shots WHERE id = ?").bind(id),
+    ]);
     try {
         await env.SHOTS.delete(objectKeys(shot.match_id, id));
     } catch (e) {
@@ -413,9 +441,11 @@ export async function shotRoute(request, env, url) {
 }
 
 // A match's pictures for its page, the final scoreboard first, then as they
-// were taken.
+// were taken. rec is the record of the player who sent each, who may take it
+// off again (removeShot).
 export function shotsQuery(db, match) {
-    return db.prepare(`SELECT id, slot, secs, final, w, h FROM match_shots
-                       WHERE match_id = ? AND hidden = 0 ORDER BY final DESC, secs, added_at, id LIMIT ?`)
+    return db.prepare(`SELECT s.id, s.slot, s.secs, s.final, s.w, s.h, COALESCE(sp.merged_into, sp.id) AS rec
+                       FROM match_shots s LEFT JOIN players sp ON sp.id = s.player_id
+                       WHERE s.match_id = ? AND s.hidden = 0 ORDER BY s.final DESC, s.secs, s.added_at, s.id LIMIT ?`)
         .bind(match, SHOTS.perMatch + 1);
 }
