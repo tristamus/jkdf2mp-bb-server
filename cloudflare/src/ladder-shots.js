@@ -9,13 +9,18 @@
 //   GET /ladder/shot?age=<ms>&taken=<ms>[&final=1]
 //                      where a picture taken that long ago would go, before
 //                      the page sends it: {match, secs, left}, or with id
-//                      when the lobby has it already
+//                      when the lobby has it already, or {no: "<why>"} when
+//                      it has no place for it ("none" with wait: true while
+//                      its match may be saved yet). All of those are 200:
+//                      "not yet" is an answer, not a fault, and a browser
+//                      shows anything else as an error in its console.
 //   POST /ladder/shot?age=<ms>&taken=<ms>[&final=1]
 //                      the picture, as a form with two files: full (a JPEG,
 //                      SHOTS.edge pixels at most on its longer side) and
 //                      thumb (a small one). Answers {id, match, secs, left}.
 //                      Where it goes is settled from the address, before
-//                      any of the form is read.
+//                      any of the form is read. One there's no place for
+//                      is refused with a status ({error: "<why>"}).
 //   DELETE /ladder/shot/<id>
 //                      its player takes it off again
 //   GET /shot/<id>.jpg, /shot/<id>.t.jpg
@@ -156,10 +161,10 @@ function objectKeys(match, id) {
     return [`m/${match}/${id}.jpg`, `m/${match}/${id}.t.jpg`];
 }
 
-// Where a picture taken at `captured` by the key's player goes. An answer to
-// send as it is (res), or the match: {match, slot, player, secs, left, id}
-// with id the picture's when the lobby has this one already. room: the bytes
-// of pictures the lobby keeps at most.
+// Where a picture taken at `captured` by the key's player goes: the match,
+// {match, slot, player, secs, left, id} with id the picture's when the lobby
+// has this one already, or why it goes nowhere, {no: [status, error, more]}.
+// room: the bytes of pictures the lobby keeps at most.
 async function place(db, keyHash, captured, taken, final, now, room) {
     const since = now - SHOTS.days * 24 * HOUR_MS;
     // A match it could be of began before `to` and ended after `from`.
@@ -197,9 +202,9 @@ async function place(db, keyHash, captured, taken, final, now, room) {
     // and a key's first match makes its player.
     const wait = now - captured < (final ? FINAL_WAIT_MS : WAIT_MS);
     if (!player)
-        return { res: refuse(404, "none", { wait }) };
+        return { no: [404, "none", { wait }] };
     if (player.hidden)
-        return { res: refuse(403, "hidden") };
+        return { no: [403, "hidden"] };
     let rows = found.results;
     // A final scoreboard is of a level its host ended, taken as it ended.
     if (final)
@@ -213,7 +218,7 @@ async function place(db, keyHash, captured, taken, final, now, room) {
     if (!m) {
         // Later than all their matches: its own may come yet.
         const later = captured > (player.last || 0) + (final ? FINAL_AFTER_MS : SLACK_MS);
-        return { res: refuse(404, "none", { wait: wait && later }) };
+        return { no: [404, "none", { wait: wait && later }] };
     }
     const at = final ? m.ended_at : Math.min(Math.max(captured, m.started_at), m.ended_at);
     const out = { match: m.id, slot: m.slot, player: m.player_id, secs: Math.round((at - m.started_at) / 1000),
@@ -222,15 +227,15 @@ async function place(db, keyHash, captured, taken, final, now, room) {
         return out;
     // The lobby has all the pictures it keeps.
     if ((kept.results[0] ? kept.results[0].bytes : 0) >= room)
-        return { res: refuse(507, "room") };
+        return { no: [507, "room"] };
     if (final) {
         if (m.unnamed)
-            return { res: refuse(409, "anonymous") };
+            return { no: [409, "anonymous"] };
         if (m.finals)
-            return { res: refuse(409, "have") };
+            return { no: [409, "have"] };
         out.left = 1;
     } else if (!out.left) {
-        return { res: refuse(409, "full") };
+        return { no: [409, "full"] };
     }
     return out;
 }
@@ -257,13 +262,16 @@ async function takeShot(request, env, url, now) {
     const final = url.searchParams.get("final") === "1";
     if (age < 0 || taken < 0)
         return refuse(400, "fields");
+    // No place for it: an answer to the page that asks, a refusal of a
+    // picture sent anyway.
+    const none = (status, error, more) => post ? refuse(status, error, more) : json(200, { no: error, ...more });
     if (age > SHOTS.days * 24 * HOUR_MS)
-        return refuse(404, "none", { wait: false });
+        return none(404, "none", { wait: false });
     const db = env.LADDER;
     const room = shotsRoom(env);
     const placed = await place(db, await hashKey(key), now - age, taken, final, now, room);
-    if (placed.res)
-        return placed.res;
+    if (placed.no)
+        return none(...placed.no);
     const answer = id => json(200, { match: placed.match, secs: placed.secs, left: placed.left, ...(id ? { id } : {}) });
     if (!post || placed.id)
         return answer(placed.id);

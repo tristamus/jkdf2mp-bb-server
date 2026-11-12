@@ -1319,10 +1319,10 @@ main { padding: 12px 8px 24px; }
 .shot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr)); gap: 10px;
   margin: 2px 0 0; padding: 0; list-style: none; }
 .shot { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.shot a { display: block; border: 1px solid var(--card-edge); background-color: #000; }
-.shot a:hover { border-color: var(--gold); }
-.shot.final a { border-color: var(--gold); }
-.shot img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; }
+.shot > a { display: block; border: 1px solid var(--card-edge); background-color: #000; }
+.shot > a:hover { border-color: var(--gold); }
+.shot.final > a { border-color: var(--gold); }
+.shot img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; }
 .shot .who { margin-top: 3px; overflow-wrap: anywhere; }
 .shot .at { margin-left: 4px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .shot .cap { color: #9aa; font-size: 11px; overflow-wrap: anywhere; }

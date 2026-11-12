@@ -1658,7 +1658,7 @@ await check("a player's picture goes on the page of the match it was taken in, o
     assert.equal((await w.page(`/match/${id}`)).body.includes(bocs.id), false);
     env.LADDER.db.exec(`UPDATE matches SET hidden = 1 WHERE id = ${id}`);
     assert.equal((await w.page(`/shot/${sent.id}.t.jpg`)).status, 404);
-    assert.equal((await askShot(w, KEYS.maw, 62 * SEC, 1002)).error, "none");
+    assert.equal((await askShot(w, KEYS.maw, 62 * SEC, 1002)).no, "none");
 });
 
 await check("only a player of the match adds to it, within its time and the limits, and only a JPEG of a sane size", async () => {
@@ -1678,16 +1678,16 @@ await check("only a player of the match adds to it, within its time and the limi
     // wasn't in it, and no page of another site.
     assert.deepEqual(await askShot(w, "", 60 * SEC, 1), { status: 401, error: "key" });
     assert.deepEqual(await sendShot(w, "", 60 * SEC, 1), { status: 401, error: "key" });
-    assert.deepEqual(await askShot(w, KEYS.boc, 60 * SEC, 1), { status: 404, error: "none", wait: true });
-    assert.deepEqual(await askShot(w, KEYS.jan, inFirst, 1), { status: 404, error: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.boc, 60 * SEC, 1), { status: 200, no: "none", wait: true });
+    assert.deepEqual(await askShot(w, KEYS.jan, inFirst, 1), { status: 200, no: "none", wait: false });
     assert.deepEqual(await sendShot(w, KEYS.jan, inFirst, 1), { status: 404, error: "none", wait: false });
     assert.deepEqual(await sendShot(w, KEYS.kyle, 60 * SEC, 1, { headers: { Origin: "https://elsewhere.test" } }),
                      { status: 403, error: "site" });
     // Between the two matches: no match of theirs. After the last: its own
     // may be saved yet, so the page is told to ask again.
-    assert.deepEqual(await askShot(w, KEYS.kyle, 196 * SEC + 5 * MIN, 1), { status: 404, error: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 196 * SEC + 5 * MIN, 1), { status: 200, no: "none", wait: false });
     skew += 5 * MIN;
-    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * MIN, 1), { status: 404, error: "none", wait: true });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * MIN, 1), { status: 200, no: "none", wait: true });
     assert.equal((await askShot(w, KEYS.kyle, 5 * MIN + 60 * SEC, 1)).match, second);
     // What the address must say.
     for (const path of ["/ladder/shot", "/ladder/shot?age=60000", "/ladder/shot?age=-1&taken=1", "/ladder/shot?age=1e3&taken=1",
@@ -1727,7 +1727,7 @@ await check("only a player of the match adds to it, within its time and the limi
         assert.deepEqual([res.status, res.left], [200, SHOTS.perPlayer - (n - 1)], `picture ${n}`);
     }
     assert.deepEqual(await sendShot(w, KEYS.kyle, at, 999), { status: 409, error: "full" });
-    assert.deepEqual(await askShot(w, KEYS.kyle, at, 999), { status: 409, error: "full" });
+    assert.deepEqual(await askShot(w, KEYS.kyle, at, 999), { status: 200, no: "full" });
     assert.equal((await askShot(w, KEYS.kyle, at, 101)).status, 200, "one already there is still found");
     assert.equal((await askShot(w, KEYS.jan, at, 1)).left, SHOTS.perPlayer, "the other player's are their own");
     assert.equal((await askShot(w, KEYS.kyle, inFirst + 5 * MIN, 1)).left, SHOTS.perPlayer, "and so is another match");
@@ -1752,10 +1752,10 @@ await check("only a player of the match adds to it, within its time and the limi
     // A player whose record is hidden adds nothing, and a match is open to
     // pictures for so many days.
     env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE name = 'Maw'");
-    assert.deepEqual(await askShot(w, KEYS.maw, inFirst + 5 * MIN, 1), { status: 403, error: "hidden" });
+    assert.deepEqual(await askShot(w, KEYS.maw, inFirst + 5 * MIN, 1), { status: 200, no: "hidden" });
     env.LADDER.db.exec("UPDATE players SET hidden = 0");
     skew += SHOTS.days * 24 * 60 * MIN;
-    assert.deepEqual(await askShot(w, KEYS.maw, inFirst + 5 * MIN + SHOTS.days * 24 * 60 * MIN, 1), { status: 404, error: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.maw, inFirst + 5 * MIN + SHOTS.days * 24 * 60 * MIN, 1), { status: 200, no: "none", wait: false });
 });
 
 await check("a picture is taken off again by its player, from any of their keys, and by nobody else", async () => {
@@ -1817,9 +1817,9 @@ await check("the lobby stops taking pictures at a size, and counts what comes an
     assert.deepEqual([total(), summed()], [2 * one, 2 * one]);
     const stored = env.SHOTS.m.size;
     // Now it says so before the picture is sent, and when one is sent anyway. Nothing is kept of that one.
-    assert.deepEqual(await askShot(w, KEYS.maw, 50 * SEC, 3), { status: 507, error: "room" });
+    assert.deepEqual(await askShot(w, KEYS.maw, 50 * SEC, 3), { status: 200, no: "room" });
     assert.deepEqual(await sendShot(w, KEYS.maw, 50 * SEC, 3), { status: 507, error: "room" });
-    assert.deepEqual(await askShot(w, KEYS.maw, 16 * SEC, 3, true), { status: 507, error: "room" }, "the final scoreboard too");
+    assert.deepEqual(await askShot(w, KEYS.maw, 16 * SEC, 3, true), { status: 200, no: "room" }, "the final scoreboard too");
     assert.equal(env.SHOTS.m.size, stored);
     assert.deepEqual([total(), summed()], [2 * one, 2 * one]);
     // One it has is still answered as there, and still shown.
@@ -1849,13 +1849,13 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     // The game takes it as the level ends, which the lobby closed 16 s later.
     assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 7, true), { status: 200, match: id, secs: 196, left: 1 });
     // Not one from the middle of the match, or from long after it.
-    assert.deepEqual(await askShot(w, KEYS.kyle, 100 * SEC, 7, true), { status: 404, error: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 100 * SEC, 7, true), { status: 200, no: "none", wait: false });
     const theirs = await sendShot(w, KEYS.maw, 60 * SEC, 5);
     const final = await sendShot(w, KEYS.kyle, 16 * SEC, 7, { final: true, full: jpeg(1024, 768, 50), thumb: jpeg(480, 360, 20) });
     assert.deepEqual([final.status, final.match, final.secs], [200, id, 196]);
     // Every game shows the same screen: the first one's is the match's.
     assert.deepEqual(await sendShot(w, KEYS.maw, 15 * SEC, 8, { final: true }), { status: 409, error: "have" });
-    assert.deepEqual(await askShot(w, KEYS.maw, 15 * SEC, 8, true), { status: 409, error: "have" });
+    assert.deepEqual(await askShot(w, KEYS.maw, 15 * SEC, 8, true), { status: 200, no: "have" });
     assert.equal((await sendShot(w, KEYS.kyle, 16 * SEC, 7, { final: true })).id, final.id, "the same one again is found");
     assert.equal(env.SHOTS.m.size, 4);
     // It doesn't count as one of its sender's own.
@@ -1894,7 +1894,7 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     await w.settle();
     const left = env.LADDER.rows("SELECT id, ended FROM matches ORDER BY id DESC LIMIT 1")[0];
     assert.equal(left.ended, "left");
-    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * SEC, 9, true), { status: 404, error: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * SEC, 9, true), { status: 200, no: "none", wait: false });
     assert.equal((await askShot(w, KEYS.kyle, 30 * SEC, 9)).match, left.id, "a player's own picture of it is taken");
 
     // That screen names everyone, so a match with a player who's shown as
@@ -1902,15 +1902,15 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     // is hidden. The others' own pictures are theirs to share.
     skew += MIN;
     const anon = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Shy", KEYS.boc, "anon"]], [[2, 1], [3, 1]]);
-    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 10, true), { status: 409, error: "anonymous" });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 10, true), { status: 200, no: "anonymous" });
     assert.deepEqual(await sendShot(w, KEYS.kyle, 16 * SEC, 10, { final: true }), { status: 409, error: "anonymous" });
     assert.equal((await sendShot(w, KEYS.kyle, 60 * SEC, 11)).match, anon);
-    assert.deepEqual(await askShot(w, KEYS.boc, 60 * SEC, 12), { status: 404, error: "none", wait: true },
+    assert.deepEqual(await askShot(w, KEYS.boc, 60 * SEC, 12), { status: 200, no: "none", wait: true },
                      "one recorded as Anonymous has no key in the match");
     skew += MIN;
     const hid = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
     env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE name = 'Maw'");
-    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 13, true), { status: 409, error: "anonymous" });
+    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 13, true), { status: 200, no: "anonymous" });
     env.LADDER.db.exec("UPDATE players SET hidden = 0");
     assert.equal((await askShot(w, KEYS.kyle, 16 * SEC, 13, true)).match, hid);
 });

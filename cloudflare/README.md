@@ -447,7 +447,9 @@ match's page. When the level is over and the lobby has saved the match, the page
 where each one goes (`GET /ladder/shot?age=<ms>&taken=<ms>`) and sends it there
 (`POST`, the same address): a JPEG no longer than 1920 pixels on its longer side, and a small copy.
 The lobby works out the match itself, from the browser's key and how long ago the picture was taken;
-it never takes a match's number from a page. Nothing is sent during a level.
+it never takes a match's number from a page. Nothing is sent during a level. A level the lobby keeps
+no match of (under a minute, a player alone, or no kills) has no page, and its screenshots stay in
+the browser.
 
 The player decides. The prompt a game starts from has a box, "Share my screenshots on match pages",
 ticked to begin with, and so has Your Screenshots; nothing is sent before a game has started from a
