@@ -1412,6 +1412,11 @@ h3.part { margin: 18px 0 6px; color: var(--gold); font: bold 14px Verdana, Genev
   .banner a.play { padding: 6px 14px; font-size: 16px; }
   .shot-view .step { width: 26px; }
 }
+/* A phone: two pictures side by side, the final scoreboard across both. */
+@media (max-width: 480px) {
+  .shot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 8px; }
+  .shot.final { grid-column: 1 / -1; }
+}
 @media (pointer: coarse) {
   .style-pick button, .shot-view .bar button { min-height: 26px; }
   .tabs a { padding: 4px 10px; }
