@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { deflateRawSync } from "node:zlib";
+import { deflateRawSync, gunzipSync } from "node:zlib";
 
 const stubUrl = new URL("./cfstub.mjs", import.meta.url).href;
 register("data:text/javascript," + encodeURIComponent(`
@@ -340,9 +340,19 @@ const LIST = `<div class="level-list-screenshot"></div><div class="level-list-it
     <span class="mute">By:</span> X<br><span class="mute">Added:</span> 2001-01-01<br></div>
     <div class="level-list-details"><span class="mute">Downloads:</span> 10</div>`;
 
+// The 3D preview's data for 6000.zip, as 3dpreview.massassi.net sends it.
+const PV_ZIP = "https://www.massassi.net/media/levels/files/jkmp/6000.zip";
+const PV_MAP = JSON.stringify({ surfaces: [{ vertices: [[[0, 0, 0], [0, 0], 1], [[1, 0, 0], [1, 0], 1], [[1, 1, 0], [1, 1], 1]], material: 0 }],
+                                model_surfaces: [], sky_surfaces: [], material_colors: ["#858559"], spawn_points: [{ pos: [0, 0, 0], rot: [0, 90, 0] }] });
+const PV_MAT = JSON.stringify([{ data: "data:image/png;base64,iVBORw0KGgo=", name: "3do/mat/dflt.mat" }]);
+const pvUrl = (what, zip, ep) => `pv:/level/${what}.json?version=14&url=${zip || PV_ZIP}&episode=${ep || 0}`;
+const gunzip = b => new TextDecoder().decode(gunzipSync(b));
+
 function fakeMassassi(extra) {
     const seen = [];
     const routes = Object.assign({
+        [pvUrl("map")]: () => new Response(PV_MAP),
+        [pvUrl("mat")]: () => new Response(PV_MAT),
         "/levels/jkmp/?num=9999": () => new Response(LIST),
         "/levels/files/323.shtml": () => new Response(PAGE),
         "/media/levels/files/jkmp/6000.zip": () => new Response(ZIP, { headers: { "Content-Length": String(ZIP.length) } }),
@@ -351,9 +361,9 @@ function fakeMassassi(extra) {
     }, extra || {});
     globalThis.fetch = async (url, init) => {
         const u = new URL(url);
-        assert.equal(u.origin, "https://www.massassi.net");
+        assert.ok(["https://www.massassi.net", "https://3dpreview.massassi.net"].includes(u.origin), u.origin);
         assert.match(init.headers["User-Agent"], /^Mozilla\/5\.0 \(compatible; level-index/);
-        const p = u.pathname + u.search;
+        const p = (u.origin.startsWith("https://3d") ? "pv:" : "") + u.pathname + u.search;
         seen.push(p);
         const r = routes[p];
         if (r) return r();
@@ -397,6 +407,8 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
         "/levels/jkmp/?num=9999",
         "/levels/files/323.shtml", "/media/levels/files/jkmp/6000.zip",
         "/media/levels/screenshots/323_1.jpg", "/media/levels/screenshots/323_2.jpg",
+        // One GOB of one level: its 3D data straight away, no preview page.
+        pvUrl("map"), pvUrl("mat"),
         "/levels/files/400.shtml",
     ]);
     // Never the download link.
@@ -410,6 +422,11 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.deepEqual([l.id, l.k, l.t, l.a, l.rel, l.rp, l.src, l.add, l.sz, l.dl, l.sh, l.z, l.h],
                      [323, "mp", "6000 Block", "Brian Lozier", "1999-10-16", "d", "r", "2000-06-02", ZIP.length, 5231, 2, "6000.zip", sha(ZIP)]);
     assert.deepEqual(l.g, [{ n: "6000.gob", h: sha(GOB), b: GOB.length, ep: "6000 Block", ty: 2, lv: ["6000.jkl", "6000s.jkl"] }]);
+    // Its 3D data, a map and its textures, kept gzip.
+    assert.deepEqual(l.pv, ["6000"]);
+    assert.equal(gunzip(env.LEVELS.m.get("pv/323-0.map.json").bytes), PV_MAP);
+    assert.equal(gunzip(env.LEVELS.m.get("pv/323-0.mat.json").bytes), PV_MAT);
+    assert.equal(env.LEVELS.m.get("pv/323-0.map.json").httpMetadata.contentEncoding, "gzip");
     const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/323.json").bytes));
     assert.equal(d.desc, "6000 Block is the sequel to 5600 Block.\nForce jump is recommended.");
     assert.equal(d.texts[0].n, "6000.txt");
@@ -420,8 +437,12 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(env.LEVELS.m.get("zip/323.zip").customMetadata.sha256, sha(ZIP));
     assert.ok(env.LEVELS.m.has("shot/323-2"));
     const st = await job.status();
-    assert.equal(st.requests_total, 11);
+    assert.equal(st.requests_total, 13);
     assert.deepEqual(st.not_ready, [{ st: "gone", n: 1 }]);
+    const mp = st.by_list.find(b => b.cat === "jkmp");
+    assert.deepEqual([mp.previews, mp.previews_left, mp.previews_none], [1, 0, 0]);
+    assert.ok(mp.preview_bytes > 0);
+    assert.equal(st.stored_bytes, ZIP.length + 6 + mp.preview_bytes);
 });
 
 await check("the job asks Massassi again only for what's new", async () => {
@@ -505,8 +526,126 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal((await get("/levels/z/323.zip/x")).status, 404);
     assert.equal(await get("/levels/../x"), null);
     r = await get("/levels/status");
-    assert.equal(JSON.parse(await r.text()).requests_total, 11);
+    assert.equal(JSON.parse(await r.text()).requests_total, 13);
+    r = await get("/levels/p/323-0.map.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Encoding"), "gzip");
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=86400");
+    assert.equal(gunzip(new Uint8Array(await r.arrayBuffer())), PV_MAP);
+    r = await get("/levels/p/323-0.mat.json");
+    assert.equal(gunzip(new Uint8Array(await r.arrayBuffer())), PV_MAT);
+    assert.equal((await get("/levels/p/323-1.map.json")).status, 404);
+    assert.equal((await get("/levels/p/323-0.png.json")).status, 404);
     assert.equal(await levelsRoute(new Request("https://b/levels/jk1.json"), {}, new URL("https://b/levels/jk1.json")), null);
+});
+
+// A zip with two GOBs: two maps, which the preview's own page lists.
+const GOB2 = makeGob([{ name: "episode.jk", data: EPISODE.replace(/6000/g, "7000") }, { name: "jkl\\7000.jkl", data: "SECTION: JK\n" }]);
+const ZIP2 = makeZip([{ name: "6000.gob", data: GOB, date: "1999-10-15" }, { name: "7000.gob", data: GOB2, date: "1999-10-15" },
+                      { name: "6000.txt", data: README, date: "1999-10-16" }]);
+const VIEWER = `<script>var maps = JSON.parse("[[\\"sixk\\", \\"?url=${PV_ZIP}\\u0026episode=0\\"], [\\"sevenk\\", \\"?url=${PV_ZIP}\\u0026episode=1\\"]]");</script>`;
+
+await check("the 3D data: a zip of two maps asks the preview's page, then each map", async () => {
+    const seen = fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(ZIP2),
+        [`pv:/level/?url=${PV_ZIP}`]: () => new Response(VIEWER),
+        [pvUrl("map", 0, 1)]: () => new Response(PV_MAP.replace("#858559", "#000001")),
+        [pvUrl("mat", 0, 1)]: () => new Response(PV_MAT),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")),
+                     [`pv:/level/?url=${PV_ZIP}`, pvUrl("map"), pvUrl("mat"), pvUrl("map", 0, 1), pvUrl("mat", 0, 1)]);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(idx.levels[0].pv, ["sixk", "sevenk"]);
+    assert.match(gunzip(env.LEVELS.m.get("pv/323-1.map.json").bytes), /#000001/);
+});
+
+await check("the preview's page parsed: names and episodes, once each", async () => {
+    assert.deepEqual(read.previewMaps(VIEWER), [{ n: "sixk", e: 0 }, { n: "sevenk", e: 1 }]);
+    assert.deepEqual(read.previewMaps("<p>no script</p>"), []);
+    assert.deepEqual(read.previewMaps('var maps = JSON.parse("not json")'), []);
+});
+
+await check("no 3D data for a level (404): it's in the library without it", async () => {
+    const seen = fakeMassassi({ [pvUrl("map")]: () => new Response("Not found", { status: 404 }) });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.ok(!seen.includes(pvUrl("mat")));
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.equal(idx.levels.length, 1);
+    assert.equal(idx.levels[0].pv, undefined);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+    assert.equal((await job.status()).by_list.find(b => b.cat === "jkmp").previews_none, 1);
+});
+
+await check("the preview failing on a level (500) is that level's: no backoff, two tries", async () => {
+    let n = 0;
+    const seen = fakeMassassi({ [pvUrl("map")]: () => (n++, new Response("converter crashed", { status: 500 })) });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.equal(job.kv("backoff_until"), null);
+    assert.equal(n, 1);
+    let r = job.sql.exec("SELECT tries, retry_at, pv_st FROM lv WHERE id = 323").toArray()[0];
+    assert.deepEqual([r.tries, r.pv_st], [1, null]);
+    assert.ok(r.retry_at > Date.now() + 50 * 60 * 1000);
+    // The level is in the library meanwhile.
+    let idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.equal(idx.levels.length, 1);
+    job.sql.exec("UPDATE lv SET retry_at = 0 WHERE id = 323");
+    await runUntilIdle(job);
+    assert.equal(n, 2);
+    r = job.sql.exec("SELECT tries, pv_st FROM lv WHERE id = 323").toArray()[0];
+    assert.deepEqual([r.tries, r.pv_st], [0, "error"]);
+    await runUntilIdle(job);
+    assert.equal(n, 2);
+    assert.ok(seen.includes("/levels/files/400.shtml"));
+});
+
+await check("3D data that isn't the preview's, or too big", async () => {
+    fakeMassassi({ [pvUrl("map")]: () => new Response("<html>Internal error</html>") });
+    let { job } = newJob();
+    await job.fetch(new Request("https://levels/kick"));
+    await runUntilIdle(job);
+    let r = job.sql.exec("SELECT tries, pv_st, err FROM lv WHERE id = 323").toArray()[0];
+    assert.deepEqual([r.tries, r.pv_st], [1, null]);
+    assert.match(r.err, /isn't the preview's/);
+    fakeMassassi({ [pvUrl("map")]: () => new Response("{}", { headers: { "Content-Length": String(65 * 1024 * 1024) } }) });
+    ({ job } = newJob());
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "big");
+    // Too big found only while reading it (no Content-Length).
+    const chunk = new Uint8Array(1024 * 1024).fill(32);
+    fakeMassassi({ [pvUrl("map")]: () => new Response(new ReadableStream({
+        start(c) {
+            c.enqueue(new TextEncoder().encode('{"surfaces": ['));
+            for (let i = 0; i < 65; i++) c.enqueue(chunk);
+            c.close();
+        },
+    })) });
+    ({ job } = newJob());
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "big");
+});
+
+await check("LEVELS_PREVIEW = \"0\": no 3D data, the rest as before", async () => {
+    const seen = fakeMassassi();
+    const { job, env } = newJob({ LEVELS_PREVIEW: "0" });
+    await runUntilIdle(job);
+    assert.ok(!seen.some(p => p.startsWith("pv:")));
+    assert.ok(env.LEVELS.m.has("zip/323.zip"));
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, null);
+});
+
+await check("a table from before the 3D data gets its columns", async () => {
+    const ctx = new Ctx();
+    ctx.storage.sql.exec("CREATE TABLE lv (id INTEGER PRIMARY KEY, cat TEXT)");
+    new LevelJob(ctx, { LEVELS: new FakeR2() });
+    new LevelJob(ctx, { LEVELS: new FakeR2() });
+    const cols = ctx.storage.sql.exec("SELECT name FROM pragma_table_info('lv')").toArray().map(c => c.name);
+    for (const c of ["pv_st", "pv_at", "pv_maps", "pv_got", "pv_size"])
+        assert.ok(cols.includes(c), c);
 });
 
 await check("LEVELS_FETCH = \"0\" stops the job", async () => {

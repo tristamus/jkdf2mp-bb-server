@@ -159,6 +159,27 @@ export function directZip(u) {
     return MASSASSI + url.pathname;
 }
 
+// The maps Massassi's 3D preview page lists for a zip (one per GOB): its
+// script has them as var maps = JSON.parse("[[name, "?url=...&episode=N"], ...]").
+export function previewMaps(html) {
+    const m = /var maps = JSON\.parse\(("(?:[^"\\]|\\.)*")\)/.exec(html || "");
+    if (!m)
+        return [];
+    let list;
+    try {
+        list = JSON.parse(JSON.parse(m[1]));
+    } catch {
+        return [];
+    }
+    const maps = [];
+    for (const it of Array.isArray(list) ? list : []) {
+        const e = Array.isArray(it) && /[?&]episode=(\d{1,2})(?:&|$)/.exec(String(it[1] || ""));
+        if (e && !maps.some(x => x.e === Number(e[1])))
+            maps.push({ n: String(it[0] || "").slice(0, 64), e: Number(e[1]) });
+    }
+    return maps;
+}
+
 // "226.0 KiB" -> bytes.
 export function sizeBytes(s) {
     const m = /([\d.]+)\s*(B|KiB|MiB|GiB|KB|MB|GB)/i.exec(s || "");

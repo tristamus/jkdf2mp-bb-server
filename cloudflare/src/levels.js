@@ -25,6 +25,7 @@
 //   detail/<id>.json    one level's description, readmes, files and dates
 //   zip/<id>.zip        the level's zip, as Massassi has it
 //   shot/<id>-<n>       its screenshots, as Massassi has them
+//   pv/<id>-<m>.map.json, pv/<id>-<m>.mat.json   its 3D data for map m (gzip)
 //
 // The routes (levelsRoute, only with LEVELS and LEVELJOB bound):
 //
@@ -32,21 +33,32 @@
 //   GET /levels/d/<id>.json
 //   GET /levels/z/<id>.zip[?h=<sha>]   immutable when h is the zip's SHA-256
 //   GET /levels/s/<id>-<n>.jpg
+//   GET /levels/p/<id>-<m>.map.json, .mat.json   the 3D data (sent gzip)
 //   GET /levels/status                  the job's progress, for checking on it
 //
 // A level's real release date comes from its readme or the dates of its
 // files (levels-read.js, releaseDate), not Massassi's "Added", which is
 // 2000-06-02 for ~600 levels imported in bulk that day.
 //
+// The 3D data comes from Massassi's 3D preview (jkview, by Stephan Reiter,
+// on 3dpreview.massassi.net), which Brian said is fine to fetch, spread over
+// time: for each level, after its zip and pictures, the preview's map.json
+// (the level's surfaces, their texture coordinates and light, the spawn
+// points) and mat.json (its textures as PNGs, with their names), once per map
+// (GOB) in the zip. Taken without ownsgame=1, so it holds no art from the
+// game itself: textures that come with the level are in it, the game's own
+// only as blurred stand-ins, which the page swaps for the real ones from the
+// player's own game files.
+//
 // Variables (wrangler.toml): LEVELS_FETCH = "0" stops the job (what it has
-// stays served); LEVELS_MAX_GB stops copying zips and pictures once the
+// stays served); LEVELS_PREVIEW = "0" stops it getting 3D data; LEVELS_MAX_GB stops copying zips and pictures once the
 // bucket holds that much (6 when it isn't set: the account's 10 GB a month
 // of R2 without charge is shared with the screenshots); LEVELS_PACE_MS and
 // LEVELS_SOURCE are for tests (a local stand-in for Massassi), and so is
 // LEVELS_MEM_ZIP (the size from which a zip is read from the bucket in parts).
 
 import { DurableObject } from "cloudflare:workers";
-import { parseList, parsePage, sizeBytes, openZip, readEntry, dataStart, memReader, parseGob, parseEpisode,
+import { parseList, parsePage, previewMaps, sizeBytes, openZip, readEntry, dataStart, memReader, parseGob, parseEpisode,
          decodeText, releaseDate, isText, isLevelFile } from "./levels-read.js";
 
 const MASSASSI = "https://www.massassi.net";
@@ -88,6 +100,11 @@ const MAX_PAGE = 2 * 1024 * 1024;
 const MAX_TEXTS = 4, MAX_TEXT_IN = 1024 * 1024, MAX_TEXT_OUT = 64 * 1024;
 const MAX_FILES = 500;
 const UA = "Mozilla/5.0 (compatible; level-index/1.0)";
+const PREVIEW = "https://3dpreview.massassi.net/level/";
+// The preview's data format, as its own page asks for it.
+const PREVIEW_VERSION = 14;
+const MAX_PREVIEW = 64 * 1024 * 1024;
+const MAX_MAPS = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lv (
@@ -102,6 +119,7 @@ CREATE TABLE IF NOT EXISTS lv (
     shots TEXT,
     shots_got INTEGER NOT NULL DEFAULT 0,
     zip_url TEXT, zip_at INTEGER, zip_st TEXT, zip_size INTEGER, zip_sha TEXT,
+    pv_st TEXT, pv_at INTEGER, pv_maps TEXT, pv_got INTEGER NOT NULL DEFAULT 0, pv_size INTEGER NOT NULL DEFAULT 0,
     info TEXT,
     tries INTEGER NOT NULL DEFAULT 0, retry_at INTEGER, err TEXT
 );
@@ -154,6 +172,15 @@ export class LevelJob extends DurableObject {
         super(ctx, env);
         this.sql = ctx.storage.sql;
         this.sql.exec(SCHEMA);
+        // The 3D data's columns, for a table from before them.
+        for (const col of ["pv_st TEXT", "pv_at INTEGER", "pv_maps TEXT", "pv_got INTEGER NOT NULL DEFAULT 0",
+                           "pv_size INTEGER NOT NULL DEFAULT 0"]) {
+            try {
+                this.sql.exec(`ALTER TABLE lv ADD COLUMN ${col}`);
+            } catch {
+                // There already.
+            }
+        }
     }
 
     kv(k, v) {
@@ -222,8 +249,11 @@ export class LevelJob extends DurableObject {
             `SELECT * FROM lv WHERE (retry_at IS NULL OR retry_at <= ?) AND (
                  page_at IS NULL
                  OR (page_st = 'ok' AND zip_url IS NOT NULL AND zip_st IS NULL AND ? = 0)
-                 OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got < json_array_length(shots) AND ? = 0))
-             ORDER BY prio, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0).toArray()[0];
+                 OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got < json_array_length(shots) AND ? = 0)
+                 OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got >= json_array_length(COALESCE(shots, '[]'))
+                     AND pv_st IS NULL AND zip_url IS NOT NULL AND ? = 0))
+             ORDER BY prio, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0,
+            full || this.env.LEVELS_PREVIEW === "0" ? 1 : 0).toArray()[0];
         if (row) {
             await this.guard(() => this.work(row, now), row);
             return true;
@@ -243,7 +273,9 @@ export class LevelJob extends DurableObject {
             return this.readPage(row, now);
         if (row.zip_st == null)
             return this.readZip(row, now);
-        return this.readShot(row, now);
+        if (row.shots_got < JSON.parse(row.shots || "[]").length)
+            return this.readShot(row, now);
+        return this.readPreview(row, now);
     }
 
     // Runs one fetch and settles what a failure means. Massassi busy or
@@ -258,7 +290,9 @@ export class LevelJob extends DurableObject {
             const status = e instanceof HttpError ? e.status : 0;
             const why = String(e && e.message || e).slice(0, 300);
             this.kv("last_error", `${new Date().toISOString()} ${row ? "level " + row.id + ": " : ""}${why}`);
-            if (status === 429 || status >= 500 || e.network || !row) {
+            // The 3D preview failing on one level (its converter can't read
+            // it, say) is that level's, not Massassi being busy.
+            if (status === 429 || (status >= 500 && !e.preview) || e.network || !row) {
                 const fails = Number(this.kv("fails") || 0) + 1;
                 this.kv("fails", fails);
                 const after = Number(e.retryAfter) > 0 ? Number(e.retryAfter) * 1000 : 0;
@@ -266,7 +300,9 @@ export class LevelJob extends DurableObject {
                 return;
             }
             const tries = row.tries + 1;
-            if (tries < MAX_TRIES) {
+            // The preview's converter failing on a level fails the same way
+            // again: two tries, not four.
+            if (tries < (e.preview ? 2 : MAX_TRIES)) {
                 this.sql.exec("UPDATE lv SET tries = ?, retry_at = ?, err = ? WHERE id = ?",
                               tries, Date.now() + HOUR * 2 ** (tries - 1), why, row.id);
             } else if (row.page_at == null) {
@@ -274,6 +310,9 @@ export class LevelJob extends DurableObject {
                               Date.now(), why, row.id);
             } else if (row.zip_st == null) {
                 this.sql.exec("UPDATE lv SET zip_st = 'error', zip_at = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
+                              Date.now(), why, row.id);
+            } else if (row.shots_got >= JSON.parse(row.shots || "[]").length) {
+                this.sql.exec("UPDATE lv SET pv_st = 'error', pv_at = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
                               Date.now(), why, row.id);
             } else {
                 // A picture that won't come: the level goes without it.
@@ -287,8 +326,9 @@ export class LevelJob extends DurableObject {
     }
 
     async get(url, max) {
-        const src = this.env.LEVELS_SOURCE;
-        const real = src ? url.replace(MASSASSI, src) : url;
+        const src = this.env.LEVELS_SOURCE, psrc = this.env.LEVELS_PREVIEW_SOURCE;
+        const real = url.startsWith(PREVIEW) ? (psrc ? psrc + url.slice(PREVIEW.length) : url)
+                                             : src ? url.replace(MASSASSI, src) : url;
         this.count();
         let res;
         try {
@@ -303,7 +343,7 @@ export class LevelJob extends DurableObject {
         const len = Number(res.headers.get("Content-Length") || 0);
         if (max && len > max) {
             await res.body.cancel();
-            throw new Error(`too big (${len} bytes)`);
+            throw Object.assign(new Error(`too big (${len} bytes)`), { tooBig: true });
         }
         return res;
     }
@@ -368,7 +408,8 @@ export class LevelJob extends DurableObject {
                  zip_url = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?`,
             now, p.name, p.size, p.date, p.desc, p.title, p.author, p.zip, row.id);
         if (again || row.zip_st == null || row.zip_st === "error" || row.zip_st === "full") {
-            this.sql.exec("UPDATE lv SET zip_st = ?, shots = ?, shots_got = 0 WHERE id = ?", p.zip ? null : "none", shots, row.id);
+            this.sql.exec("UPDATE lv SET zip_st = ?, shots = ?, shots_got = 0, pv_st = NULL, pv_maps = NULL, pv_got = 0, pv_size = 0 WHERE id = ?",
+                          p.zip ? null : "none", shots, row.id);
         } else if (shots !== row.shots) {
             this.sql.exec("UPDATE lv SET shots = ?, shots_got = 0 WHERE id = ?", shots, row.id);
         }
@@ -388,7 +429,8 @@ export class LevelJob extends DurableObject {
 
     // What the bucket holds, as the job counts it.
     stored() {
-        const r = this.sql.exec("SELECT COALESCE(SUM(zip_size), 0) AS n FROM lv WHERE zip_st = 'ok'").toArray()[0];
+        const r = this.sql.exec(
+            "SELECT COALESCE(SUM(CASE WHEN zip_st = 'ok' THEN zip_size ELSE 0 END), 0) + COALESCE(SUM(pv_size), 0) AS n FROM lv").toArray()[0];
         return r.n + Number(this.kv("shot_bytes") || 0);
     }
 
@@ -571,6 +613,64 @@ export class LevelJob extends DurableObject {
         this.dirty();
     }
 
+    // The level's 3D data from Massassi's 3D preview, one file a step. The
+    // preview has a map for each GOB with a level in it (episode=N, its first
+    // level): for a zip with one, map 0; otherwise the preview's page first,
+    // for the maps it lists. Kept gzip, as the page gets it.
+    async readPreview(row, now) {
+        const at = row.zip_url;
+        // Its url= as the preview's own page writes it, unless it can't be.
+        const zipArg = /[\s&#+?%]/.test(at) ? encodeURIComponent(at) : at;
+        let maps = row.pv_maps ? JSON.parse(row.pv_maps) : null;
+        try {
+            if (!maps) {
+                const gobs = (JSON.parse(row.info || "{}").gobs || []).filter(g => g.ep || (g.lv && g.lv.length));
+                if (!gobs.length) {
+                    // No level in it (a skin, a mod): nothing to show.
+                    this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", now, row.id);
+                    return;
+                }
+                if (gobs.length === 1) {
+                    maps = [{ n: gobs[0].n.replace(/\.go[bo]$/i, ""), e: 0 }];
+                } else {
+                    const html = await (await this.get(`${PREVIEW}?url=${zipArg}`, MAX_PAGE)).text();
+                    maps = previewMaps(html).slice(0, MAX_MAPS);
+                    this.sql.exec("UPDATE lv SET pv_maps = ?, pv_got = 0, pv_st = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
+                                  JSON.stringify(maps), maps.length ? null : "none", now, row.id);
+                    if (!maps.length)
+                        this.dirty();
+                    return;
+                }
+                this.sql.exec("UPDATE lv SET pv_maps = ?, pv_got = 0 WHERE id = ?", JSON.stringify(maps), row.id);
+            }
+            const k = row.pv_maps ? row.pv_got : 0;
+            const m = k >> 1, what = k & 1 ? "mat" : "map";
+            const res = await this.get(`${PREVIEW}${what}.json?version=${PREVIEW_VERSION}&url=${zipArg}&episode=${maps[m].e}`, MAX_PREVIEW);
+            const gz = await packPreview(res, what);
+            if (!gz) {
+                // Bigger than the page should load: the level goes without.
+                this.sql.exec("UPDATE lv SET pv_st = 'big', pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", now, row.id);
+                this.dirty();
+                return;
+            }
+            await this.env.LEVELS.put(`pv/${row.id}-${m}.${what}.json`, gz,
+                                      { httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
+            const done = k + 1 >= maps.length * 2;
+            this.sql.exec("UPDATE lv SET pv_got = ?, pv_size = pv_size + ?, pv_st = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
+                          k + 1, gz.length, done ? "ok" : null, now, row.id);
+            if (done)
+                this.dirty();
+        } catch (e) {
+            if (e.tooBig || e instanceof HttpError && (e.status === 404 || e.status === 410)) {
+                this.sql.exec("UPDATE lv SET pv_st = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
+                              e.tooBig ? "big" : "none", now, row.id);
+                this.dirty();
+                return;
+            }
+            throw Object.assign(e, { preview: true });
+        }
+    }
+
     dirty() {
         this.kv("dirty", 1);
     }
@@ -597,6 +697,7 @@ export class LevelJob extends DurableObject {
                     rel: d.d || null, rp: d.p ? d.p[0] : null, sd: d.sort && d.sort !== d.d ? d.sort : undefined,
                     src: d.src ? d.src[0] : null, add: r.mdate || r.added, sz: r.zip_size, r: r.rating, v: r.votes, dl: r.dl,
                     sh: r.shots_got, z: info.name, h: r.zip_sha,
+                    pv: r.pv_st === "ok" ? JSON.parse(r.pv_maps || "[]").map(m => m.n) : undefined,
                     g: (info.gobs || []).map(g => ({ n: g.n, h: g.h, b: g.b, ep: g.ep || undefined, ty: g.ty || undefined,
                                                       lv: g.lv && g.lv.length ? g.lv : undefined, in: g.in || undefined })),
                 });
@@ -616,7 +717,9 @@ export class LevelJob extends DurableObject {
                     SUM(page_st = 'ok') AS pages, SUM(page_at IS NULL) AS pages_left,
                     SUM(zip_st = 'ok') AS zips, SUM(page_st = 'ok' AND zip_url IS NOT NULL AND zip_st IS NULL) AS zips_left,
                     SUM(shots_got) AS shots, SUM(CASE WHEN zip_st = 'ok' THEN MAX(0, json_array_length(COALESCE(shots, '[]')) - shots_got) ELSE 0 END) AS shots_left,
-                    SUM(COALESCE(zip_size, 0)) AS bytes
+                    SUM(COALESCE(zip_size, 0)) AS bytes,
+                    SUM(pv_st = 'ok') AS previews, SUM(zip_st = 'ok' AND pv_st IS NULL) AS previews_left,
+                    SUM(pv_st IN ('none', 'error')) AS previews_none, SUM(pv_size) AS preview_bytes
              FROM lv GROUP BY cat`).toArray();
         const odd = this.sql.exec(
             `SELECT COALESCE(zip_st, page_st, 'pending') AS st, COUNT(*) AS n FROM lv
@@ -651,12 +754,53 @@ function job(env) {
 }
 
 // From the cron (lobby.js scheduled()).
+// A 3D data file, gzipped as it comes in rather than held whole (a big level's
+// map.json is tens of MB), and checked to be the preview's: map.json an object
+// with its surfaces first, mat.json a list. Null past MAX_PREVIEW.
+async function packPreview(res, what) {
+    let size = 0, head = new Uint8Array(0), tail = new Uint8Array(0), big = false;
+    const join = (a, b) => {
+        const c = new Uint8Array(a.length + b.length);
+        c.set(a);
+        c.set(b, a.length);
+        return c;
+    };
+    const check = new TransformStream({
+        transform(chunk, ctl) {
+            size += chunk.length;
+            if (size > MAX_PREVIEW) {
+                big = true;
+                throw new Error(`3D ${what} too big`);
+            }
+            if (head.length < 32)
+                head = join(head, chunk.subarray(0, 32 - head.length));
+            tail = chunk.length >= 32 ? chunk.slice(chunk.length - 32) : join(tail, chunk).slice(-32);
+            ctl.enqueue(chunk);
+        },
+    });
+    let gz;
+    try {
+        gz = new Uint8Array(await new Response(res.body.pipeThrough(check).pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+    } catch (e) {
+        if (big)
+            return null;
+        throw e;
+    }
+    const dec = b => new TextDecoder().decode(b).trim();
+    const ok = what === "map" ? /^\{\s*"surfaces"\s*:\s*\[/.test(dec(head)) && dec(tail).endsWith("}")
+                              : /^\[\s*(\]|\{)/.test(dec(head)) && dec(tail).endsWith("]");
+    if (!ok)
+        throw new Error(`3D ${what} isn't the preview's`);
+    return gz;
+}
+
 export async function kickLevels(env) {
     if (levelsOn(env) && env.LEVELS_FETCH !== "0")
         await job(env).fetch("https://levels/kick");
 }
 
-async function serve(request, env, key, cache, type) {
+// encoding: what the stored object already is (gzip), sent as it is.
+async function serve(request, env, key, cache, type, encoding) {
     const head = request.method === "HEAD";
     const seen = (request.headers.get("If-None-Match") || "").replace(/^W\//, "").replace(/^"|"$/g, "");
     const obj = head ? await env.LEVELS.head(key)
@@ -673,6 +817,11 @@ async function serve(request, env, key, cache, type) {
     if (!head && !obj.body)
         return new Response(null, { status: 304, headers });
     headers["Content-Length"] = String(obj.size);
+    if (encoding) {
+        headers["Content-Encoding"] = encoding;
+        headers.Vary = "Accept-Encoding";
+        return new Response(head ? null : obj.body, { status: 200, headers, encodeBody: "manual" });
+    }
     return new Response(head ? null : obj.body, { status: 200, headers });
 }
 
@@ -699,6 +848,8 @@ export async function levelsRoute(request, env, url) {
         }
         return res;
     }
+    if ((m = /^\/levels\/p\/(\d{1,7})-(\d)\.(map|mat)\.json$/.exec(path)))
+        return serve(request, env, `pv/${m[1]}-${m[2]}.${m[3]}.json`, "public, max-age=86400", "application/json; charset=utf-8", "gzip");
     if ((m = /^\/levels\/s\/(\d{1,7})-(\d)\.jpg$/.exec(path)))
         return serve(request, env, `shot/${m[1]}-${m[2]}`, "public, max-age=604800");
     if (path === "/levels/status") {
