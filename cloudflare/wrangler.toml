@@ -27,7 +27,7 @@ workers_dev = true
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*", "/shot/*"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*", "/shot/*", "/levels/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -80,6 +80,11 @@ bucket_name = "jkdf2mp-shots"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Lobby"]
+
+# The Level Library's job (src/levels.js), which only beta has bound for now.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LevelJob"]
 
 [vars]
 # Handed to every page for WebRTC (Cloudflare's own STUN server, from its
@@ -153,6 +158,23 @@ database_id = "5e3266ed-0d04-4c94-a643-156a4b00cc18"
 binding = "SHOTS"
 bucket_name = "jkdf2mp-shots-beta"
 
+# The Level Library (src/levels.js): its job copies Massassi's levels into
+# this bucket (`npx wrangler r2 bucket create jkdf2mp-levels-beta`), and the
+# library reads them from here. Without both bindings the job doesn't run
+# and /levels/ isn't served. The cron only keeps the job's alarm set; the
+# job paces its own requests to Massassi (one every 30 s). README.md, The
+# Level Library.
+[[env.beta.durable_objects.bindings]]
+name = "LEVELJOB"
+class_name = "LevelJob"
+
+[[env.beta.r2_buckets]]
+binding = "LEVELS"
+bucket_name = "jkdf2mp-levels-beta"
+
+[env.beta.triggers]
+crons = ["*/10 * * * *"]
+
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"
 # Nothing moves: every page load is served where it is.
@@ -162,3 +184,7 @@ MOVED_STATUS = "302"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 MATCH_LINKS = "https://beta.jediknight.zone"
+# "0" stops the Level Library's job; LEVELS_MAX_GB is how much it copies
+# before it stops (6 when it isn't set).
+# LEVELS_FETCH = "0"
+# LEVELS_MAX_GB = "6"

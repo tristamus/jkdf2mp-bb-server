@@ -73,6 +73,9 @@ import { imperialGames } from "./imperial.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
 import { ladderRoute } from "./ladder-pages.js";
+import { levelsRoute, kickLevels } from "./levels.js";
+// The Level Library's job (src/levels.js), a Durable Object of its own.
+export { LevelJob } from "./levels.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -189,6 +192,11 @@ export default {
         const ladder = await ladderRoute(request, env, url);
         if (ladder)
             return ladder;
+        // The Level Library's index, levels and pictures (/levels/...): null
+        // for any other path, and for all of them without its bucket.
+        const levels = await levelsRoute(request, env, url);
+        if (levels)
+            return levels;
         const res = await env.ASSETS.fetch(request);
         if (res.status !== 404)
             return res;
@@ -199,6 +207,12 @@ export default {
         const missing = new Response(res.body, res);
         missing.headers.set("Cache-Control", "no-store");
         return missing;
+    },
+
+    // The cron in wrangler.toml (beta only, for now): makes sure the Level
+    // Library's job has its alarm set. The job paces itself.
+    async scheduled(controller, env, ctx) {
+        ctx.waitUntil(kickLevels(env));
     },
 };
 
