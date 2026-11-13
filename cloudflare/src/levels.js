@@ -190,6 +190,47 @@ export class LevelJob extends DurableObject {
                 // There already.
             }
         }
+        if (this.kv("pv_names") !== "2")
+            this.fixPreviewNames();
+    }
+
+    // Once, for 3D data copied before the map names were the levels': the
+    // job then named the one map of a zip with one GOB after the GOB, and
+    // took only its first level. A GOB of one level gets that level's name
+    // (its map is the right one); one of more levels is asked for again,
+    // from the preview's page, which lists them.
+    fixPreviewNames() {
+        let changed = false, rows = [];
+        try {
+            rows = this.sql.exec("SELECT id, info, pv_maps FROM lv WHERE pv_maps IS NOT NULL").toArray();
+        } catch {
+            // A table without them: nothing copied yet.
+        }
+        for (const row of rows) {
+            let maps, gobs;
+            try {
+                maps = JSON.parse(row.pv_maps);
+                gobs = (JSON.parse(row.info || "{}").gobs || []).filter(g => g.ep || (g.lv && g.lv.length));
+            } catch {
+                continue;
+            }
+            if (gobs.length !== 1 || !Array.isArray(maps) || maps.length !== 1 || maps[0].e !== 0 ||
+                maps[0].n !== String(gobs[0].n || "").replace(/\.go[bo]$/i, ""))
+                continue;
+            const lv = gobs[0].lv || [];
+            if (lv.length === 1) {
+                const n = lv[0].replace(/\.jkl$/i, "");
+                if (n === maps[0].n)
+                    continue;
+                this.sql.exec("UPDATE lv SET pv_maps = ? WHERE id = ?", JSON.stringify([{ n, e: 0 }]), row.id);
+            } else {
+                this.sql.exec("UPDATE lv SET pv_st = NULL, pv_at = NULL, pv_maps = NULL, pv_got = 0, pv_size = 0 WHERE id = ?", row.id);
+            }
+            changed = true;
+        }
+        this.kv("pv_names", 2);
+        if (changed)
+            this.dirty();
     }
 
     kv(k, v) {

@@ -615,6 +615,46 @@ await check("levels with their 3D data from before get the textures' list, witho
     assert.ok(await job.ctx.storage.getAlarm() < before + 5000);
 });
 
+await check("3D data copied before the levels' names: renamed, or asked for again", async () => {
+    // As the job left them before: a GOB of two levels, its first map only,
+    // named for the GOB.
+    const seen = fakeMassassi();
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    const old = () => {
+        job.sql.exec("UPDATE lv SET pv_maps = ?, pv_st = 'ok', pv_got = 2 WHERE id = 323", JSON.stringify([{ n: "6000", e: 0 }]));
+        job.sql.exec("DELETE FROM kv WHERE k = 'pv_names'");
+    };
+    old();
+    // The new job, on the same storage, asks the preview's page for its levels.
+    const again = new LevelJob(job.ctx, env);
+    let row = again.sql.exec("SELECT pv_st, pv_maps, pv_got, pv_size FROM lv WHERE id = 323").toArray()[0];
+    assert.deepEqual([row.pv_st, row.pv_maps, row.pv_got, row.pv_size], [null, null, 0, 0]);
+    seen.length = 0;
+    await runUntilIdle(again);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), ["pv:/level/?url=" + PV_ZIP, pvUrl("map"), pvUrl("mat")]);
+    // Once only.
+    seen.length = 0;
+    new LevelJob(job.ctx, env);
+    await runUntilIdle(again);
+    assert.deepEqual(seen, []);
+    // A GOB of one level, in a folder: its map renamed for the level, nothing asked.
+    const one = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: JKL }]);
+    const seen2 = fakeMassassi({ "/media/levels/files/jkmp/6000.zip": () => new Response(makeZip([{ name: "Sub/six.gob", data: one }])) });
+    const j2 = newJob();
+    await runUntilIdle(j2.job);
+    j2.job.sql.exec("UPDATE lv SET pv_maps = ? WHERE id = 323", JSON.stringify([{ n: "Sub/six", e: 0 }]));
+    j2.job.sql.exec("DELETE FROM kv WHERE k = 'pv_names'");
+    seen2.length = 0;
+    const j2b = new LevelJob(j2.job.ctx, j2.env);
+    row = j2b.sql.exec("SELECT pv_st, pv_maps FROM lv WHERE id = 323").toArray()[0];
+    assert.deepEqual([row.pv_st, JSON.parse(row.pv_maps)], ["ok", [{ n: "6000", e: 0 }]]);
+    await runUntilIdle(j2b);
+    assert.deepEqual(seen2.filter(p => p.startsWith("pv:")), []);
+    const idx = JSON.parse(new TextDecoder().decode(j2.env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(idx.levels[0].pv, ["6000"]);
+});
+
 await check("a .jkl's master colormap", async () => {
     assert.equal(read.worldColormap(enc("World Colormaps 1\r\n0:\tA.CMP\r\n")), "a.cmp");
     assert.equal(read.worldColormap(enc("world colormaps 2\n 0: dflt.cmp # main\n1: x.cmp")), "dflt.cmp");
