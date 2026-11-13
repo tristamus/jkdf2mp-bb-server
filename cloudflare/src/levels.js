@@ -51,7 +51,9 @@
 // player's own game files.
 //
 // Variables (wrangler.toml): LEVELS_FETCH = "0" stops the job (what it has
-// stays served); LEVELS_PREVIEW = "0" stops it getting 3D data; LEVELS_MAX_GB stops copying zips and pictures once the
+// stays served); LEVELS_PREVIEW = "0" stops it getting 3D data, and
+// LEVELS_PREVIEW_GB (3 when it isn't set) once it has that much of it;
+// LEVELS_MAX_GB stops copying zips and pictures once the
 // bucket holds that much (6 when it isn't set: the account's 10 GB a month
 // of R2 without charge is shared with the screenshots); LEVELS_PACE_MS and
 // LEVELS_SOURCE are for tests (a local stand-in for Massassi), and so is
@@ -87,6 +89,10 @@ const BACKOFF_MS = 10 * MIN, BACKOFF_MAX_MS = 6 * HOUR;
 // is left as "error" after MAX_TRIES, until its page is read again.
 const MAX_TRIES = 4;
 const MAX_GB = 6;
+// The 3D data's own cap (LEVELS_PREVIEW_GB): about 2 MB a level, so most of
+// the library, and with the levels' 6 still inside the account's 10 GB of R2
+// without charge.
+const PREVIEW_GB = 3;
 // Zips up to MEM_ZIP are read in memory, bigger ones from the bucket in
 // parts (a Durable Object has 128 MB). Over MAX_ZIP they aren't copied.
 const MEM_ZIP = 24 * 1024 * 1024;
@@ -260,7 +266,7 @@ export class LevelJob extends DurableObject {
                      AND pv_st IS NULL AND zip_url IS NOT NULL AND ? = 0)
                  OR (pv_st = 'ok' AND pv_tex = 0 AND ? = 0))
              ORDER BY prio, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0,
-            full || this.env.LEVELS_PREVIEW === "0" ? 1 : 0, this.env.LEVELS_PREVIEW === "0" ? 1 : 0).toArray()[0];
+            full || this.env.LEVELS_PREVIEW === "0" || this.previewFull() ? 1 : 0, this.env.LEVELS_PREVIEW === "0" ? 1 : 0).toArray()[0];
         if (row) {
             let local = false;
             await this.guard(async () => {
@@ -443,11 +449,20 @@ export class LevelJob extends DurableObject {
         await this.env.LEVELS.put(`detail/${id}.json`, JSON.stringify(d), { httpMetadata: { contentType: "application/json" } });
     }
 
-    // What the bucket holds, as the job counts it.
+    // What the bucket holds for the levels themselves (zips and pictures), as
+    // the job counts it: LEVELS_MAX_GB. The 3D data has a cap of its own
+    // (previewBytes, LEVELS_PREVIEW_GB), so it never takes the levels' room.
     stored() {
-        const r = this.sql.exec(
-            "SELECT COALESCE(SUM(CASE WHEN zip_st = 'ok' THEN zip_size ELSE 0 END), 0) + COALESCE(SUM(pv_size), 0) AS n FROM lv").toArray()[0];
+        const r = this.sql.exec("SELECT COALESCE(SUM(zip_size), 0) AS n FROM lv WHERE zip_st = 'ok'").toArray()[0];
         return r.n + Number(this.kv("shot_bytes") || 0);
+    }
+
+    previewBytes() {
+        return this.sql.exec("SELECT COALESCE(SUM(pv_size), 0) AS n FROM lv").toArray()[0].n;
+    }
+
+    previewFull() {
+        return this.previewBytes() >= (Number(this.env.LEVELS_PREVIEW_GB) || PREVIEW_GB) * 1e9;
     }
 
     async full() {
@@ -783,7 +798,7 @@ export class LevelJob extends DurableObject {
             on: this.on(), alarm: await this.ctx.storage.getAlarm(), pace_ms: this.pace(),
             backoff_until: Number(this.kv("backoff_until") || 0) || null, fails: Number(this.kv("fails") || 0),
             requests_today: Number(this.kv("req_today") || 0), requests_total: Number(this.kv("req_total") || 0),
-            stored_bytes: this.stored(), index_at: Number(this.kv("index_at") || 0) || null,
+            stored_bytes: this.stored(), preview_bytes: this.previewBytes(), index_at: Number(this.kv("index_at") || 0) || null,
             last_error: this.kv("last_error"), lists, by_list: by, not_ready: odd, errors, date_flags: flagged,
         };
     }

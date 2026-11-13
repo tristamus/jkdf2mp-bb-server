@@ -460,7 +460,9 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     const mp = st.by_list.find(b => b.cat === "jkmp");
     assert.deepEqual([mp.previews, mp.previews_left, mp.previews_none], [1, 0, 0]);
     assert.ok(mp.preview_bytes > 0);
-    assert.equal(st.stored_bytes, ZIP.length + 6 + mp.preview_bytes);
+    // The 3D data counts toward its own cap, not the levels'.
+    assert.equal(st.stored_bytes, ZIP.length + 6);
+    assert.equal(st.preview_bytes, mp.preview_bytes);
 });
 
 await check("the job asks Massassi again only for what's new", async () => {
@@ -685,6 +687,15 @@ await check("3D data that isn't the preview's, or too big", async () => {
     ({ job } = newJob());
     await runUntilIdle(job);
     assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "big");
+});
+
+await check("past LEVELS_PREVIEW_GB no more 3D data is copied, and the levels go on", async () => {
+    const seen = fakeMassassi();
+    const { job, env } = newJob({ LEVELS_PREVIEW_GB: "0.000000001" });
+    job.sql.exec("INSERT INTO lv (id, cat, game, prio, title, pv_size) VALUES (9, 'jkmp', 'jk1', 0, 'x', 100)");
+    await runUntilIdle(job);
+    assert.ok(!seen.some(p => p.startsWith("pv:")));
+    assert.ok(env.LEVELS.m.has("zip/323.zip"));
 });
 
 await check("LEVELS_PREVIEW = \"0\": no 3D data, the rest as before", async () => {
