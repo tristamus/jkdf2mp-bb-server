@@ -113,7 +113,15 @@ SEQ 2
 10: 0 0 LEVEL 6000.jkl 0 0 -1 -1
 20: 0 0 LEVEL 6000s.jkl 0 0 -1 -1
 `;
-const GOB = makeGob([{ name: "episode.jk", data: EPISODE }, { name: "jkl\\6000.jkl", data: "SECTION: JK\n".repeat(50) }]);
+// A colormap: "CMP ", version 30, no transparency, 52 bytes, then 256 colors.
+const CMP = new Uint8Array(64 + 768 + 64 * 256);
+CMP.set(enc("CMP "));
+CMP[4] = 30;
+for (let i = 0; i < 768; i++)
+    CMP[64 + i] = i & 255;
+const JKL = "SECTION: JK\n".repeat(50) + "\nSECTION: GEORESOURCE\n\n# colormaps\nWorld Colormaps 2\n0:\tLev6000.CMP\n1:\tdflt.cmp\n";
+const GOB = makeGob([{ name: "episode.jk", data: EPISODE }, { name: "jkl\\6000.jkl", data: JKL },
+                     { name: "mat\\Wall6000.mat", data: "MAT " }, { name: "misc\\cmp\\lev6000.cmp", data: CMP }]);
 const README = `6000 Block
 Title                   : 6000 Block
 Author                  : Brian Lozier
@@ -217,7 +225,7 @@ await check("a zip's entries, a GOB's files and its episode", async () => {
     const gob = await read.readEntry(z, z.entries[0]);
     assert.equal(sha(gob), sha(GOB));
     const files = read.parseGob(gob);
-    assert.deepEqual(files.map(f => f.name), ["episode.jk", "jkl/6000.jkl"]);
+    assert.deepEqual(files.map(f => f.name), ["episode.jk", "jkl/6000.jkl", "mat/Wall6000.mat", "misc/cmp/lev6000.cmp"]);
     const ep = read.parseEpisode(new TextDecoder().decode(gob.subarray(files[0].offset, files[0].offset + files[0].size)));
     assert.deepEqual(ep, { title: "6000 Block", type: 2, levels: ["6000.jkl", "6000s.jkl"] });
 });
@@ -347,10 +355,13 @@ const PV_MAP = JSON.stringify({ surfaces: [{ vertices: [[[0, 0, 0], [0, 0], 1], 
 const PV_MAT = JSON.stringify([{ data: "data:image/png;base64,iVBORw0KGgo=", name: "3do/mat/dflt.mat" }]);
 const pvUrl = (what, zip, ep) => `pv:/level/${what}.json?version=14&url=${zip || PV_ZIP}&episode=${ep || 0}`;
 const gunzip = b => new TextDecoder().decode(gunzipSync(b));
+// The preview's page for 6000.zip: of its episode's two levels, one loads.
+const VIEWER1 = `<script>var maps = JSON.parse("[[\\"6000\\", \\"?url=${PV_ZIP}\\u0026episode=0\\"]]");</script>`;
 
 function fakeMassassi(extra) {
     const seen = [];
     const routes = Object.assign({
+        [`pv:/level/?url=${PV_ZIP}`]: () => new Response(VIEWER1),
         [pvUrl("map")]: () => new Response(PV_MAP),
         [pvUrl("mat")]: () => new Response(PV_MAT),
         "/levels/jkmp/?num=9999": () => new Response(LIST),
@@ -389,9 +400,9 @@ function newJob(vars) {
 
 async function runUntilIdle(job, max) {
     for (let i = 0; i < (max || 50); i++) {
-        const before = job.kv("req_total");
+        const before = job.kv("req_total") + "/" + job.kv("steps");
         await job.alarm();
-        if (job.kv("req_total") === before)
+        if (job.kv("req_total") + "/" + job.kv("steps") === before)
             return i;
     }
     throw new Error("still busy");
@@ -407,8 +418,8 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
         "/levels/jkmp/?num=9999",
         "/levels/files/323.shtml", "/media/levels/files/jkmp/6000.zip",
         "/media/levels/screenshots/323_1.jpg", "/media/levels/screenshots/323_2.jpg",
-        // One GOB of one level: its 3D data straight away, no preview page.
-        pvUrl("map"), pvUrl("mat"),
+        // Its episode has two levels: the preview's page, for the ones it has.
+        `pv:/level/?url=${PV_ZIP}`, pvUrl("map"), pvUrl("mat"),
         "/levels/files/400.shtml",
     ]);
     // Never the download link.
@@ -427,6 +438,13 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(gunzip(env.LEVELS.m.get("pv/323-0.map.json").bytes), PV_MAP);
     assert.equal(gunzip(env.LEVELS.m.get("pv/323-0.mat.json").bytes), PV_MAT);
     assert.equal(env.LEVELS.m.get("pv/323-0.map.json").httpMetadata.contentEncoding, "gzip");
+    // And, from the zip in the bucket, what the page needs for the textures.
+    const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
+    assert.deepEqual(tex.own, ["mat/wall6000.mat"]);
+    assert.deepEqual(tex.cmp, { 6000: "lev6000.cmp" });
+    assert.deepEqual(Object.keys(tex.pal), ["lev6000.cmp"]);
+    assert.deepEqual([...Buffer.from(tex.pal["lev6000.cmp"], "base64")], [...CMP.subarray(64, 64 + 768)]);
+    assert.equal(job.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
     const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/323.json").bytes));
     assert.equal(d.desc, "6000 Block is the sequel to 5600 Block.\nForce jump is recommended.");
     assert.equal(d.texts[0].n, "6000.txt");
@@ -437,7 +455,7 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(env.LEVELS.m.get("zip/323.zip").customMetadata.sha256, sha(ZIP));
     assert.ok(env.LEVELS.m.has("shot/323-2"));
     const st = await job.status();
-    assert.equal(st.requests_total, 13);
+    assert.equal(st.requests_total, 14);
     assert.deepEqual(st.not_ready, [{ st: "gone", n: 1 }]);
     const mp = st.by_list.find(b => b.cat === "jkmp");
     assert.deepEqual([mp.previews, mp.previews_left, mp.previews_none], [1, 0, 0]);
@@ -526,7 +544,10 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal((await get("/levels/z/323.zip/x")).status, 404);
     assert.equal(await get("/levels/../x"), null);
     r = await get("/levels/status");
-    assert.equal(JSON.parse(await r.text()).requests_total, 13);
+    assert.equal(JSON.parse(await r.text()).requests_total, 14);
+    r = await get("/levels/p/323.tex.json");
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(await r.text()).cmp, { 6000: "lev6000.cmp" });
     r = await get("/levels/p/323-0.map.json");
     assert.equal(r.status, 200);
     assert.equal(r.headers.get("Content-Encoding"), "gzip");
@@ -560,6 +581,43 @@ await check("the 3D data: a zip of two maps asks the preview's page, then each m
     const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
     assert.deepEqual(idx.levels[0].pv, ["sixk", "sevenk"]);
     assert.match(gunzip(env.LEVELS.m.get("pv/323-1.map.json").bytes), /#000001/);
+});
+
+await check("the 3D data: one GOB of one level goes straight to its map, named for the level", async () => {
+    const one = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: JKL }]);
+    const seen = fakeMassassi({ "/media/levels/files/jkmp/6000.zip": () => new Response(makeZip([{ name: "6000.gob", data: one }])) });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), [pvUrl("map"), pvUrl("mat")]);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(idx.levels[0].pv, ["6000"]);
+    // The level's colormap isn't in its GOB: the game's own, which the page has.
+    const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
+    assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {} });
+});
+
+await check("levels with their 3D data from before get the textures' list, without asking Massassi", async () => {
+    const seen = fakeMassassi();
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    env.LEVELS.m.delete("pv/323.tex.json");
+    job.sql.exec("UPDATE lv SET pv_tex = 0");
+    seen.length = 0;
+    await runUntilIdle(job);
+    assert.deepEqual(seen, []);
+    assert.ok(env.LEVELS.m.has("pv/323.tex.json"));
+    // Its step doesn't wait the pace.
+    job.sql.exec("UPDATE lv SET pv_tex = 0");
+    const before = Date.now();
+    await job.alarm();
+    assert.ok(await job.ctx.storage.getAlarm() < before + 5000);
+});
+
+await check("a .jkl's master colormap", async () => {
+    assert.equal(read.worldColormap(enc("World Colormaps 1\r\n0:\tA.CMP\r\n")), "a.cmp");
+    assert.equal(read.worldColormap(enc("world colormaps 2\n 0: dflt.cmp # main\n1: x.cmp")), "dflt.cmp");
+    assert.equal(read.worldColormap(enc("World Colormaps 0\n")), null);
+    assert.equal(read.worldColormap(enc("SECTION: JK\n")), null);
 });
 
 await check("the preview's page parsed: names and episodes, once each", async () => {

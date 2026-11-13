@@ -180,6 +180,58 @@ export function previewMaps(html) {
     return maps;
 }
 
+// What the 3D view needs from a level's GOB to draw its textures as the game
+// does: the textures (MATs) and colormaps (CMPs) it ships, and each level's
+// master colormap (the first under "World Colormaps" in its .jkl), which the
+// game turns every texture into colors with. own: the MATs' paths,
+// lowercased; cmp: level (its .jkl's name without .jkl) -> colormap name;
+// pal: colormap name -> its 256 colors (768 bytes, base64).
+export function gobTextures(b, out) {
+    const dir = parseGob(b);
+    if (!dir)
+        return out;
+    for (const f of dir) {
+        const name = f.name.toLowerCase();
+        const base = name.split("/").pop();
+        if (/\.mat$/.test(name)) {
+            if (out.own.length < MAX_OWN && !out.own.includes(name))
+                out.own.push(name);
+        } else if (/\.cmp$/.test(name)) {
+            // "CMP ", version, transparency, then 52 bytes, then the colors.
+            if (f.size >= 64 + 768 && u32(b, f.offset) === 0x20504d43 && Object.keys(out.pal).length < 32)
+                out.pal[base] = toBase64(b.subarray(f.offset + 64, f.offset + 64 + 768));
+        } else if (/\.jkl$/.test(name) && f.size <= MAX_JKL) {
+            const cmp = worldColormap(b.subarray(f.offset, f.offset + f.size));
+            if (cmp)
+                out.cmp[base.replace(/\.jkl$/, "")] = cmp;
+        }
+    }
+    return out;
+}
+
+const MAX_OWN = 4000, MAX_JKL = 32 * 1024 * 1024;
+
+// A .jkl's master colormap: the first entry of its World Colormaps.
+export function worldColormap(b) {
+    let t = "";
+    // Latin-1, a part at a time: a .jkl can be megabytes, the section is near its top.
+    for (let at = 0; at < b.length; at += 65536)
+        t += String.fromCharCode.apply(null, b.subarray(at, Math.min(b.length, at + 65536)));
+    const m = /^[ \t]*World[ \t]+Colormaps[ \t]+(\d+)[ \t]*\r?$/im.exec(t);
+    if (!m || m[1] === "0")
+        return null;
+    const rest = t.slice(m.index + m[0].length, m.index + m[0].length + 4096);
+    const e = /^[ \t]*0[ \t]*:[ \t]*([^\s#]+)/m.exec(rest);
+    return e ? e[1].toLowerCase().slice(0, 64) : null;
+}
+
+function toBase64(b) {
+    let s = "";
+    for (const c of b)
+        s += String.fromCharCode(c);
+    return btoa(s);
+}
+
 // "226.0 KiB" -> bytes.
 export function sizeBytes(s) {
     const m = /([\d.]+)\s*(B|KiB|MiB|GiB|KB|MB|GB)/i.exec(s || "");
