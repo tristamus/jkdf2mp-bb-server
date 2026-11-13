@@ -1,0 +1,208 @@
+{
+  "made_by": "tools/build-kit.mjs",
+  "kits": [
+    {
+      "label": "cloudflare-109",
+      "page": {
+        "jspi": {
+          "js": "e/jspi/openjkdf2.b6a594cbfcfc.js",
+          "wasm": "e/jspi/openjkdf2.89f25ea26391.wasm"
+        },
+        "asyncify": {
+          "js": "e/openjkdf2.8f8718f395e8.js",
+          "wasm": "e/openjkdf2.a22df8274006.wasm"
+        },
+        "unzip": "e/unzip.ef8a524a045b.js"
+      },
+      "files": [
+        "e/openjkdf2.8f8718f395e8.js",
+        "e/openjkdf2.a22df8274006.wasm",
+        "e/jspi/openjkdf2.b6a594cbfcfc.js",
+        "e/jspi/openjkdf2.89f25ea26391.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-108",
+      "files": [
+        "e/openjkdf2.8f8718f395e8.js",
+        "e/openjkdf2.3e8d8d9e4b5f.wasm",
+        "e/jspi/openjkdf2.b6a594cbfcfc.js",
+        "e/jspi/openjkdf2.9c730970c697.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-107",
+      "files": [
+        "e/openjkdf2.1332ff882a13.js",
+        "e/openjkdf2.1bbc0baec3f0.wasm",
+        "e/jspi/openjkdf2.549bea9277b6.js",
+        "e/jspi/openjkdf2.c4afed73902e.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-106",
+      "files": [
+        "e/openjkdf2.be871a77ce62.js",
+        "e/openjkdf2.4676f7a362ee.wasm",
+        "e/jspi/openjkdf2.132526aa6458.js",
+        "e/jspi/openjkdf2.42166c42e25e.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-105",
+      "files": [
+        "e/openjkdf2.a9b930d79138.js",
+        "e/openjkdf2.b63923a0680e.wasm",
+        "e/jspi/openjkdf2.5e07e871797b.js",
+        "e/jspi/openjkdf2.b944053a03cf.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-103",
+      "files": [
+        "e/openjkdf2.4323fbbf04a9.js",
+        "e/openjkdf2.bf6ecc3e6177.wasm",
+        "e/jspi/openjkdf2.79e7de5ca95d.js",
+        "e/jspi/openjkdf2.1e5425b23006.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-102",
+      "files": [
+        "e/openjkdf2.4323fbbf04a9.js",
+        "e/openjkdf2.bf6ecc3e6177.wasm",
+        "e/jspi/openjkdf2.79e7de5ca95d.js",
+        "e/jspi/openjkdf2.1e5425b23006.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-101",
+      "files": [
+        "e/openjkdf2.5cfc0b906df6.js",
+        "e/openjkdf2.f768e6422c1f.wasm",
+        "e/jspi/openjkdf2.97c0a65d7365.js",
+        "e/jspi/openjkdf2.92eaa55b4a5c.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-100",
+      "files": [
+        "e/openjkdf2.5cfc0b906df6.js",
+        "e/openjkdf2.f768e6422c1f.wasm",
+        "e/jspi/openjkdf2.97c0a65d7365.js",
+        "e/jspi/openjkdf2.92eaa55b4a5c.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-99",
+      "files": [
+        "e/openjkdf2.5cfc0b906df6.js",
+        "e/openjkdf2.3a9bc8b7bafe.wasm",
+        "e/jspi/openjkdf2.97c0a65d7365.js",
+        "e/jspi/openjkdf2.82474bca3242.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-98",
+      "files": [
+        "e/openjkdf2.f00e65f95de1.js",
+        "e/openjkdf2.856a4302290b.wasm",
+        "e/jspi/openjkdf2.9d42d623f2de.js",
+        "e/jspi/openjkdf2.73265e3b3303.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-97",
+      "files": [
+        "e/openjkdf2.93d6027b2518.js",
+        "e/openjkdf2.537b041f75c0.wasm",
+        "e/jspi/openjkdf2.c41faa4335d8.js",
+        "e/jspi/openjkdf2.514e3e869ae0.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-96",
+      "files": [
+        "e/openjkdf2.93d6027b2518.js",
+        "e/openjkdf2.537b041f75c0.wasm",
+        "e/jspi/openjkdf2.c41faa4335d8.js",
+        "e/jspi/openjkdf2.514e3e869ae0.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-95",
+      "files": [
+        "e/openjkdf2.93d6027b2518.js",
+        "e/openjkdf2.537b041f75c0.wasm",
+        "e/jspi/openjkdf2.c41faa4335d8.js",
+        "e/jspi/openjkdf2.514e3e869ae0.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-94",
+      "files": [
+        "e/openjkdf2.93d6027b2518.js",
+        "e/openjkdf2.537b041f75c0.wasm",
+        "e/jspi/openjkdf2.c41faa4335d8.js",
+        "e/jspi/openjkdf2.514e3e869ae0.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    },
+    {
+      "label": "cloudflare-93",
+      "files": [
+        "e/openjkdf2.9b6eb5c86b31.js",
+        "e/openjkdf2.df6f6336d89f.wasm",
+        "e/jspi/openjkdf2.2a8b43a50a99.js",
+        "e/jspi/openjkdf2.d2e11c81fcb6.wasm",
+        "e/unzip.ef8a524a045b.js",
+        "rooms/nar-shaddaa.df7543fa.webp",
+        "rooms/sith-asteroid.b6474833.jpg"
+      ]
+    }
+  ]
+}
