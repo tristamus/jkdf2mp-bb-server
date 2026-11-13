@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS lv (
     cat TEXT NOT NULL,
     game TEXT NOT NULL,
     prio INTEGER NOT NULL,
+    rk INTEGER NOT NULL DEFAULT 0,
     title TEXT, author TEXT, added TEXT, rating REAL, votes INTEGER, comments INTEGER, dl INTEGER,
     listed_at INTEGER,
     page_at INTEGER, page_st TEXT,
@@ -183,7 +184,8 @@ export class LevelJob extends DurableObject {
         this.sql.exec(SCHEMA);
         // The 3D data's columns, for a table from before them.
         for (const col of ["pv_st TEXT", "pv_at INTEGER", "pv_maps TEXT", "pv_got INTEGER NOT NULL DEFAULT 0",
-                           "pv_size INTEGER NOT NULL DEFAULT 0", "pv_tex INTEGER NOT NULL DEFAULT 0"]) {
+                           "pv_size INTEGER NOT NULL DEFAULT 0", "pv_tex INTEGER NOT NULL DEFAULT 0",
+                           "rk INTEGER NOT NULL DEFAULT 0"]) {
             try {
                 this.sql.exec(`ALTER TABLE lv ADD COLUMN ${col}`);
             } catch {
@@ -192,6 +194,30 @@ export class LevelJob extends DurableObject {
         }
         if (this.kv("pv_names") !== "2")
             this.fixPreviewNames();
+        if (this.kv("ranked") !== "1")
+            this.rank();
+    }
+
+    // Each level's place in its own game's list (and priority), most
+    // downloaded first: the job works down both games' lists side by side,
+    // so Mysteries of the Sith's levels don't wait for all of Jedi Knight's,
+    // whose levels have more downloads. Set again after each list is read.
+    rank() {
+        let rows;
+        try {
+            rows = this.sql.exec("SELECT id, game, prio, dl FROM lv").toArray();
+        } catch {
+            // A table too old to have them (only in tests): nothing to rank.
+            return;
+        }
+        rows.sort((a, b) => (b.dl || 0) - (a.dl || 0) || a.id - b.id);
+        const next = {};
+        for (const r of rows) {
+            const k = r.game + "/" + r.prio;
+            next[k] = (next[k] || 0) + 1;
+            this.sql.exec("UPDATE lv SET rk = ? WHERE id = ? AND rk != ?", next[k] - 1, r.id, next[k] - 1);
+        }
+        this.kv("ranked", 1);
     }
 
     // Once, for 3D data copied before the map names were the levels': the
@@ -306,7 +332,7 @@ export class LevelJob extends DurableObject {
                  OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got >= json_array_length(COALESCE(shots, '[]'))
                      AND pv_st IS NULL AND zip_url IS NOT NULL AND ? = 0)
                  OR (pv_st = 'ok' AND pv_tex = 0 AND ? = 0))
-             ORDER BY prio, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0,
+             ORDER BY prio, rk, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0,
             full || this.env.LEVELS_PREVIEW === "0" || this.previewFull() ? 1 : 0, this.env.LEVELS_PREVIEW === "0" ? 1 : 0).toArray()[0];
         if (row) {
             let local = false;
@@ -447,6 +473,7 @@ export class LevelJob extends DurableObject {
                      title = excluded.title, author = excluded.author, added = excluded.added, rating = excluded.rating,
                      votes = excluded.votes, comments = excluded.comments, dl = excluded.dl, listed_at = excluded.listed_at`,
                 r.id, list.cat, list.game, list.prio, r.title, r.author, r.added, r.rating, r.votes, r.comments, r.dl, now);
+        this.rank();
         this.dirty();
     }
 

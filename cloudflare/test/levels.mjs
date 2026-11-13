@@ -465,6 +465,18 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(st.preview_bytes, mp.preview_bytes);
 });
 
+await check("both games' lists side by side: each one's most downloaded first", async () => {
+    const MOTS = LIST.replace("/levels/files/323.shtml", "/levels/files/900.shtml").replace("5231", "50")
+                     .replace("/levels/files/400.shtml", "/levels/files/901.shtml").replace("> 10<", "> 20<");
+    const seen = fakeMassassi({ "/levels/motsmp/?num=9999": () => new Response(MOTS) });
+    const { job } = newJob();
+    await runUntilIdle(job, 80);
+    const pages = seen.filter(p => /^\/levels\/files\/\d+\.shtml$/.test(p)).map(p => +p.match(/\d+/)[0]);
+    // MotS's first comes after JK's first, not after all of JK's.
+    assert.deepEqual(pages, [323, 900, 901, 400]);
+    assert.deepEqual(job.sql.exec("SELECT id, rk FROM lv ORDER BY id").toArray().map(r => [r.id, r.rk]), [[323, 0], [400, 1], [900, 0], [901, 1]]);
+});
+
 await check("the job asks Massassi again only for what's new", async () => {
     let seen = fakeMassassi();
     const { job } = newJob();
