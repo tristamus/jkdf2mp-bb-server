@@ -76,12 +76,25 @@ database_id = "d17bff22-b11d-4f1b-8414-a01b190eec2d"
 binding = "SHOTS"
 bucket_name = "jkdf2mp-shots"
 
+# The Level Library (src/levels.js): the site serves the levels, pictures and
+# 3D data that beta's job copies from Massassi into jkdf2mp-levels-beta, and
+# runs no job of its own (LEVELS_FETCH = "0" below, and no cron), so nothing
+# here writes to that bucket. Without these two blocks /levels/ isn't served
+# and the Host screen shows no Level Library button.
+[[durable_objects.bindings]]
+name = "LEVELJOB"
+class_name = "LevelJob"
+
+[[r2_buckets]]
+binding = "LEVELS"
+bucket_name = "jkdf2mp-levels-beta"
+
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Lobby"]
 
-# The Level Library's job (src/levels.js), which only beta has bound for now.
+# The Level Library's job (src/levels.js): bound on both, run only on beta.
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["LevelJob"]
@@ -121,6 +134,8 @@ PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # MATCH_LINKS, at SITE.
 # DISCORD_MIN_PLAYERS = "3"
 # MATCH_LINKS = "https://jediknight.zone"
+# The site reads the library beta's job fills; its own job stays off.
+LEVELS_FETCH = "0"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
