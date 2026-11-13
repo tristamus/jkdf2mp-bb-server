@@ -636,6 +636,33 @@ node test/imperial-route.mjs http://127.0.0.1:8797 8799
 
 With the real relay: `npx wrangler dev`, then http://127.0.0.1:8787/imperial-games.
 
+## The Level Library
+
+Community levels from Massassi (www.massassi.net) that a host picks in the game: `src/levels.js` copies them into an
+R2 bucket and writes an index for each game, and the page reads them from here, never from Massassi. Only beta has it
+bound for now (`LEVELJOB` and `LEVELS` under `[env.beta]` in `wrangler.toml`, and its cron).
+
+- **The job** is a Durable Object, `LevelJob`, that runs on its own alarm and makes one request each time, 30 s
+  apart: Massassi's six level lists (each with `?num=9999`, so one request), then each level's page, its zip and its
+  screenshots, most downloaded first and multiplayer before single player. The lists again every 12 hours, each page
+  every 90 days; otherwise only what's new. The cron (every 10 minutes, `scheduled()` in `lobby.js`) only makes sure
+  the alarm is set.
+- **As Brian (who runs Massassi) asked:** a moderate rate, kept here rather than asked for each game, and each zip
+  from the direct address its page's 3D Preview names (`url=`), never the Download link, which would add to its
+  download count. Keeping copies is fine with him (via Antonio, 2026-11-12).
+- **Per zip** it records the SHA-256 of the zip and of each GOB or GOO in it (so a level a player already has can be
+  found by its hash), each GOB's episode from its `episode.jk`, the file list, readmes, and the level's real release
+  date (`src/levels-read.js`, `releaseDate`: the readme's release line, else the newest date of the level files in
+  the zip, else Massassi's date unless it's the 2000-06-02 bulk import).
+- **Routes:** `/levels/jk1.json` and `/levels/mots.json` (the index), `/levels/d/<id>.json` (a level's description,
+  readmes, files and date), `/levels/z/<id>.zip` (immutable with `?h=` the zip's SHA-256), `/levels/s/<id>-<n>.jpg`,
+  and `/levels/status`, the job's progress.
+- **Variables:** `LEVELS_FETCH = "0"` stops the job and keeps serving what it has; `LEVELS_MAX_GB` (6 unset) is where
+  it stops copying, under the 10 GB a month R2 stores without charge, which the screenshots share.
+- The zips are read with the page's own unzipper for the old zip methods (`src/vendor/jkunzip.js`, made by
+  `tools/vendor-unzip.sh` from OpenJKDF2's `packaging/wasm/unzip.js`).
+- Tests: `node test/levels.mjs`.
+
 ## Engine files
 
 In a kit, the engines' files are named by their content: `e/openjkdf2.<h>.js` and

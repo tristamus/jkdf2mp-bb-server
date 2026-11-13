@@ -27,7 +27,7 @@ workers_dev = true
 [assets]
 directory = "./public"
 binding = "ASSETS"
-run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*", "/shot/*"]
+run_worker_first = ["/relay", "/summary", "/imperial-games", "/", "/index.html", "/e/*", "/matches", "/match/*", "/players", "/player/*", "/ladder/*", "/shot/*", "/levels/*"]
 
 # Keeps the lobby's own log lines (console.log) in Workers Logs in the
 # Cloudflare dashboard, 3 days on the free plan and 7 on Workers Paid, so a day
@@ -76,10 +76,28 @@ database_id = "d17bff22-b11d-4f1b-8414-a01b190eec2d"
 binding = "SHOTS"
 bucket_name = "jkdf2mp-shots"
 
+# The Level Library (src/levels.js): the site serves the levels, pictures and
+# 3D data that beta's job copies from Massassi into jkdf2mp-levels-beta, and
+# runs no job of its own (LEVELS_FETCH = "0" below, and no cron), so nothing
+# here writes to that bucket. Without these two blocks /levels/ isn't served
+# and the Host screen shows no Level Library button.
+[[durable_objects.bindings]]
+name = "LEVELJOB"
+class_name = "LevelJob"
+
+[[r2_buckets]]
+binding = "LEVELS"
+bucket_name = "jkdf2mp-levels-beta"
+
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Lobby"]
+
+# The Level Library's job (src/levels.js): bound on both, run only on beta.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["LevelJob"]
 
 [vars]
 # Handed to every page for WebRTC (Cloudflare's own STUN server, from its
@@ -116,6 +134,8 @@ PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # MATCH_LINKS, at SITE.
 # DISCORD_MIN_PLAYERS = "3"
 # MATCH_LINKS = "https://jediknight.zone"
+# The site reads the library beta's job fills; its own job stays off.
+LEVELS_FETCH = "0"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
@@ -153,6 +173,23 @@ database_id = "5e3266ed-0d04-4c94-a643-156a4b00cc18"
 binding = "SHOTS"
 bucket_name = "jkdf2mp-shots-beta"
 
+# The Level Library (src/levels.js): its job copies Massassi's levels into
+# this bucket (`npx wrangler r2 bucket create jkdf2mp-levels-beta`), and the
+# library reads them from here. Without both bindings the job doesn't run
+# and /levels/ isn't served. The cron only keeps the job's alarm set; the
+# job paces its own requests to Massassi (one every 30 s). README.md, The
+# Level Library.
+[[env.beta.durable_objects.bindings]]
+name = "LEVELJOB"
+class_name = "LevelJob"
+
+[[env.beta.r2_buckets]]
+binding = "LEVELS"
+bucket_name = "jkdf2mp-levels-beta"
+
+[env.beta.triggers]
+crons = ["*/10 * * * *"]
+
 [env.beta.vars]
 STUN = "stun:stun.cloudflare.com:3478"
 # Nothing moves: every page load is served where it is.
@@ -162,3 +199,7 @@ MOVED_STATUS = "302"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 MATCH_LINKS = "https://beta.jediknight.zone"
+# "0" stops the Level Library's job; LEVELS_MAX_GB is how much it copies
+# before it stops (6 when it isn't set).
+# LEVELS_FETCH = "0"
+# LEVELS_MAX_GB = "6"
