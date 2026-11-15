@@ -26,6 +26,10 @@
 //   zip/<id>.zip        the level's zip, as Massassi has it
 //   shot/<id>-<n>       its screenshots, as Massassi has them
 //   pv/<id>-<m>.map.json, pv/<id>-<m>.mat.json   its 3D data for map m (gzip)
+//   pv/<id>.tex.json    the textures and colormaps its GOBs ship, and which
+//                       of its maps have parts.json
+//   pv/<id>-<m>.parts.json   the parts of map m's models that the 3D data
+//                       leaves out (levels-parts.js), when it leaves any (gzip)
 //
 // The routes (levelsRoute, only with LEVELS and LEVELJOB bound):
 //
@@ -33,7 +37,8 @@
 //   GET /levels/d/<id>.json
 //   GET /levels/z/<id>.zip[?h=<sha>]   immutable when h is the zip's SHA-256
 //   GET /levels/s/<id>-<n>.jpg
-//   GET /levels/p/<id>-<m>.map.json, .mat.json   the 3D data (sent gzip)
+//   GET /levels/p/<id>-<m>.map.json, .mat.json, .parts.json   the 3D data (sent gzip)
+//   GET /levels/p/<id>.tex.json
 //   GET /levels/status                  the job's progress, for checking on it
 //
 // A level's real release date comes from its readme or the dates of its
@@ -62,6 +67,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseList, parsePage, previewMaps, gobTextures, sizeBytes, openZip, readEntry, dataStart, memReader, parseGob, parseEpisode,
          decodeText, releaseDate, isText, isLevelFile } from "./levels-read.js";
+import { levelParts, gobFinder } from "./levels-parts.js";
+import { OFFICIAL_3DO } from "./levels-official.js";
 
 const MASSASSI = "https://www.massassi.net";
 // The lists, in the order the job works through them: multiplayer first.
@@ -196,6 +203,16 @@ export class LevelJob extends DurableObject {
             this.fixPreviewNames();
         if (this.kv("ranked") !== "1")
             this.rank();
+        // Once: the textures' step again for every level with 3D data, for
+        // the parts of its models that the data leaves out (parts.json).
+        if (this.kv("tex_v") !== "2") {
+            try {
+                this.sql.exec("UPDATE lv SET pv_tex = 0 WHERE pv_st = 'ok'");
+            } catch {
+                // A table too old to have them (only in tests).
+            }
+            this.kv("tex_v", 2);
+        }
     }
 
     // Each level's place in its own game's list (and priority), most
@@ -790,16 +807,60 @@ export class LevelJob extends DurableObject {
                 if (nested)
                     z = await openZip(memReader(await readEntry(z, nested)));
             }
+            const gobs = [];
+            let kept = 0;
             for (const e of z.entries.filter(isGob)) {
-                if (e.size <= MEM_GOB && e.csize <= MEM_GOB)
-                    gobTextures(await readEntry(z, e), out);
+                if (e.size <= MEM_GOB && e.csize <= MEM_GOB) {
+                    const b = await readEntry(z, e);
+                    gobTextures(b, out);
+                    if (kept + b.length <= MEM_GOB) {
+                        gobs.push(b);
+                        kept += b.length;
+                    }
+                }
             }
+            if (gobs.length)
+                out.parts = await this.writeParts(row, gobs);
         }
         await this.env.LEVELS.put(`pv/${row.id}.tex.json`, JSON.stringify(out),
                                   { httpMetadata: { contentType: "application/json" } });
         this.sql.exec("UPDATE lv SET pv_tex = 1, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", row.id);
         this.dirty();
         return LOCAL;
+    }
+
+    // For each map, the parts of its models that the preview's data leaves
+    // out (levels-parts.js), from the level's own files and the map's
+    // mat.json: pv/<id>-<m>.parts.json, gzip. The maps that have one.
+    async writeParts(row, gobs) {
+        const files = gobFinder(gobs, parseGob);
+        const maps = JSON.parse(row.pv_maps || "[]");
+        const have = [];
+        for (let m = 0; m < maps.length; m++) {
+            const jkl = `jkl/${maps[m].n}.jkl`;
+            const own = files.only(jkl);
+            let parts = null;
+            if (own) {
+                try {
+                    const obj = await this.env.LEVELS.get(`pv/${row.id}-${m}.mat.json`);
+                    const mats = obj && await new Response(obj.body.pipeThrough(new DecompressionStream("gzip"))).json();
+                    parts = mats && levelParts(own, jkl, mats, "left", OFFICIAL_3DO);
+                } catch (e) {
+                    this.kv("last_parts_error", `${new Date().toISOString()} level ${row.id} map ${m}: ${String(e && e.message || e).slice(0, 200)}`);
+                    parts = null;
+                }
+            }
+            const key = `pv/${row.id}-${m}.parts.json`;
+            if (parts) {
+                const gz = new Uint8Array(await new Response(new Blob([JSON.stringify(parts)]).stream()
+                    .pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+                await this.env.LEVELS.put(key, gz, { httpMetadata: { contentType: "application/json", contentEncoding: "gzip" } });
+                have.push(m);
+            } else {
+                await this.env.LEVELS.delete(key);
+            }
+        }
+        return have;
     }
 
     dirty() {
@@ -980,8 +1041,8 @@ export async function levelsRoute(request, env, url) {
         return res;
     }
     if ((m = /^\/levels\/p\/(\d{1,7})\.tex\.json$/.exec(path)))
-        return serve(request, env, `pv/${m[1]}.tex.json`, "public, max-age=86400", "application/json; charset=utf-8");
-    if ((m = /^\/levels\/p\/(\d{1,7})-(\d)\.(map|mat)\.json$/.exec(path)))
+        return serve(request, env, `pv/${m[1]}.tex.json`, "public, max-age=3600", "application/json; charset=utf-8");
+    if ((m = /^\/levels\/p\/(\d{1,7})-(\d)\.(map|mat|parts)\.json$/.exec(path)))
         return serve(request, env, `pv/${m[1]}-${m[2]}.${m[3]}.json`, "public, max-age=86400", "application/json; charset=utf-8", "gzip");
     if ((m = /^\/levels\/s\/(\d{1,7})-(\d)\.jpg$/.exec(path)))
         return serve(request, env, `shot/${m[1]}-${m[2]}`, "public, max-age=604800");

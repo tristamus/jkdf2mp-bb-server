@@ -27,6 +27,7 @@ const { FakeStorage } = await import("./cfstub.mjs");
 // The stub's Response is for the lobby's 101; these routes need the real one.
 globalThis.Response = realResponse;
 const read = await import("../src/levels-read.js");
+const parts = await import("../src/levels-parts.js");
 const { LevelJob, levelsRoute } = await import("../src/levels.js");
 const { JkUnzip } = await import("../src/vendor/jkunzip.js");
 
@@ -337,6 +338,9 @@ class FakeR2 {
         const o = this.m.get(key);
         return o ? { ...this.obj(key, o), body: undefined } : null;
     }
+    async delete(key) {
+        this.m.delete(key);
+    }
 }
 
 const LIST = `<div class="level-list-screenshot"></div><div class="level-list-item">
@@ -561,6 +565,8 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal(JSON.parse(await r.text()).requests_total, 14);
     r = await get("/levels/p/323.tex.json");
     assert.equal(r.status, 200);
+    // It changes when the job makes a level's parts: kept for an hour.
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=3600");
     assert.deepEqual(JSON.parse(await r.text()).cmp, { 6000: "lev6000.cmp" });
     r = await get("/levels/p/323-0.map.json");
     assert.equal(r.status, 200);
@@ -607,7 +613,7 @@ await check("the 3D data: one GOB of one level goes straight to its map, named f
     assert.deepEqual(idx.levels[0].pv, ["6000"]);
     // The level's colormap isn't in its GOB: the game's own, which the page has.
     const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
-    assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {} });
+    assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {}, parts: [] });
 });
 
 await check("levels with their 3D data from before get the textures' list, without asking Massassi", async () => {
@@ -776,6 +782,259 @@ await check("LEVELS_FETCH = \"0\" stops the job", async () => {
     assert.equal(await job.ctx.storage.getAlarm(), null);
     await job.alarm();
     assert.equal(seen.length, 0);
+});
+
+// ---- The parts of models the preview leaves out (src/levels-parts.js)
+
+// A model of two parts side by side at the top of its tree, as The Death
+// Star's Falcon has nine: the preview keeps the last (part1), the job makes
+// the first. part0's three faces: one of the preview's textures, one the
+// level ships, one of the game's.
+const model3do = (name0, name1) => `# a model
+SECTION: HEADER
+3DO 2.1
+
+SECTION: MODELRESOURCE
+MATERIALS 3
+0:      known.mat
+1:      OwnMat.mat
+2:      game.mat
+
+SECTION: GEOMETRYDEF
+RADIUS 1.0
+INSERT OFFSET 0.0 0.0 0.0
+GEOSETS 1
+GEOSET 0
+MESHES 2
+
+MESH 0
+NAME ${name0}
+RADIUS 1.0
+GEOMETRYMODE 4
+LIGHTINGMODE 3
+TEXTUREMODE 3
+VERTICES 3
+0:  1.000000  0.000000  0.000000  0.0000
+1:  0.000000  1.000000  0.000000  0.0000
+2:  0.000000  0.000000  1.000000  0.0000
+TEXTURE VERTICES 3
+0:  0.000000  0.000000
+1:  32.000000  0.000000
+2:  32.000000  16.000000
+VERTEX NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+FACES 3
+#  num:  material:   type:  geo:  light:   tex:  extralight:  verts:
+0:  0  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+1:  1  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+2:  2  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+FACE NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+
+MESH 1
+NAME ${name1}
+RADIUS 1.0
+GEOMETRYMODE 4
+LIGHTINGMODE 3
+TEXTUREMODE 3
+VERTICES 3
+0:  0.000000  0.000000  0.000000  0.0000
+1:  2.000000  0.000000  0.000000  0.0000
+2:  0.000000  2.000000  0.000000  0.0000
+TEXTURE VERTICES 3
+0:  0.000000  0.000000
+1:  16.000000  0.000000
+2:  0.000000  8.000000
+VERTEX NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+FACES 1
+0:  0  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+FACE NORMALS
+0:  0.0 0.0 1.0
+
+SECTION: HIERARCHYDEF
+HIERARCHY NODES 2
+0:  0x0  0x1  0  -1  -1  -1  0  0.500000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.250000  ${name0}
+1:  0x0  0x1  1  -1  -1  -1  0  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  ${name1}
+`;
+// The same model with one part at the top: nothing cut.
+const ONE_ROOT = model3do("a", "b").replace(/\n1:  0x0  0x1  1  -1 /, "\n1:  0x0  0x1  1  0 ");
+// Falcon at (1, 2, 3) turned 90 to the left; the tree has the name of one of
+// the games' own (the preview draws the game's); falcon2 is in a sector the
+// level doesn't have; the box has one part at the top.
+const PARTS_JKL = `SECTION: JK
+Version 1
+
+SECTION: MATERIALS
+World materials 1
+0:      dflt.mat        1.000000        1.000000
+end
+
+SECTION: GEORESOURCE
+World Colormaps 1
+0:      lev6000.cmp
+
+SECTION: SECTORS
+World sectors 1
+SECTOR  0
+FLAGS   0x0
+
+SECTION: TEMPLATES
+World templates 3
+falcon          none            model3d=falcon.3do
+tree            none            model3d=tree.3do
+box             none            model3d=box.3do
+end
+
+SECTION: THINGS
+World things 4
+#num template    name     X        Y        Z        Pitch    Yaw      Roll     Sector
+0:   falcon      falcon   1.000000 2.000000 3.000000 0.000000 90.000000 0.000000 0  thingflags=0x0
+1:   tree        tree     0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0
+2:   falcon      falcon2  0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 5
+3:   box         box      0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0
+end
+`;
+// A MAT of 64 x 32: "MAT ", version 50, type 2 (textures), one texture.
+const OWN_MAT = new Uint8Array(76 + 40 + 24 + 64 * 32);
+OWN_MAT.set(enc("MAT "));
+new DataView(OWN_MAT.buffer).setUint32(4, 50, true);
+new DataView(OWN_MAT.buffer).setUint32(8, 2, true);
+new DataView(OWN_MAT.buffer).setUint32(12, 1, true);
+new DataView(OWN_MAT.buffer).setUint32(116, 64, true);
+new DataView(OWN_MAT.buffer).setUint32(120, 32, true);
+// A PNG's start, as far as its size: 32 x 16.
+const png = (w, h) => {
+    const b = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]).copy(b);
+    b.write("IHDR", 12, "latin1");
+    b.writeUInt32BE(w, 16);
+    b.writeUInt32BE(h, 20);
+    return "data:image/png;base64," + b.toString("base64");
+};
+const PARTS_MAT = [{ name: "3do/mat/dflt.mat", data: png(8, 8) }, { name: "3do/mat/known.mat", data: png(32, 16) }];
+const PARTS_GOB = makeGob([
+    { name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+    { name: "3do\\falcon.3do", data: model3do("hull", "sensors") }, { name: "3do\\tree.3do", data: model3do("trunk", "leaves") },
+    { name: "3do\\box.3do", data: ONE_ROOT }, { name: "3do\\mat\\OwnMat.mat", data: OWN_MAT },
+    { name: "misc\\cmp\\lev6000.cmp", data: CMP },
+]);
+const partsFiles = () => parts.gobFinder([PARTS_GOB], read.parseGob);
+const OFFICIAL = new Set(["tree"]);
+// The falcon's hull: placed by its node's offset (0.5, 0, 0) and pivot
+// (0, 0, 0.25), then by the thing: (x, y, z) -> (-y, x, z) + (1, 2, 3).
+const HULL = [[1, 3.5, 3.25], [0, 2.5, 3.25], [1, 2.5, 4.25]];
+
+await check("parts: a model's top-level parts but the last, placed and textured as the preview does the rest", async () => {
+    const p = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL);
+    assert.equal(p.v, 1);
+    assert.equal(p.base, 2);
+    // The level's own MAT, with its size; the game's, raw.
+    assert.deepEqual(p.mats, [{ name: "3do/mat/OwnMat.mat", mat: Buffer.from(OWN_MAT).toString("base64") }, { name: "mat/game.mat", raw: true }]);
+    assert.deepEqual(p.model_surfaces, [
+        // The preview's known.mat, 32 x 16.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [1, 0]], [HULL[2], [1, 1]]], material: 1 },
+        // The level's, 64 x 32.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [0.5, 0]], [HULL[2], [0.5, 0.5]]], material: 2 },
+        // The game's: the page divides by its size.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [32, 0]], [HULL[2], [32, 16]]], material: 3 },
+    ]);
+});
+
+await check("parts: the one the preview keeps, made the same way (what the checks against its data compare)", async () => {
+    const p = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "kept", OFFICIAL);
+    assert.deepEqual(p.mats, []);
+    assert.deepEqual(p.model_surfaces, [{ vertices: [[[1, 2, 3], [0, 0]], [[1, 4, 3], [0.5, 0]], [[-1, 2, 3], [0, 0.5]]], material: 1 }]);
+});
+
+await check("parts: none for the games' own models, one-part models, or a level without models", async () => {
+    // Without the official list, the tree is made too (at 0, 0, 0, unturned).
+    const all = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "left", null);
+    assert.equal(all.model_surfaces.length, 6);
+    assert.deepEqual(all.model_surfaces[3].vertices[0][0], [1.5, 0, 0.25]);
+    const files = parts.gobFinder([makeGob([{ name: "jkl\\6000.jkl", data: PARTS_JKL.replace(/falcon\.3do|tree\.3do/g, "box.3do") },
+                                            { name: "3do\\box.3do", data: ONE_ROOT }])], read.parseGob);
+    assert.equal(parts.levelParts(files, "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL), null);
+    assert.equal(parts.levelParts(partsFiles(), "jkl/other.jkl", PARTS_MAT, "left", OFFICIAL), null);
+    // A model the preview can't read (no HIERARCHYDEF) it has none of.
+    const bad = parts.gobFinder([makeGob([{ name: "jkl\\6000.jkl", data: PARTS_JKL },
+                                          { name: "3do\\falcon.3do", data: model3do("a", "b").replace(/SECTION: HIERARCHYDEF[^]*/, "") }])], read.parseGob);
+    assert.equal(parts.levelParts(bad, "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL), null);
+});
+
+await check("parts: the job makes them with the textures' step, and the route sends them", async () => {
+    const zip = makeZip([{ name: "6000.gob", data: PARTS_GOB }]);
+    fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(zip, { headers: { "Content-Length": String(zip.length) } }),
+        [pvUrl("mat")]: () => new Response(JSON.stringify(PARTS_MAT)),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
+    assert.deepEqual(tex.parts, [0]);
+    const o = env.LEVELS.m.get("pv/323-0.parts.json");
+    assert.equal(o.httpMetadata.contentEncoding, "gzip");
+    const p = JSON.parse(gunzip(o.bytes));
+    assert.equal(p.base, 2);
+    assert.equal(p.model_surfaces.length, 3);
+    assert.deepEqual(p.model_surfaces[0].vertices[0][0], HULL[0]);
+    assert.equal(job.kv("last_parts_error"), null);
+    const get = path => levelsRoute(new Request("https://beta.example" + path), env, new URL("https://beta.example" + path));
+    const r = await get("/levels/p/323-0.parts.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Encoding"), "gzip");
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.deepEqual(JSON.parse(gunzip(new Uint8Array(await r.arrayBuffer()))), p);
+    assert.equal((await get("/levels/p/323-1.parts.json")).status, 404);
+    // The textures' step again, with nothing cut now: its parts.json goes.
+    job.sql.exec("UPDATE lv SET pv_tex = 0");
+    const gob1 = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+                            { name: "3do\\falcon.3do", data: ONE_ROOT }]);
+    const zip2 = makeZip([{ name: "6000.gob", data: gob1 }]);
+    await env.LEVELS.put("zip/323.zip", zip2, { customMetadata: { sha256: sha(zip2) } });
+    await runUntilIdle(job);
+    assert.ok(!env.LEVELS.m.has("pv/323-0.parts.json"));
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes)).parts, []);
+});
+
+await check("parts: a map the job can't read is noted, and the rest of the step goes on", async () => {
+    const gob = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+                         { name: "3do\\falcon.3do", data: model3do("hull", "sensors") }]);
+    const zip = makeZip([{ name: "6000.gob", data: gob }]);
+    fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(zip, { headers: { "Content-Length": String(zip.length) } }),
+        [pvUrl("mat")]: () => new Response("{ not json"),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    // The preview's mat.json wasn't JSON: no 3D data, so no parts.
+    assert.ok(!env.LEVELS.m.has("pv/323-0.parts.json"));
+    // A mat.json in the bucket that isn't gzip: noted, tex.json still written.
+    job.sql.exec("UPDATE lv SET pv_st = 'ok', pv_maps = ?, pv_tex = 0, tries = 0, retry_at = NULL WHERE id = 323", JSON.stringify([{ n: "6000", e: 0 }]));
+    await env.LEVELS.put("pv/323-0.mat.json", "[]");
+    await runUntilIdle(job);
+    assert.match(job.kv("last_parts_error"), /level 323 map 0/);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes)).parts, []);
+});
+
+await check("parts: once, every level with 3D data goes through the textures' step again", async () => {
+    fakeMassassi();
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+    job.sql.exec("DELETE FROM kv WHERE k = 'tex_v'");
+    let again = new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 0);
+    await runUntilIdle(again);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+    again = new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
 });
 
 if (failed) {
