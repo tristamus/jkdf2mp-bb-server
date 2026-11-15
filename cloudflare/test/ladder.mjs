@@ -1576,7 +1576,9 @@ await check("the page's status names the level a room is on, from its host's rep
 
 // ---- Screenshots on match pages (src/ladder-shots.js).
 
-const shotPath = (age, taken, final) => `/ladder/shot?age=${age}&taken=${taken}${final ? "&final=1" : ""}`;
+// final: true for a final scoreboard, "left" for one of a level its player left.
+const shotPath = (age, taken, final) =>
+    `/ladder/shot?age=${age}&taken=${taken}${final ? "&final=1" : ""}${final === "left" ? "&left=1" : ""}`;
 
 // Asks where a picture taken `age` ms ago would go.
 async function askShot(w, key, age, taken, final = false) {
@@ -1912,7 +1914,7 @@ await check("the lobby stops taking pictures at a size, and counts what comes an
     assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM match_shots WHERE match_id = ?", id)[0].n, 3);
 });
 
-await check("the final scoreboard: one a match, of a level its host ended, and none with an Anonymous player in it", async () => {
+await check("the final scoreboard: one a match, taken as its level ended, and none with an Anonymous player in it", async () => {
     const env = shotEnv();
     const w = await new World(env).start();
     const id = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
@@ -1920,6 +1922,10 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 7, true), { status: 200, match: id, secs: 196, left: 1 });
     // Not one from the middle of the match, or from long after it.
     assert.deepEqual(await askShot(w, KEYS.kyle, 100 * SEC, 7, true), { status: 200, no: "none", wait: false });
+    // And not the score screen of a player who left it, however close to
+    // its end: the level went on without them.
+    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 7, "left"), { status: 200, no: "none", wait: false });
+    assert.deepEqual(await sendShot(w, KEYS.maw, 17 * SEC, 6, { final: "left" }), { status: 404, error: "none", wait: false });
     const theirs = await sendShot(w, KEYS.maw, 60 * SEC, 5);
     const final = await sendShot(w, KEYS.kyle, 16 * SEC, 7, { final: true, full: jpeg(1024, 768, 50), thumb: jpeg(480, 360, 20) });
     assert.deepEqual([final.status, final.match, final.secs], [200, id, 196]);
@@ -1935,7 +1941,7 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     assert.ok(text.includes("Screenshots 1 from 1 player, and the final scoreboard"), text);
     assert.ok(html.indexOf(final.id) < html.indexOf(theirs.id), "first on the page");
     assert.ok(html.includes('<li class="shot final">'));
-    assert.ok(text.includes("Final scoreboard As the game showed it when the level ended"), text);
+    assert.ok(text.includes("Final scoreboard As the game showed it when the match ended"), text);
     assert.ok(html.includes(`src="/shot/${final.id}.t.jpg" width="480" height="360"`));
     assert.ok(html.includes('alt="The final scoreboard, as the game showed it"'));
     assert.ok(text.includes("the final scoreboard is the game's own picture"), text);
@@ -1951,21 +1957,6 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     assert.equal(env.SHOTS.m.size, kept + 2, "and the one that lost is deleted again");
     assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM match_shots WHERE final = 1")[0].n, 1);
 
-    // A room its host left wasn't ended by a level's end: no final there.
-    const H = await w.host("Maw", { pk: KEYS.maw }), K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
-    for (const g of [H, K]) {
-        g.since = Date.now();
-        await g.report({ rules: { mode: 0, sl: 0, tl: 0 } });
-    }
-    skew += 3 * MIN;
-    await killAll([H, K], 2, 1);
-    await hostLeaves(w, H, [K]);
-    await w.say(K.ws, "leave");
-    await w.settle();
-    const left = env.LADDER.rows("SELECT id, ended FROM matches ORDER BY id DESC LIMIT 1")[0];
-    assert.equal(left.ended, "left");
-    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * SEC, 9, true), { status: 200, no: "none", wait: false });
-    assert.equal((await askShot(w, KEYS.kyle, 30 * SEC, 9)).match, left.id, "a player's own picture of it is taken");
 
     // That screen names everyone, so a match with a player who's shown as
     // Anonymous gets none: one who asked not to be named, or whose record
@@ -1983,6 +1974,129 @@ await check("the final scoreboard: one a match, of a level its host ended, and n
     assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 13, true), { status: 200, no: "anonymous" });
     env.LADDER.db.exec("UPDATE players SET hidden = 0");
     assert.equal((await askShot(w, KEYS.kyle, 16 * SEC, 13, true)).match, hid);
+});
+
+await check("a match its host left has a final scoreboard too: one taken once the host had left", async () => {
+    const env = shotEnv();
+    const w = await new World(env).start();
+    // Three in a room; the host leaves after three minutes, which ends it
+    // for the others too. The lobby closes it as they say their last.
+    const play = async (keys, end) => {
+        const H = await w.host("Maw", { pk: keys[0] });
+        const others = [];
+        for (const [i, pk] of keys.slice(1).entries())
+            others.push(await w.join(["Kyle_K", "Boc"][i], H, { pk }));
+        for (const g of [H, ...others]) {
+            g.since = Date.now();
+            await g.report({ rules: { mode: 0, sl: 0, tl: 0 } });
+        }
+        skew += 3 * MIN;
+        await killAll([H, ...others], 2, 1);
+        await end(H, others);
+        for (const g of others)
+            await w.say(g.ws, "leave");
+        await w.settle();
+        return env.LADDER.rows("SELECT id, ended, started_at, ended_at, json_extract(detail, '$.why') AS why, " +
+                               "json_extract(detail, '$.over') AS over FROM matches ORDER BY id DESC LIMIT 1")[0];
+    };
+    const left = await play([KEYS.maw, KEYS.kyle, KEYS.boc], (H, others) => hostLeaves(w, H, others));
+    assert.deepEqual([left.ended, left.why], ["left", "room closed"]);
+    // How far in the host left: three minutes, 2 s before now.
+    const near = (a, b) => Math.abs(a - b) < 100;
+    assert.ok(near(left.over, 3 * MIN), String(left.over));
+    assert.ok(near(left.started_at + left.over, Date.now() - 2 * SEC));
+    // The score screen a game showed as the host left, or a moment after
+    // (one thrown out with it): the match's last.
+    // (Its place in the match is the match's end, when the lobby closed it.)
+    // Each of these games says its player left: the level didn't end.
+    assert.deepEqual(await askShot(w, KEYS.kyle, 2 * SEC, 9, "left"), { status: 200, match: left.id, secs: 182, left: 1 });
+    assert.equal((await askShot(w, KEYS.maw, 2 * SEC, 9, "left")).match, left.id, "the host's own");
+    assert.equal((await askShot(w, KEYS.boc, 1 * SEC, 9, "left")).match, left.id);
+    // The two ways to the lobby each have their delay: a little before counts.
+    assert.equal((await askShot(w, KEYS.boc, 4 * SEC, 9, "left")).match, left.id);
+    // One who left while the match went on has a score screen too. It isn't
+    // the match's last, however close to its end, whatever its game says.
+    assert.deepEqual(await askShot(w, KEYS.boc, 12 * SEC, 9, "left"), { status: 200, no: "none", wait: false });
+    assert.deepEqual(await askShot(w, KEYS.boc, 12 * SEC, 9, true), { status: 200, no: "none", wait: false });
+    assert.deepEqual(await sendShot(w, KEYS.boc, 12 * SEC, 9, { final: "left" }), { status: 404, error: "none", wait: false });
+    assert.equal((await askShot(w, KEYS.boc, 12 * SEC, 9)).match, left.id, "as a picture of their own it has its place");
+    // The first to arrive is the match's.
+    const final = await sendShot(w, KEYS.kyle, 2 * SEC, 9, { final: "left", full: jpeg(1024, 768, 50), thumb: jpeg(480, 360, 20) });
+    assert.deepEqual([final.status, final.match, final.secs], [200, left.id, 182]);
+    assert.deepEqual(await sendShot(w, KEYS.maw, 2 * SEC, 10, { final: "left" }), { status: 409, error: "have" });
+    const text = textOf((await w.page(`/match/${left.id}`)).body);
+    assert.ok(text.includes("Screenshots the final scoreboard Final scoreboard As the game showed it when the match ended"), text);
+
+    // A host whose game said nothing (its connection gone): the lobby holds
+    // its seat a minute, then the room closes. The others' games don't wait
+    // that long: each gives up on the host after half a minute without it
+    // and shows its score screen. Those are of the match's end, which was
+    // when the host was last here.
+    skew += MIN;
+    const gone = await play([KEYS.maw, KEYS.kyle, KEYS.boc], async (H, others) => {
+        await w.close(H.ws);
+        skew += 31 * SEC;
+        for (const g of others)
+            await g.report({ end: "left" });
+        // Not saved yet: the page is told to ask again.
+        assert.deepEqual(await askShot(w, KEYS.kyle, 0, 11, "left"), { status: 200, no: "none", wait: true });
+        skew += 30 * SEC;
+        await w.alarm();
+    });
+    assert.deepEqual([gone.ended, gone.why], ["room closed", "room closed"]);
+    assert.ok(near(gone.over, 3 * MIN), String(gone.over));
+    assert.ok(near(gone.ended_at - gone.started_at, 3 * MIN + 61 * SEC));
+    // Taken half a minute after the host was gone, and half a minute before the lobby closed the match.
+    assert.equal((await askShot(w, KEYS.kyle, 30 * SEC, 11, "left")).match, gone.id);
+    assert.equal((await askShot(w, KEYS.boc, 59 * SEC, 11, "left")).match, gone.id, "or right as it went");
+    // One who left while the host was still here: not the match's last.
+    assert.deepEqual(await askShot(w, KEYS.kyle, 72 * SEC, 11, "left"), { status: 200, no: "none", wait: false });
+
+    // The same for a host that just stops being heard (a network that's
+    // gone says no goodbye): the lobby gives up on its socket after two
+    // quiet minutes, holds the seat, and closes the room. The match was over
+    // when the host was last heard.
+    skew += MIN;
+    const silent = await play([KEYS.maw, KEYS.kyle, KEYS.boc], async (H, others) => {
+        skew += 31 * SEC;
+        for (const g of others) {
+            await g.report({ end: "left" });
+            await w.say(g.ws, "leave");
+        }
+        skew += 2 * MIN;
+        await w.alarm();
+        skew += 61 * SEC;
+        await w.alarm();
+    });
+    assert.deepEqual([silent.ended, silent.why], ["room closed", "room closed"]);
+    assert.ok(near(silent.over, 3 * MIN), String(silent.over));
+    // Taken as the others gave up on it, more than three minutes before the lobby closed the match.
+    assert.equal((await askShot(w, KEYS.kyle, 2 * MIN + 61 * SEC, 13, "left")).match, silent.id);
+    assert.deepEqual(await askShot(w, KEYS.kyle, 3 * MIN + 45 * SEC, 13, "left"), { status: 200, no: "none", wait: false });
+
+    // A level its host ended is as it was: its record has no such moment,
+    // and its final scoreboard is the one taken as it ended.
+    skew += MIN;
+    const level = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    const row = env.LADDER.rows("SELECT ended, json_extract(detail, '$.over') AS over FROM matches WHERE id = ?", level)[0];
+    assert.deepEqual([row.ended, row.over], ["level", null]);
+    assert.equal((await askShot(w, KEYS.kyle, 16 * SEC, 12, true)).match, level);
+    assert.deepEqual(await askShot(w, KEYS.kyle, 16 * SEC, 12, "left"), { status: 200, no: "none", wait: false });
+
+    // A match nobody ended (its games went quiet) has none.
+    skew += MIN;
+    const H = await w.host("Maw", { pk: KEYS.maw }), K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    for (const g of [H, K]) {
+        g.since = Date.now();
+        await g.report({ rules: { mode: 0, sl: 0, tl: 0 } });
+    }
+    skew += 3 * MIN;
+    await killAll([H, K], 2, 1);
+    skew += 6 * MIN;
+    await w.alarm();
+    const quiet = env.LADDER.rows("SELECT id, ended, json_extract(detail, '$.over') AS over FROM matches ORDER BY id DESC LIMIT 1")[0];
+    assert.deepEqual([quiet.ended, quiet.over], ["went quiet", null]);
+    assert.deepEqual(await askShot(w, KEYS.kyle, 1 * SEC, 13, true), { status: 200, no: "none", wait: false });
 });
 
 await check("a database from before the pictures gets their table when it's first needed", async () => {
