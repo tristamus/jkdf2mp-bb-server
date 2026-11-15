@@ -185,8 +185,9 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // mod_fp its fingerprint (the SHA-256 of its files, mods.js), both empty for
 // none; pack says the MotS Remastered pack was on; max_rank is the highest
 // Force rank the host allowed. detail is JSON: the kills in order, the host's
-// scoreboard, and how well the games' reports agreed. hidden takes it off the
-// pages.
+// scoreboard, how well the games' reports agreed, and for a match its host
+// left (or whose room closed) how far into it that was (over). hidden takes
+// it off the pages.
 //
 // match_players: one row for each player in a match. slot is their number in
 // the match's detail. player_id is the players row of the key their game
@@ -521,6 +522,12 @@ export function buildRecord(m, why, now) {
         builds: [...new Set(kept.map(i => m.players[i].build).filter(Boolean))],
         why,
     };
+    // A match that was over because its host left, or its room closed, and
+    // not because its level ended: how far into it (ms) that was. The score
+    // screen a game shows from then on is the match's last, so one taken
+    // then can be its final scoreboard (ladder-shots.js).
+    if (m.overAt && m.ended !== "level")
+        detail.over = Math.max(0, m.overAt - m.startedAt);
     return {
         uid: crypto.randomUUID(),
         game: m.game, map: m.map, title: m.title || m.map, episode: m.episode, roomName: m.name,
@@ -990,6 +997,10 @@ export class Ladder {
         if (r.end && isHost) {
             m.ended = r.end;
             m.closing = now + CLOSE_MS;
+            // From now on the match is over for every game in it
+            // (buildRecord, over).
+            if (!m.overAt)
+                m.overAt = now;
         }
         // That was the last game to say its last, of a level its host has
         // ended or a room that's gone: nothing more can come for it, so it
@@ -1095,21 +1106,30 @@ export class Ladder {
     // room at once, while the other games' last reports (their last kills,
     // their time, their end) are still on their way, so the match stays open
     // for them CLOSE_MS at most, as after the host's end of a level, and
-    // closes as soon as each has said its last (take).
-    roomEnded(room) {
+    // closes as soon as each has said its last (take). lost: when the host
+    // was last here, for a room that closed because it never came back (its
+    // seat was held until now): the match was over then, and the other
+    // games gave up on it since, each when its own patience ran out.
+    roomEnded(room, lost = 0) {
         const open = this.matches.get(room.id);
         if (!open)
             return;
         // Marked at once, not in its turn: the other games' last lines can
         // come while the lobby is still working through what came before
         // (report).
-        if (!open.done)
-            open.roomGone = true;
         const now = Date.now();
+        const over = lost > 0 && lost < now ? lost : now;
+        if (!open.done) {
+            open.roomGone = true;
+            if (!open.overAt)
+                open.overAt = over;
+        }
         this.later(() => {
             const m = this.matches.get(room.id);
             if (m && !m.done) {
                 m.roomGone = true;
+                if (!m.overAt)
+                    m.overAt = over;
                 if (this.saidAll(m))
                     return this.finish(m, "room closed", now);
                 if (!m.closing || m.closing > now + CLOSE_MS)

@@ -495,9 +495,10 @@ export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         // room id -> {id, host, entry, peers: Map(id -> ws), seats, pw,
-        // entrySeq}, where seats is Map(id -> {key, until, name, game, net})
-        // for the host (1) and each peer: until, name, game and net only
-        // while the seat is held, and at, when its player sat down. pw is the password's verifier, {salt, mac,
+        // entrySeq}, where seats is Map(id -> {key, until, lost, name, game,
+        // net}) for the host (1) and each peer: until, lost (when its player
+        // was last here), name, game and net only while the seat is held,
+        // and at, when its player sat down. pw is the password's verifier, {salt, mac,
         // legacy}, null for a room without one. entrySeq counts the host's
         // entries, so one that waited for its verifier doesn't undo a newer.
         this.rooms = new Map();
@@ -585,9 +586,11 @@ export class Lobby extends DurableObject {
                 const live = id === 1 ? room.host : room.peers.get(id);
                 if (live && seat.until) {
                     delete seat.until;
+                    delete seat.lost;
                     changed = true;
                 } else if (!live && !seat.until) {
                     seat.until = now + this.holdMs;
+                    seat.lost = now;
                     changed = true;
                 }
             }
@@ -730,7 +733,8 @@ export class Lobby extends DurableObject {
             const last = Math.max(c.since || 0, ping ? ping.getTime() : 0, this.heard.get(ws) || 0);
             if (now - last < QUIET_MS)
                 continue;
-            this.drop(ws);
+            // Gone since it was last heard, not since now.
+            this.drop(ws, last);
             // Counted nowhere if the object wakes up before the socket is gone.
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
             this.forget(ws);
@@ -1411,8 +1415,9 @@ export class Lobby extends DurableObject {
     }
 
     // A socket that closed without leave, errored or went quiet: its seat is
-    // held for its player to take back (takeSeat).
-    drop(ws) {
+    // held for its player to take back (takeSeat). lost: when its player
+    // was last here, for a match its host never came back to (endRoom).
+    drop(ws, lost = Date.now()) {
         const c = this.conn(ws);
         const room = this.rooms.get(c.room);
         const seat = room && room.seats.get(c.id);
@@ -1420,7 +1425,7 @@ export class Lobby extends DurableObject {
             this.leave(ws);
             return;
         }
-        Object.assign(seat, { until: Date.now() + this.holdMs, name: c.name || null, game: c.game || "", net: c.net || 0 });
+        Object.assign(seat, { until: Date.now() + this.holdMs, lost, name: c.name || null, game: c.game || "", net: c.net || 0 });
         if (c.id === 1) {
             room.host = null;
             for (const peer of room.peers.values())
@@ -1475,6 +1480,7 @@ export class Lobby extends DurableObject {
         }
         const wasHeld = !!seat.until;
         delete seat.until;
+        delete seat.lost;
         delete seat.name;
         delete seat.game;
         delete seat.net;
@@ -1501,11 +1507,14 @@ export class Lobby extends DurableObject {
         this.statusChanged();
     }
 
-    // Ends a room: its players are told the host left.
+    // Ends a room: its players are told the host left. A host whose seat
+    // was held to the end was gone before this: its match was over when it
+    // was last here.
     endRoom(room) {
         this.rooms.delete(room.id);
         this.pwTries.delete(room.id);
-        this.ladder.roomEnded(room);
+        const host = room.seats.get(1);
+        this.ladder.roomEnded(room, host && host.until && host.lost ? host.lost : 0);
         this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id]);
         for (const peer of room.peers.values()) {
             this.setConn(peer, 0, 0);
