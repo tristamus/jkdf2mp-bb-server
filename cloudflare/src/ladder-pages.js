@@ -388,7 +388,7 @@ function shotsCard(shots, rows, names, linked, kills, contact, recent, you) {
         const i = index.has(s.slot) ? index.get(s.slot) : -1;
         const who = s.final ? "Final scoreboard" : named(s.slot);
         const at = s.final ? "" : `${clock(s.secs)} in`;
-        const cap = s.final ? "As the game showed it when the level ended" : around(s.secs);
+        const cap = s.final ? "As the game showed it when the match ended" : around(s.secs);
         // The small copy's size, for the room it takes before it loads.
         const scale = SHOTS.thumbEdge / Math.max(s.w, s.h, 1);
         const alt = s.final ? "The final scoreboard, as the game showed it" : `Screenshot by ${who}, ${at.replace(" in", " into the match")}`;

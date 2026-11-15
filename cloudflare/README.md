@@ -467,11 +467,20 @@ its match's page (Take it off), on its way (Keep it here), or only in the browse
 match's page). A match's page offers Take it off as well, on the pictures the viewer's own browser
 sent. A player who keeps their name off match pages sends nothing.
 
-When a level ends as a level does, the game also takes one picture of its score screen and the page
-sends it as the match's final scoreboard (`&final=1`). It isn't kept under Your Screenshots. A match
-keeps the first one that arrives, only when its host said the level ended, and never when one of its
-players is shown as Anonymous: that screen has everyone's name on it. It needs an engine that takes
-it (kit 102 or later); an older tab sends its player's own screenshots and no scoreboard.
+When a level ends, or a player leaves one, the game also takes one picture of the score screen it
+shows and the page sends it as the match's final scoreboard (`&final=1`). It isn't shown under Your
+Screenshots; the browser keeps it, for an hour at most, until it's sent or the lobby has no place for
+it, so a player who quits the game right away still sends it from the page that loads then. A match
+keeps the first one that arrives. It is of a level its host ended, from a game that saw it end, or
+of a match that was over because its host left or its room closed, taken from that moment on (the
+match's `detail.over`, ms into it): the host's own score screen, and that of each player thrown out
+with the host. One from a player who left while the match went on isn't the match's last and is
+turned away: the page says `&left=1` with the score screen of a player who left, which a level that
+ended never takes, and a match its host left takes only by when it was taken.
+Never when one of the match's players is shown as Anonymous: that screen has everyone's name on it.
+It needs an engine that takes it (kit 102 or later); an older tab sends its player's own screenshots
+and no scoreboard. A match with no score screen at its end has none: its games went quiet, or every
+game still in it closed its tab.
 
 | Limit | |
 | --- | --- |

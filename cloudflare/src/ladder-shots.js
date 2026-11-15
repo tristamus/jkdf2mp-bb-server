@@ -6,7 +6,7 @@
 // there, /ladder/recent doesn't say "shots", so pages send nothing, and the
 // match pages are as they were.
 //
-//   GET /ladder/shot?age=<ms>&taken=<ms>[&final=1]
+//   GET /ladder/shot?age=<ms>&taken=<ms>[&final=1[&left=1]]
 //                      where a picture taken that long ago would go, before
 //                      the page sends it: {match, secs, left}, or with id
 //                      when the lobby has it already, or {no: "<why>"} when
@@ -14,7 +14,7 @@
 //                      its match may be saved yet). All of those are 200:
 //                      "not yet" is an answer, not a fault, and a browser
 //                      shows anything else as an error in its console.
-//   POST /ladder/shot?age=<ms>&taken=<ms>[&final=1]
+//   POST /ladder/shot?age=<ms>&taken=<ms>[&final=1[&left=1]]
 //                      the picture, as a form with two files: full (a JPEG,
 //                      SHOTS.edge pixels at most on its longer side) and
 //                      thumb (a small one). Answers {id, match, secs, left}.
@@ -41,11 +41,18 @@
 // hand (README.md, "Screenshots on match pages"). A player recorded as
 // Anonymous has no key in the match and can't add any.
 //
-// The final scoreboard: the game takes one picture of its score screen when
-// a level ends, and the page sends it with final=1. A match keeps the first
-// that arrives (every game shows the same screen), only when its host said
-// the level ended, and never when one of its players is shown as Anonymous:
-// that screen has everyone's name on it.
+// The final scoreboard: the game takes one picture of the score screen it
+// shows when a level ends or its player leaves, and the page sends it with
+// final=1, and left=1 when its player left. A match keeps the first that
+// arrives (every game shows the same screen). A player who left a match that
+// went on has a score screen too, and that one isn't the match's last. So:
+// - a match whose host said the level ended takes one from a game whose
+//   level ended, and none from a player who left;
+// - a match that was over because its host left or its room closed takes
+//   one that was taken once it was over (over, in its detail): when the
+//   host said it left, or was last here before its room closed without it.
+// Never when one of the match's players is shown as Anonymous: that screen
+// has everyone's name on it.
 //
 // A picture is two objects in the bucket, m/<match>/<id>.jpg and
 // m/<match>/<id>.t.jpg, and a row in match_shots (ladder.js, SCHEMA). The id
@@ -78,6 +85,11 @@ const SLACK_MS = 5000;
 // record is when the lobby closed it, up to CLOSE_MS (ladder.js) later.
 const FINAL_BEFORE_MS = 25000;
 const FINAL_AFTER_MS = 45000;
+// One of a match its host left is taken once the host had left, however
+// long before the lobby closed the match (a host that's just gone has its
+// seat held a while first). This much earlier still counts: the host's word
+// and the picture's age come to the lobby by two ways, each with its delay.
+const FINAL_EARLY_MS = 3000;
 // How long a picture waits for its match to be saved: a match can run for
 // hours, and a final scoreboard's is saved within minutes or not at all.
 const WAIT_MS = 12 * HOUR_MS;
@@ -165,7 +177,8 @@ function objectKeys(match, id) {
 // {match, slot, player, secs, left, id} with id the picture's when the lobby
 // has this one already, or why it goes nowhere, {no: [status, error, more]}.
 // room: the bytes of pictures the lobby keeps at most.
-async function place(db, keyHash, captured, taken, final, now, room) {
+// final: a final scoreboard; left: of a level its player left.
+async function place(db, keyHash, captured, taken, final, left, now, room) {
     const since = now - SHOTS.days * 24 * HOUR_MS;
     // A match it could be of began before `to` and ended after `from`.
     const from = final ? captured - FINAL_AFTER_MS : captured - SLACK_MS;
@@ -182,7 +195,7 @@ async function place(db, keyHash, captured, taken, final, now, room) {
         // Their matches around that time, with what each has already.
         // unnamed: its players shown as Anonymous.
         db.prepare(
-            `SELECT m.id, m.started_at, m.ended_at, m.ended, mp.slot, mp.player_id,
+            `SELECT m.id, m.started_at, m.ended_at, m.ended, json_extract(m.detail, '$.over') AS over, mp.slot, mp.player_id,
                     (SELECT s.id FROM match_shots s
                      WHERE s.match_id = m.id AND s.player_id = mp.player_id AND s.taken = ?) AS have,
                     (SELECT COUNT(*) FROM match_shots s
@@ -206,9 +219,13 @@ async function place(db, keyHash, captured, taken, final, now, room) {
     if (player.hidden)
         return { no: [403, "hidden"] };
     let rows = found.results;
-    // A final scoreboard is of a level its host ended, taken as it ended.
-    if (final)
-        rows = rows.filter(m => m.ended === "level" && m.ended_at <= to);
+    // A final scoreboard is of a level its host ended, from a game that saw
+    // it end, or of a match that was over when its host left (over,
+    // ladder.js), taken from then on.
+    if (final) {
+        rows = rows.filter(m => m.ended === "level" ? !left && m.ended_at <= to
+            : typeof m.over === "number" && captured >= m.started_at + m.over - FINAL_EARLY_MS);
+    }
     // The match it was taken in: the one whose times hold it, the later one
     // of two (a level that follows another at once), else the nearest.
     const off = m => final ? Math.abs(captured - m.ended_at)
@@ -260,6 +277,7 @@ async function takeShot(request, env, url, now) {
     const age = whole(url.searchParams.get("age"), 400 * 24 * HOUR_MS);
     const taken = whole(url.searchParams.get("taken"), 8.64e15);
     const final = url.searchParams.get("final") === "1";
+    const left = final && url.searchParams.get("left") === "1";
     if (age < 0 || taken < 0)
         return refuse(400, "fields");
     // No place for it: an answer to the page that asks, a refusal of a
@@ -269,7 +287,7 @@ async function takeShot(request, env, url, now) {
         return none(404, "none", { wait: false });
     const db = env.LADDER;
     const room = shotsRoom(env);
-    const placed = await place(db, await hashKey(key), now - age, taken, final, now, room);
+    const placed = await place(db, await hashKey(key), now - age, taken, final, left, now, room);
     if (placed.no)
         return none(...placed.no);
     const answer = id => json(200, { match: placed.match, secs: placed.secs, left: placed.left, ...(id ? { id } : {}) });
