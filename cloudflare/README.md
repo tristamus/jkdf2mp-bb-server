@@ -652,7 +652,7 @@ R2 bucket and writes an index for each game, and the page reads them from here, 
 bound for now (`LEVELJOB` and `LEVELS` under `[env.beta]` in `wrangler.toml`, and its cron).
 
 - **The job** is a Durable Object, `LevelJob`, that runs on its own alarm and makes one request each time, 30 s
-  apart: Massassi's six level lists (each with `?num=9999`, so one request), then each level's page, its zip and its
+  apart: Massassi's six level lists and two mod lists (each with `?num=9999`, so one request), then each level's page, its zip and its
   screenshots, most downloaded first and multiplayer before single player. The lists again every 12 hours, each page
   every 90 days; otherwise only what's new. The cron (every 10 minutes, `scheduled()` in `lobby.js`) only makes sure
   the alarm is set.
@@ -677,6 +677,17 @@ bound for now (`LEVELJOB` and `LEVELS` under `[env.beta]` in `wrangler.toml`, an
   it stops copying, under the 10 GB a month R2 stores without charge, which the screenshots share.
 - The zips are read with the page's own unzipper for the old zip methods (`src/vendor/jkunzip.js`, made by
   `tools/vendor-unzip.sh` from OpenJKDF2's `packaging/wasm/unzip.js`).
+- **Mods (the Mod Library):** the same job also copies Massassi's `jkmod` and `motsmod` lists (540 and 58 mods on
+  2026-11-15) into the same table and bucket, ranked with the multiplayer levels by downloads. A mod's page has no 3D
+  Preview, so the job asks its Download link (`/levels/download/<id>/`) once, which adds one to its download count
+  (Brian said that's fine for mods, via Antonio, 2026-11-15), takes the zip's address from that page, and asks it
+  again only if the mod's page later shows a zip of another size. `download_pages` in `/levels/status` counts them.
+  For each mod's zip, `src/levels-read.js` works out how the page puts it into the game (`modPlan`: the GOBs and the
+  files in the game's resource folders that make up the mod's folder, and the GOBs with an `episode.jk`, which go
+  into `episode/`), the files inside its GOBs, its kind (`modKind`: gameplay, characters, graphics, campaign or
+  other, a guess from its files) and which other entries are versions of it (`modGroup`). Mods have their own index,
+  `/levels/mods/jk1.json` and `/levels/mods/mots.json` (`index/<game>-mods.json`), so the levels' index is as it
+  was; their details, zips and screenshots use the levels' routes. Mods have no 3D data.
 - Tests: `node test/levels.mjs`.
 
 ## Engine files
