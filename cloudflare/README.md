@@ -666,6 +666,13 @@ bound for now (`LEVELJOB` and `LEVELS` under `[env.beta]` in `wrangler.toml`, an
 - **Routes:** `/levels/jk1.json` and `/levels/mots.json` (the index), `/levels/d/<id>.json` (a level's description,
   readmes, files and date), `/levels/z/<id>.zip` (immutable with `?h=` the zip's SHA-256), `/levels/s/<id>-<n>.jpg`,
   and `/levels/status`, the job's progress.
+- **3D data:** for each map, Massassi's 3D Preview data (`pv/<id>-<m>.map.json` and `.mat.json`, at
+  `/levels/p/<id>-<m>.map.json`), what the level's GOBs ship for its textures (`pv/<id>.tex.json`), and the parts of
+  its models the preview leaves out (`pv/<id>-<m>.parts.json`, made from the zip with no request to Massassi by
+  `src/levels-parts.js`). The preview keeps only a model's last top-level part, so a model saved with its parts side
+  by side at the top (The Death Star's Millennium Falcon, 9 parts) is drawn with one; 197 of the first 1,290 levels
+  have one. Models named like one of the games' own (`src/levels-official.js`) are left as the preview has them,
+  since it reads the games' files over the level's.
 - **Variables:** `LEVELS_FETCH = "0"` stops the job and keeps serving what it has; `LEVELS_MAX_GB` (6 unset) is where
   it stops copying, under the 10 GB a month R2 stores without charge, which the screenshots share.
 - The zips are read with the page's own unzipper for the old zip methods (`src/vendor/jkunzip.js`, made by
