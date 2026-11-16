@@ -55,6 +55,25 @@
 // only as blurred stand-ins, which the page swaps for the real ones from the
 // player's own game files.
 //
+// The Mod Library's mods come the same way, from Massassi's jkmod and motsmod
+// lists, in the same table and bucket, with the most downloaded of levels
+// and mods first. A mod's page has no 3D Preview, so its zip's address comes
+// from its Download link (/levels/download/<id>/), which Brian said is fine
+// for mods (via Antonio, 2026-11-15): it adds one to the mod's download count,
+// so the job asks it once for each mod (and again only if the mod's page
+// later shows a zip of another size). Each mod's zip is looked into for what
+// the page needs to put it into the game (levels-read.js, modPlan): which of
+// its files make up the mod's folder, which GOBs are episodes, what's inside
+// its GOBs, and what kind of mod it is (modKind). Mods have no 3D data. Their
+// own index, so the levels' stays as it is:
+//
+//   index/<game>-mods.json   the mods of jk1 or mots that are ready
+//
+//   GET /levels/mods/jk1.json, /levels/mods/mots.json
+//
+// and their details, zips and screenshots go under the same keys and routes
+// as a level's (Massassi numbers levels and mods together).
+//
 // Variables (wrangler.toml): LEVELS_FETCH = "0" stops the job (what it has
 // stays served); LEVELS_PREVIEW = "0" stops it getting 3D data, and
 // LEVELS_PREVIEW_GB (3 when it isn't set) once it has that much of it;
@@ -66,21 +85,33 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { parseList, parsePage, previewMaps, gobTextures, sizeBytes, openZip, readEntry, dataStart, memReader, parseGob, parseEpisode,
-         decodeText, releaseDate, isText, isLevelFile } from "./levels-read.js";
+         decodeText, releaseDate, isText, isLevelFile, downloadZip, modPlan, modKind, modGroup, MOD_DIRS } from "./levels-read.js";
 import { levelParts, gobFinder } from "./levels-parts.js";
 import { OFFICIAL_3DO } from "./levels-official.js";
 
 const MASSASSI = "https://www.massassi.net";
-// The lists, in the order the job works through them: multiplayer first.
+// The lists, in the order the job works through them: multiplayer levels and
+// mods first, most downloaded first, then single-player levels.
 export const LISTS = [
     { cat: "jkmp", game: "jk1", kind: "mp", prio: 0 },
     { cat: "jkctf", game: "jk1", kind: "ctf", prio: 0 },
     { cat: "motsmp", game: "mots", kind: "mp", prio: 0 },
     { cat: "motskfy", game: "mots", kind: "kfy", prio: 0 },
+    { cat: "jkmod", game: "jk1", kind: "mod", prio: 0, mod: true },
+    { cat: "motsmod", game: "mots", kind: "mod", prio: 0, mod: true },
     { cat: "jksp", game: "jk1", kind: "sp", prio: 1 },
     { cat: "motssp", game: "mots", kind: "sp", prio: 1 },
 ];
 const BY_CAT = Object.fromEntries(LISTS.map(l => [l.cat, l]));
+const MOD_CATS = LISTS.filter(l => l.mod).map(l => l.cat);
+// For SQL: the mods' lists, as a quoted list ('jkmod', 'motsmod').
+const MOD_SQL = MOD_CATS.map(c => `'${c}'`).join(", ");
+const isMod = row => MOD_CATS.includes(row.cat);
+const GOB_EXT = { jk1: "gob", mots: "goo" };
+// The page's graphics packs (index.html, OPTIONAL_PACKS): each player's own.
+const GRAPHICS_PACKS = ["jke.gob", "jkr.gob", "jk hd models.gob"];
+// What the index and detail say about the files inside a mod's GOBs, at most.
+const MAX_INSIDE = 8000;
 export const GAMES = ["jk1", "mots"];
 const MIN = 60 * 1000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 const PACE_MS = 30 * 1000;
@@ -173,6 +204,59 @@ function hashing() {
         async sha() {
             if (ds) return hex(await ds.digest);
             return sha256(await new Blob(parts).arrayBuffer());
+        },
+    };
+}
+
+// A GOB's file table as the GOB streams by, for one too big to hold: its
+// header says where the table starts, and the table runs to the end.
+export function gobTable() {
+    let at = 0, head = new Uint8Array(0), start = -1;
+    const parts = [];
+    const join = (a, b) => {
+        const c = new Uint8Array(a.length + b.length);
+        c.set(a);
+        c.set(b, a.length);
+        return c;
+    };
+    const stream = new TransformStream({
+        transform(chunk, ctl) {
+            if (head.length < 12)
+                head = join(head, chunk.subarray(0, 12 - head.length));
+            if (start < 0 && head.length >= 12) {
+                const ok = head[0] === 0x47 && head[1] === 0x4f && head[2] === 0x42 && head[3] === 0x20;
+                start = ok ? (head[8] | (head[9] << 8) | (head[10] << 16)) + head[11] * 0x1000000 : Infinity;
+            }
+            const end = at + chunk.length;
+            if (start >= 0 && end > start && parts.reduce((n, p) => n + p.length, 0) < 8 * 1024 * 1024)
+                parts.push(chunk.slice(Math.max(0, start - at)));
+            at = end;
+            ctl.enqueue(chunk);
+        },
+    });
+    return {
+        stream,
+        files() {
+            if (!(start >= 12) || !parts.length)
+                return null;
+            const t = new Uint8Array(new Blob(parts).size);
+            let o = 0;
+            for (const p of parts) {
+                t.set(p, o);
+                o += p.length;
+            }
+            // The table: a count, then 136 bytes a file (offset, size, name).
+            const count = t.length >= 4 ? (t[0] | (t[1] << 8) | (t[2] << 16)) + t[3] * 0x1000000 : 0;
+            const files = [];
+            for (let i = 0; i < count && 4 + (i + 1) * 136 <= t.length; i++) {
+                const e = 4 + i * 136;
+                const size = (t[e + 4] | (t[e + 5] << 8) | (t[e + 6] << 16)) + t[e + 7] * 0x1000000;
+                let name = "";
+                for (let j = 0; j < 128 && t[e + 8 + j]; j++)
+                    name += String.fromCharCode(t[e + 8 + j]);
+                files.push({ name: name.replace(/\\/g, "/"), size });
+            }
+            return files;
         },
     };
 }
@@ -344,7 +428,7 @@ export class LevelJob extends DurableObject {
         const row = this.sql.exec(
             `SELECT * FROM lv WHERE (retry_at IS NULL OR retry_at <= ?) AND (
                  page_at IS NULL
-                 OR (page_st = 'ok' AND zip_url IS NOT NULL AND zip_st IS NULL AND ? = 0)
+                 OR (page_st = 'ok' AND zip_st IS NULL AND (zip_url IS NOT NULL OR cat IN (${MOD_SQL})) AND ? = 0)
                  OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got < json_array_length(shots) AND ? = 0)
                  OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got >= json_array_length(COALESCE(shots, '[]'))
                      AND pv_st IS NULL AND zip_url IS NOT NULL AND ? = 0)
@@ -373,7 +457,7 @@ export class LevelJob extends DurableObject {
         if (row.page_at == null)
             return this.readPage(row, now);
         if (row.zip_st == null)
-            return this.readZip(row, now);
+            return row.zip_url ? this.readZip(row, now) : this.readDownload(row, now);
         if (row.shots_got < JSON.parse(row.shots || "[]").length)
             return this.readShot(row, now);
         if (row.pv_st === "ok")
@@ -507,16 +591,21 @@ export class LevelJob extends DurableObject {
             throw e;
         }
         const shots = JSON.stringify(p.shots.slice(0, MAX_SHOTS));
-        // A new address, or a zip of another size: the zip again.
-        const again = row.zip_url !== p.zip || (row.size_txt && row.size_txt !== p.size);
+        // A new address, or a zip of another size: the zip again. A mod's
+        // address comes from its download page (readDownload), asked again
+        // only for a zip of another size, since each time counts a download.
+        const mod = isMod(row);
+        const sized = row.size_txt && row.size_txt !== p.size;
+        const again = mod ? !!sized : row.zip_url !== p.zip || sized;
+        const zip = mod ? (sized ? null : row.zip_url) : p.zip;
         this.sql.exec(
             `UPDATE lv SET page_at = ?, page_st = 'ok', name = ?, size_txt = ?, mdate = ?, descr = ?,
                  title = COALESCE(NULLIF(?, ''), title), author = COALESCE(NULLIF(?, ''), author),
                  zip_url = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?`,
-            now, p.name, p.size, p.date, p.desc, p.title, p.author, p.zip, row.id);
+            now, p.name, p.size, p.date, p.desc, p.title, p.author, zip, row.id);
         if (again || row.zip_st == null || row.zip_st === "error" || row.zip_st === "full") {
             this.sql.exec("UPDATE lv SET zip_st = ?, shots = ?, shots_got = 0, pv_st = NULL, pv_maps = NULL, pv_got = 0, pv_size = 0, pv_tex = 0 WHERE id = ?",
-                          p.zip ? null : "none", shots, row.id);
+                          zip || mod ? null : "none", shots, row.id);
         } else if (shots !== row.shots) {
             this.sql.exec("UPDATE lv SET shots = ?, shots_got = 0 WHERE id = ?", shots, row.id);
         }
@@ -524,6 +613,43 @@ export class LevelJob extends DurableObject {
         if (!again && row.zip_st === "ok" && p.desc !== row.descr)
             await this.patchDetail(row.id, { desc: p.desc });
         this.dirty();
+    }
+
+    // A mod's zip address, from its download page (/levels/download/<id>/),
+    // which counts a download on Massassi: so once for each mod, and the
+    // count of them is in the status.
+    async readDownload(row, now) {
+        const declared = sizeBytes(row.size_txt);
+        if (declared && declared > MAX_ZIP) {
+            this.sql.exec("UPDATE lv SET zip_st = 'big', zip_at = ? WHERE id = ?", now, row.id);
+            return;
+        }
+        const max = (Number(this.env.LEVELS_MAX_GB) || MAX_GB) * 1e9;
+        if (declared && this.stored() + declared > max) {
+            this.sql.exec("UPDATE lv SET zip_st = 'full', zip_at = ? WHERE id = ?", now, row.id);
+            return;
+        }
+        let html;
+        try {
+            this.kv("download_pages", Number(this.kv("download_pages") || 0) + 1);
+            html = await (await this.get(`${MASSASSI}/levels/download/${row.id}/`, MAX_PAGE)).text();
+        } catch (e) {
+            if (e instanceof HttpError && (e.status === 404 || e.status === 410 || e.status === 403)) {
+                this.sql.exec("UPDATE lv SET zip_st = 'gone', zip_at = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
+                              now, e.message, row.id);
+                this.dirty();
+                return;
+            }
+            throw e;
+        }
+        const zip = downloadZip(html);
+        if (!zip) {
+            this.sql.exec("UPDATE lv SET zip_st = 'none', zip_at = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
+                          now, "no zip address on its download page", row.id);
+            this.dirty();
+            return;
+        }
+        this.sql.exec("UPDATE lv SET zip_url = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", zip, row.id);
     }
 
     async patchDetail(id, fields) {
@@ -614,25 +740,46 @@ export class LevelJob extends DurableObject {
         if (zip.bytes)
             await this.env.LEVELS.put(key, zip.bytes, { httpMetadata: { contentType: "application/zip" },
                                                       customMetadata: { sha256: sha, name } });
-        const status = found.bad ? "bad" : found.gobs.length ? "ok" : "nolevel";
+        const mod = isMod(row);
+        // A mod is ready when the game gets something from it: a file for
+        // its folder or an episode. One that is only a program, say, isn't.
+        const status = found.bad ? "bad" : mod ? (found.plan.files.length || found.plan.episodes.length ? "ok" : "nomod")
+                                             : found.gobs.length ? "ok" : "nolevel";
         const info = found.bad ? { bad: found.bad } : {
             gobs: found.gobs.map(g => ({ n: g.name, h: g.sha, b: g.size, ep: g.ep, ty: g.ty, lv: g.lv, in: g.inner })),
             date: { d: found.date.date, p: found.date.precision, src: found.date.source, sort: found.date.sort,
                     flags: found.date.flags },
         };
         info.name = name;
+        if (!found.bad && mod)
+            info.mod = { k: found.mod.kind, n: found.mod.files, ep: found.mod.eps.length, x: found.mod.programs.length,
+                         gp: found.mod.pack || undefined, in: found.plan.inner || undefined };
         if (!found.bad) {
             const detail = {
                 id: row.id, title: row.title, author: row.author, desc: row.descr || "",
                 massassi: `${MASSASSI}/levels/files/${row.id}.shtml`, zip: name, size, sha256: sha,
                 date: found.date, files: found.files, texts: found.texts, gobs: info.gobs,
             };
+            if (mod)
+                detail.mod = {
+                    kind: found.mod.kind, pack: found.mod.pack, episodes: found.mod.eps, programs: found.mod.programs,
+                    // How the page puts it into the game (modPlan): the zip's
+                    // entries for the mod's folder, with their place there,
+                    // and the episode GOBs, in the inner zip when there's one.
+                    plan: { inner: found.plan.inner, files: found.plan.files, episodes: found.plan.episodes },
+                    left: found.plan.left,
+                    // What's inside its GOBs: [name, size] for each file.
+                    inside: found.inside,
+                };
             await this.env.LEVELS.put(`detail/${row.id}.json`, JSON.stringify(detail),
                                       { httpMetadata: { contentType: "application/json" } });
         }
         this.sql.exec(
             `UPDATE lv SET zip_st = ?, zip_at = ?, zip_size = ?, zip_sha = ?, info = ?, tries = 0, retry_at = NULL, err = ?
              WHERE id = ?`, status, now, size, sha, JSON.stringify(info), found.bad || null, row.id);
+        // Mods have no 3D data: no level to show (and no address for the preview).
+        if (mod)
+            this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ? WHERE id = ?", now, row.id);
         this.dirty();
     }
 
@@ -642,13 +789,16 @@ export class LevelJob extends DurableObject {
     async lookInside(reader, row) {
         let z = await openZip(reader);
         let inner = null;
+        const mod = isMod(row);
         const levelOf = es => es.filter(e => !e.dir && /\.(gob|goo)$/i.test(e.name));
-        if (!levelOf(z.entries).length) {
+        // A mod may be loose files in the game's folders, with no GOB.
+        const modOf = es => es.filter(e => !e.dir && e.name.split("/").slice(0, -1).some(p => MOD_DIRS.includes(p.toLowerCase())));
+        if (!levelOf(z.entries).length && !(mod && modOf(z.entries).length)) {
             const nested = z.entries.find(e => /\.zip$/i.test(e.name) && e.size <= MEM_ZIP);
             if (nested) {
                 const b = await readEntry(z, nested);
                 const z2 = await openZip(memReader(b));
-                if (levelOf(z2.entries).length) {
+                if (levelOf(z2.entries).length || (mod && modOf(z2.entries).length)) {
                     inner = nested.name;
                     z = { ...z2, outer: z };
                 }
@@ -658,12 +808,24 @@ export class LevelJob extends DurableObject {
         const files = all.filter(e => !e.dir).slice(0, MAX_FILES).map(e => ({ n: (z.outer && z.entries.includes(e) ? inner + "/" : "") + e.name,
                                                                                 b: e.size, d: e.date }));
         const gobs = [];
+        // A mod's: the files inside each of its GOBs, for what it changes.
+        const inside = {};
+        let insideN = 0;
+        const keepInside = (g, dir) => {
+            if (!mod || !dir)
+                return;
+            const list = dir.slice(0, Math.max(0, MAX_INSIDE - insideN)).map(f => [f.name, f.size]);
+            insideN += list.length;
+            inside[g.name] = list;
+            g.files = dir.length;
+        };
         for (const e of levelOf(z.entries)) {
             const g = { name: e.name, size: e.size, sha: null, ep: null, ty: null, lv: null, inner };
             if (e.size <= MEM_GOB && e.csize <= MEM_GOB) {
                 const b = await readEntry(z, e);
                 g.sha = await sha256(b);
                 const dir = parseGob(b);
+                keepInside(g, dir);
                 const epf = dir && dir.find(f => f.name.toLowerCase() === "episode.jk");
                 if (epf) {
                     const ep = parseEpisode(decodeText(b.subarray(epf.offset, epf.offset + epf.size)));
@@ -677,10 +839,16 @@ export class LevelJob extends DurableObject {
                 let s = await z.reader.stream(start, e.csize);
                 if (e.method === 8)
                     s = s.pipeThrough(new DecompressionStream("deflate-raw"));
+                // A mod's GOB too big to hold: its file table, as it goes by.
+                const table = mod ? gobTable() : null;
+                if (table)
+                    s = s.pipeThrough(table.stream);
                 await s.pipeThrough(h.stream).pipeTo(new WritableStream());
                 if (h.size() !== e.size)
                     throw new Error(`bad size for ${e.name}`);
                 g.sha = await h.sha();
+                if (table)
+                    keepInside(g, table.files());
             }
             gobs.push(g);
         }
@@ -695,10 +863,34 @@ export class LevelJob extends DurableObject {
             }
             texts.push({ name: e.name, text: t });
         }
-        const fileDates = all.filter(e => !e.dir && isLevelFile(e.name) && e.date).map(e => e.date);
+        let plan = null, modInfo = null;
+        if (mod) {
+            const ext = GOB_EXT[row.game] || "gob";
+            plan = modPlan(z.entries, ext, gobs.filter(g => g.ep != null || (g.lv && g.lv.length)).map(g => g.name));
+            plan.inner = inner;
+            // Loose files are in a folder; the mod's GOBs are at its top.
+            const planGobs = new Set(plan.files.filter(f => !f[1].includes("/")).map(f => f[0]));
+            const names = plan.files.filter(f => f[1].includes("/")).map(f => f[1]);
+            for (const g of gobs)
+                for (const [n] of inside[g.name] || [])
+                    names.push(n);
+            const eps = gobs.filter(g => plan.episodes.includes(g.name)).map(g => ({ n: g.name, ep: g.ep, ty: g.ty, lv: g.lv }));
+            // A graphics pack (the page's OPTIONAL_PACKS) is each player's
+            // own: one GOB of that name and nothing else.
+            const pack = plan.files.length === 1 && planGobs.size === 1 && !eps.length &&
+                         GRAPHICS_PACKS.includes(plan.files[0][1].toLowerCase()) ? plan.files[0][1] : null;
+            modInfo = {
+                kind: modKind(names, eps, pack), pack, eps,
+                files: plan.files.length - planGobs.size + gobs.filter(g => planGobs.has(g.name)).reduce((n, g) => n + (g.files || 1), 0),
+                programs: plan.left.programs,
+            };
+        }
+        // A mod's date goes by all of its files; a level's by its GOBs and JKLs.
+        const dated = mod && plan ? new Set(plan.files.map(f => f[0]).concat(plan.episodes)) : null;
+        const fileDates = all.filter(e => !e.dir && e.date && (dated ? dated.has(e.name) : isLevelFile(e.name))).map(e => e.date);
         const date = releaseDate(texts, fileDates, row.mdate || row.added);
         return {
-            gobs, files, date,
+            gobs, files, date, plan, inside, mod: modInfo,
             texts: texts.filter(t => t.text != null).slice(0, MAX_TEXTS)
                 .map(t => ({ n: t.name, t: t.text.length > MAX_TEXT_OUT ? t.text.slice(0, MAX_TEXT_OUT) + "\n[...]" : t.text })),
         };
@@ -867,8 +1059,9 @@ export class LevelJob extends DurableObject {
         this.kv("dirty", 1);
     }
 
-    // Writes the two indexes, at most every INDEX_MS while levels come in
-    // (now: at once, when the job has caught up).
+    // Writes the indexes, the levels' and the mods' of each game, at most
+    // every INDEX_MS while levels come in (now: at once, when the job has
+    // caught up).
     async index(now) {
         if (this.kv("dirty") !== "1")
             return;
@@ -877,7 +1070,9 @@ export class LevelJob extends DurableObject {
             return;
         const built = new Date().toISOString();
         for (const game of GAMES) {
-            const rows = this.sql.exec("SELECT * FROM lv WHERE game = ? ORDER BY title COLLATE NOCASE", game).toArray();
+            const all = this.sql.exec("SELECT * FROM lv WHERE game = ? ORDER BY title COLLATE NOCASE", game).toArray();
+            const rows = all.filter(r => !isMod(r));
+            await this.indexMods(game, built, all.filter(isMod));
             const levels = [];
             for (const r of rows) {
                 if (r.page_st !== "ok" || r.zip_st !== "ok")
@@ -903,11 +1098,39 @@ export class LevelJob extends DurableObject {
         this.kv("dirty", 0);
     }
 
+    // index/<game>-mods.json: the mods that are ready. Each has what a level
+    // has in the levels' index (the zip, its GOBs, dates, downloads), and k
+    // its kind (modKind), n how many files it has, ep how many episodes,
+    // x how many programs the page leaves out, gp the graphics pack's name
+    // when it's one, and gk which of the others are versions of it (modGroup).
+    async indexMods(game, built, rows) {
+        const mods = [];
+        for (const r of rows) {
+            if (r.page_st !== "ok" || r.zip_st !== "ok")
+                continue;
+            const info = JSON.parse(r.info || "{}");
+            const d = info.date || {}, m = info.mod || {};
+            mods.push({
+                id: r.id, k: m.k || "other", t: r.title, a: r.author,
+                rel: d.d || null, rp: d.p ? d.p[0] : null, sd: d.sort && d.sort !== d.d ? d.sort : undefined,
+                src: d.src ? d.src[0] : null, add: r.mdate || r.added, sz: r.zip_size, r: r.rating, v: r.votes, dl: r.dl,
+                sh: r.shots_got, z: info.name, h: r.zip_sha, gk: modGroup(r.title, r.author),
+                n: m.n || 0, ep: m.ep || undefined, x: m.x || undefined, gp: m.gp || undefined,
+                g: (info.gobs || []).map(g => ({ n: g.n, h: g.h, b: g.b, ep: g.ep || undefined, ty: g.ty || undefined,
+                                                  in: g.in || undefined })),
+            });
+        }
+        const left = rows.filter(r => r.page_at == null || (r.page_st === "ok" && r.zip_st == null)).length;
+        const body = JSON.stringify({ v: 1, game, built, source: MASSASSI, listed: rows.length, left, mods });
+        await this.env.LEVELS.put(`index/${game}-mods.json`, body, { httpMetadata: { contentType: "application/json" } });
+    }
+
     async status() {
         const by = this.sql.exec(
             `SELECT cat, COUNT(*) AS listed,
                     SUM(page_st = 'ok') AS pages, SUM(page_at IS NULL) AS pages_left,
-                    SUM(zip_st = 'ok') AS zips, SUM(page_st = 'ok' AND zip_url IS NOT NULL AND zip_st IS NULL) AS zips_left,
+                    SUM(zip_st = 'ok') AS zips,
+                    SUM(page_st = 'ok' AND zip_st IS NULL AND (zip_url IS NOT NULL OR cat IN (${MOD_SQL}))) AS zips_left,
                     SUM(shots_got) AS shots, SUM(CASE WHEN zip_st = 'ok' THEN MAX(0, json_array_length(COALESCE(shots, '[]')) - shots_got) ELSE 0 END) AS shots_left,
                     SUM(COALESCE(zip_size, 0)) AS bytes,
                     SUM(pv_st = 'ok') AS previews, SUM(zip_st = 'ok' AND pv_st IS NULL) AS previews_left,
@@ -920,6 +1143,9 @@ export class LevelJob extends DurableObject {
         const flagged = this.sql.exec(
             `SELECT id, title, json_extract(info, '$.date.d') AS d, json_extract(info, '$.date.flags') AS flags FROM lv
              WHERE json_array_length(json_extract(info, '$.date.flags')) > 0 LIMIT 50`).toArray();
+        const kinds = this.sql.exec(
+            `SELECT game, json_extract(info, '$.mod.k') AS kind, COUNT(*) AS n FROM lv
+             WHERE cat IN (${MOD_SQL}) AND zip_st = 'ok' GROUP BY game, kind`).toArray();
         const lists = {};
         for (const l of LISTS)
             lists[l.cat] = { at: Number(this.kv("list_at:" + l.cat) || 0) || null, n: Number(this.kv("list_n:" + l.cat) || 0) };
@@ -929,6 +1155,8 @@ export class LevelJob extends DurableObject {
             requests_today: Number(this.kv("req_today") || 0), requests_total: Number(this.kv("req_total") || 0),
             stored_bytes: this.stored(), preview_bytes: this.previewBytes(), index_at: Number(this.kv("index_at") || 0) || null,
             last_error: this.kv("last_error"), lists, by_list: by, not_ready: odd, errors, date_flags: flagged,
+            // The mods' download pages asked, each one a download on Massassi.
+            download_pages: Number(this.kv("download_pages") || 0), mod_kinds: kinds,
         };
     }
 }
@@ -1026,6 +1254,8 @@ export async function levelsRoute(request, env, url) {
     let m;
     if ((m = /^\/levels\/(jk1|mots)\.json$/.exec(path)))
         return serve(request, env, `index/${m[1]}.json`, "public, max-age=300", "application/json; charset=utf-8");
+    if ((m = /^\/levels\/mods\/(jk1|mots)\.json$/.exec(path)))
+        return serve(request, env, `index/${m[1]}-mods.json`, "public, max-age=300", "application/json; charset=utf-8");
     if ((m = /^\/levels\/d\/(\d{1,7})\.json$/.exec(path)))
         return serve(request, env, `detail/${m[1]}.json`, "public, max-age=3600", "application/json; charset=utf-8");
     if ((m = /^\/levels\/z\/(\d{1,7})\.zip$/.exec(path))) {

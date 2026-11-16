@@ -721,3 +721,166 @@ export function releaseDate(texts, fileDates, massassi, today) {
     out.massassiBulk = bulk;
     return out;
 }
+
+// ---- Mods (the Mod Library: Massassi's jkmod and motsmod lists)
+//
+// A mod's page has no 3D Preview, so no direct address for its zip: only the
+// Download link, /levels/download/<id>/, which Brian (who runs Massassi) said
+// the job may use, once for each mod (via Antonio, 2026-11-15). That address
+// adds one to the mod's download count and answers with a page that sends
+// the browser on to the zip (a Refresh to /media/levels/files/...).
+
+// The zip's address on a mod's download page, if it's one of Massassi's files.
+export function downloadZip(html) {
+    const body = html || "";
+    const refresh = /<meta\s+http-equiv=["']?refresh["']?\s+content=["']\s*\d+\s*;\s*url=([^"'>\s]+)["']/i.exec(body);
+    const link = /<a\s+href=["'](\/media\/levels\/files\/[^"'<>\s]+)["']/i.exec(body);
+    for (const m of [refresh, link]) {
+        if (!m)
+            continue;
+        const u = unescapeHtml(m[1]);
+        const zip = directZip(u.startsWith("/") ? MASSASSI + u : u);
+        if (zip)
+            return zip;
+    }
+    return null;
+}
+
+// The game's resource folders: what the engine reads from a mod's folder
+// besides its GOBs (jkRes_FileOpen, and the page's MOD_RESOURCE_DIRS).
+export const MOD_DIRS = ["3do", "mat", "cog", "misc", "sound", "ui", "jkl", "ai", "voice", "cmp", "key", "snd", "pup"];
+// Programs, which the browser can't run (Massassi's rules ban changes to the
+// game's own EXE, but some mods come with a launcher or an installer).
+const PROGRAM = /\.(exe|dll|com|bat|cmd|pif|scr|vbs|msi)$/i;
+// What's never part of a mod.
+function junk(name) {
+    const parts = name.toLowerCase().split("/");
+    const base = parts[parts.length - 1];
+    return parts.some(p => p === "__macosx" || p[0] === ".") || base === "thumbs.db" || base === "desktop.ini";
+}
+
+// How a mod's zip goes into the game, as the page does it (packaging/wasm/
+// modlibrary.js in OpenJKDF2): which files make up the mod's folder (loaded
+// ahead of the game's own files when the mod is ticked) and which GOBs are
+// episodes (written into episode/, which is the only place the engine looks
+// for them). entries are the zip's (openZip), ext the game's GOB extension
+// (gob or goo), episodes the names of its GOBs that hold an episode.jk.
+//
+// - a GOB that isn't an episode goes at the top of the mod's folder, under
+//   its own name (the first of two of the same name wins);
+// - a file inside one of the game's resource folders (cog/, 3do/ ...),
+//   wherever that folder is in the zip, goes under that folder: the first
+//   such folder in its path decides, so "Mod/Resource/cog/x.cog" is
+//   "cog/x.cog". When the zip has these folders in more than one place, the
+//   one with the most files wins and the others are left out (they're most
+//   often a second copy, or "optional" extras);
+// - everything else (readmes, pictures, programs, files outside those
+//   folders) is left out.
+//
+// Returns { files: [[entry name, path in the mod]], episodes: [entry name],
+// left: { programs, other, others: [up to 20 names] } }.
+export function modPlan(entries, ext, episodes) {
+    const gobRe = new RegExp("\\." + ext + "$", "i");
+    const isEp = new Set((episodes || []).map(n => n.toLowerCase()));
+    const files = [], eps = [], taken = new Set();
+    const left = { programs: [], other: 0, others: [] };
+    const roots = new Map();
+    const loose = [];
+    for (const e of entries) {
+        if (e.dir || junk(e.name))
+            continue;
+        const parts = e.name.split("/");
+        const base = parts[parts.length - 1];
+        if (gobRe.test(base)) {
+            if (isEp.has(e.name.toLowerCase())) {
+                eps.push(e.name);
+            } else if (!taken.has(base.toLowerCase())) {
+                taken.add(base.toLowerCase());
+                files.push([e.name, base]);
+            }
+            continue;
+        }
+        const at = parts.slice(0, -1).findIndex(p => MOD_DIRS.includes(p.toLowerCase()));
+        if (at >= 0) {
+            const root = parts.slice(0, at).join("/").toLowerCase();
+            roots.set(root, (roots.get(root) || 0) + 1);
+            loose.push({ e, root, rel: parts.slice(at).join("/") });
+            continue;
+        }
+        if (PROGRAM.test(base)) {
+            if (left.programs.length < 20)
+                left.programs.push(e.name);
+            continue;
+        }
+        if (!isText(e.name) && !/\.(jpe?g|png|gif|bmp|pcx|htm|html|url|pdf|zip|rar|7z|ico|ini)$/i.test(base)) {
+            left.other++;
+            if (left.others.length < 20)
+                left.others.push(e.name);
+        }
+    }
+    let best = null;
+    for (const [root, n] of roots)
+        if (best === null || n > roots.get(best) || (n === roots.get(best) && root.length < best.length))
+            best = root;
+    for (const l of loose) {
+        if (l.root !== best) {
+            left.other++;
+            if (left.others.length < 20)
+                left.others.push(l.e.name);
+            continue;
+        }
+        const key = l.rel.toLowerCase();
+        if (!taken.has(key)) {
+            taken.add(key);
+            files.push([l.e.name, l.rel]);
+        }
+    }
+    return { files, episodes: eps, left };
+}
+
+// What kind of mod it is, guessed from the names of its files (the loose
+// ones and those inside its GOBs) and its episodes ({ ty } each, TYPE 1 for
+// single player). For the library's filters, and said to be a guess there.
+//   campaign    it has single-player levels, and no multiplayer ones
+//   gameplay    scripts (cogs): weapons, Force powers, items, game modes
+//   characters  models, without scripts: player skins and the like
+//   graphics    textures, menus, colormaps, without models or scripts
+//   other       sounds, and anything else
+export function modKind(names, episodes, pack) {
+    if (pack)
+        return "graphics";
+    const eps = episodes || [];
+    if (eps.length && eps.every(e => e.ty === 1))
+        return "campaign";
+    let cog = 0, model = 0, look = 0;
+    for (const n of names) {
+        const x = n.toLowerCase();
+        if (x.endsWith(".cog"))
+            cog++;
+        else if (/\.(3do|key|pup)$/.test(x))
+            model++;
+        else if (/\.(mat|bm|cmp|sft)$/.test(x))
+            look++;
+    }
+    if (cog >= 2 || (cog && !model) || eps.length)
+        return "gameplay";
+    if (model)
+        return "characters";
+    if (look)
+        return "graphics";
+    return "other";
+}
+
+// Which versions of a mod go together in the library: its title without
+// version numbers and words like "beta", and its author. "SBX-JK v3.1" and
+// "SBX-JK v3.0" by the same people are one mod.
+export function modGroup(title, author) {
+    const t = String(title || "").toLowerCase()
+        .replace(/\(([^)]*)\)/g, " $1 ")
+        .replace(/\bv(?:ersion)?\s*\.?\s*\d+(?:\.\d+)*[a-z]?\b/g, " ")
+        .replace(/\b\d+(?:\.\d+)+[a-z]?\b/g, " ")
+        .replace(/\b(?:beta|alpha|final|demo|update[sd]?|patch(?:ed)?|fix(?:ed)?|release|preview|full|lite|test)\b/g, " ")
+        .replace(/[^a-z0-9]+/g, " ").trim();
+    const a = String(author || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    return (t || String(title || "").toLowerCase().trim()) + "|" + a;
+}

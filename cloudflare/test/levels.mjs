@@ -28,7 +28,7 @@ const { FakeStorage } = await import("./cfstub.mjs");
 globalThis.Response = realResponse;
 const read = await import("../src/levels-read.js");
 const parts = await import("../src/levels-parts.js");
-const { LevelJob, levelsRoute } = await import("../src/levels.js");
+const { LevelJob, levelsRoute, gobTable } = await import("../src/levels.js");
 const { JkUnzip } = await import("../src/vendor/jkunzip.js");
 
 let failed = 0;
@@ -428,7 +428,7 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     ]);
     // Never the download link.
     assert.ok(!seen.some(p => p.includes("/levels/download/")));
-    assert.equal(seen.filter(p => p.includes("num=9999")).length, 6);
+    assert.equal(seen.filter(p => p.includes("num=9999")).length, 8);
     const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
     assert.equal(idx.listed, 2);
     assert.equal(idx.left, 0);
@@ -459,7 +459,7 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(env.LEVELS.m.get("zip/323.zip").customMetadata.sha256, sha(ZIP));
     assert.ok(env.LEVELS.m.has("shot/323-2"));
     const st = await job.status();
-    assert.equal(st.requests_total, 14);
+    assert.equal(st.requests_total, 16);
     assert.deepEqual(st.not_ready, [{ st: "gone", n: 1 }]);
     const mp = st.by_list.find(b => b.cat === "jkmp");
     assert.deepEqual([mp.previews, mp.previews_left, mp.previews_none], [1, 0, 0]);
@@ -493,14 +493,14 @@ await check("the job asks Massassi again only for what's new", async () => {
     } finally {
         Date.now = realNow;
     }
-    assert.equal(seen.length, 6);
+    assert.equal(seen.length, 8);
     assert.ok(seen.every(p => p.endsWith("?num=9999")));
 });
 
 await check("Massassi busy: everything waits, and the level isn't charged", async () => {
     const seen = fakeMassassi({ "/levels/files/323.shtml": () => new Response("busy", { status: 503 }) });
     const { job } = newJob();
-    for (let i = 0; i < 7; i++)
+    for (let i = 0; i < 9; i++)
         await job.alarm();
     const before = seen.length;
     await job.alarm();
@@ -562,7 +562,7 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal((await get("/levels/z/323.zip/x")).status, 404);
     assert.equal(await get("/levels/../x"), null);
     r = await get("/levels/status");
-    assert.equal(JSON.parse(await r.text()).requests_total, 14);
+    assert.equal(JSON.parse(await r.text()).requests_total, 16);
     r = await get("/levels/p/323.tex.json");
     assert.equal(r.status, 200);
     // It changes when the job makes a level's parts: kept for an hour.
@@ -1035,6 +1035,240 @@ await check("parts: once, every level with 3D data goes through the textures' st
     assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
     again = new LevelJob(job.ctx, env);
     assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+});
+
+
+// ---- Mods
+
+const DL_PAGE = id => `<div id="content"><h1>Black and Yellow Flame Saber</h1>
+    <meta http-equiv="Refresh" content="2; URL=/media/levels/files/jkmod/blackyellow.zip">
+    <p style="margin: 1em;">Your download should begin automatically in 2 seconds. If it doesn't, please <a
+            href="/media/levels/files/jkmod/blackyellow.zip">click here</a>.</p></div>`;
+
+await check("mods: the zip's address on a mod's download page", async () => {
+    assert.equal(read.downloadZip(DL_PAGE(634)), "https://www.massassi.net/media/levels/files/jkmod/blackyellow.zip");
+    // The link alone will do.
+    assert.equal(read.downloadZip('<a href="/media/levels/files/motsmod/x%20y.zip">click here</a>'),
+                 "https://www.massassi.net/media/levels/files/motsmod/x%20y.zip");
+    // Only Massassi's own files.
+    assert.equal(read.downloadZip('<meta http-equiv="Refresh" content="0; URL=https://evil.example/media/levels/files/jkmod/a.zip">'), null);
+    assert.equal(read.downloadZip('<meta http-equiv="Refresh" content="0; URL=/levels/files/634.shtml">'), null);
+    assert.equal(read.downloadZip(""), null);
+});
+
+await check("mods: what goes into the mod's folder, and what's an episode", async () => {
+    const e = names => names.map(n => ({ name: n, dir: n.endsWith("/") }));
+    let plan = read.modPlan(e(["SBX/SBX-JK v31.gob", "SBX/readme.txt", "SBX/SBX Launcher.exe", "SBX/shot.jpg"]), "gob", []);
+    assert.deepEqual(plan.files, [["SBX/SBX-JK v31.gob", "SBX-JK v31.gob"]]);
+    assert.deepEqual(plan.left.programs, ["SBX/SBX Launcher.exe"]);
+    assert.equal(plan.left.other, 0);
+    // Loose files go under the first of the game's folders in their path;
+    // a second copy somewhere else is left out.
+    plan = read.modPlan(e(["Saber/", "Saber/Resource/cog/a.cog", "Saber/Resource/3do/mat/b.mat", "Saber/Resource/misc/pup/c.pup",
+                           "Saber/Optional/cog/a.cog", "__MACOSX/Saber/._a.cog", "Saber/notes.doc", "Saber/x.dat"]), "gob", []);
+    assert.deepEqual(plan.files, [["Saber/Resource/cog/a.cog", "cog/a.cog"], ["Saber/Resource/3do/mat/b.mat", "3do/mat/b.mat"],
+                                  ["Saber/Resource/misc/pup/c.pup", "misc/pup/c.pup"]]);
+    assert.equal(plan.left.other, 2);
+    assert.deepEqual(plan.left.others, ["Saber/x.dat", "Saber/Optional/cog/a.cog"]);
+    // A GOB with an episode.jk goes into episode/, the rest into the mod.
+    plan = read.modPlan(e(["swoop.gob", "Resource/swoopres.gob", "a.goo"]), "gob", ["swoop.gob"]);
+    assert.deepEqual(plan.files, [["Resource/swoopres.gob", "swoopres.gob"]]);
+    assert.deepEqual(plan.episodes, ["swoop.gob"]);
+    assert.equal(plan.left.other, 1);
+    // MotS: GOOs.
+    plan = read.modPlan(e(["mod.goo", "mod.gob"]), "goo", []);
+    assert.deepEqual(plan.files, [["mod.goo", "mod.goo"]]);
+});
+
+await check("mods: their kind, guessed from their files", async () => {
+    assert.equal(read.modKind(["cog/force_lightning.cog", "cog/weap_bryar.cog", "3do/bryv.3do"], []), "gameplay");
+    assert.equal(read.modKind(["3do/ky.3do", "3do/mat/kyhead.mat", "cog/kyle.cog"], []), "characters");
+    assert.equal(read.modKind(["mat/dflt.mat", "ui/bm/bkmain.bm"], []), "graphics");
+    assert.equal(read.modKind(["sound/thrmlpu2.wav"], []), "other");
+    assert.equal(read.modKind(["jkl/01narshadda.jkl", "cog/x.cog"], [{ ty: 1 }]), "campaign");
+    assert.equal(read.modKind(["jkl/swoop.jkl"], [{ ty: 2 }]), "gameplay");
+    assert.equal(read.modKind(["3do/a.3do"], [], "JK HD Models.gob"), "graphics");
+});
+
+await check("mods: versions of one mod go together", async () => {
+    const g = read.modGroup;
+    assert.equal(g("Saber Battle X - JK v3.1", "SBX Team"), g("Saber Battle X - JK v1.0", "SBX Team"));
+    assert.equal(g("James Bond 007 v2.0 Beta", "Q"), g("James Bond 007", "Q"));
+    assert.equal(g("Power Weapons Pack 2 (preview)", "Z"), g("Power Weapons Pack 2", "Z"));
+    assert.notEqual(g("Jango Fett", "One"), g("Jango Fett", "Two"));
+    assert.notEqual(g("Ultimate Skin Pack 2", "A"), g("Ultimate Skin Pack 3", "A"));
+});
+
+const MOD_LIST = `<div class="level-list-screenshot"></div><div class="level-list-item">
+    <strong><a href="/levels/files/634.shtml">Black and Yellow Flame Saber</a></strong><br>
+    <span class="mute">By:</span> Vindicare<br><span class="mute">Added:</span> 2000-06-02<br></div>
+    <div class="level-list-details"><span class="mute">Downloads:</span> 9000</div>`;
+const MOD_PAGE = PAGE.replace(/323/g, "634").replace("6000 Block</h1>", "Black and Yellow Flame Saber</h1>")
+    .replace('href="/levels/jkmp/">Jedi Knight Multiplayer Level', 'href="/levels/jkmod/">Jedi Knight Mod')
+    .replace(/<div class="level-3d-preview">[\s\S]*?<\/iframe>\s*<\/div>/, "")
+    .replace("226.0&nbsp;KiB", "2.9&nbsp;KiB");
+const MOD_GOB = makeGob([{ name: "cog\\kyle.cog", data: "# kyle" }, { name: "cog\\force_lightning.cog", data: "# lightning" },
+                         { name: "3do\\saberyellow.3do", data: "3DO" }]);
+const MOD_ZIP = makeZip([{ name: "Flame Saber/flame.gob", data: MOD_GOB, date: "1998-03-01" },
+                         { name: "Flame Saber/Resource/mat/saberyellow0.mat", data: "MAT ", date: "1998-03-02" },
+                         { name: "Flame Saber/readme.txt", data: "Flame saber by Vindicare. Put it in Resource.", date: "1998-03-02" },
+                         { name: "Flame Saber/install.bat", data: "copy *.* ..", date: "1998-03-02" }]);
+
+function fakeMods(extra) {
+    return fakeMassassi(Object.assign({
+        "/levels/jkmod/?num=9999": () => new Response(MOD_LIST),
+        "/levels/files/634.shtml": () => new Response(MOD_PAGE),
+        "/levels/download/634/": () => new Response(DL_PAGE(634)),
+        "/media/levels/files/jkmod/blackyellow.zip": () => new Response(MOD_ZIP),
+        "/media/levels/screenshots/634_1.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 3])),
+        "/media/levels/screenshots/634_2.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 4])),
+    }, extra || {}));
+}
+
+await check("mods: page, download page (once), zip and pictures, in an index of their own", async () => {
+    const seen = fakeMods();
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    const mine = seen.filter(p => /634|jkmod|blackyellow/.test(p));
+    assert.deepEqual(mine, ["/levels/jkmod/?num=9999", "/levels/files/634.shtml", "/levels/download/634/",
+                            "/media/levels/files/jkmod/blackyellow.zip",
+                            "/media/levels/screenshots/634_1.jpg", "/media/levels/screenshots/634_2.jpg"]);
+    // Never the 3D preview for a mod.
+    assert.ok(!seen.some(p => p.startsWith("pv:") && p.includes("blackyellow")));
+    // The levels' index has only levels.
+    const lv = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(lv.levels.map(l => l.id), [323]);
+    assert.equal(lv.listed, 2);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes));
+    assert.equal(idx.listed, 1);
+    assert.equal(idx.left, 0);
+    assert.equal(idx.mods.length, 1);
+    const m = idx.mods[0];
+    assert.deepEqual([m.id, m.k, m.t, m.a, m.sz, m.dl, m.sh, m.z, m.h, m.n, m.ep, m.x, m.gp],
+                     [634, "gameplay", "Black and Yellow Flame Saber", "Brian Lozier", MOD_ZIP.length, 9000, 2, "blackyellow.zip",
+                      sha(MOD_ZIP), 4, undefined, 1, undefined]);
+    assert.equal(m.gk, read.modGroup(m.t, m.a));
+    assert.deepEqual(m.g, [{ n: "Flame Saber/flame.gob", h: sha(MOD_GOB), b: MOD_GOB.length }]);
+    // The files' dates, as no readme gives one.
+    assert.equal(m.rel, "1998-03-02");
+    const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/634.json").bytes));
+    assert.deepEqual(d.mod.plan, { inner: null, episodes: [],
+                                   files: [["Flame Saber/flame.gob", "flame.gob"], ["Flame Saber/Resource/mat/saberyellow0.mat", "mat/saberyellow0.mat"]] });
+    assert.deepEqual(d.mod.inside["Flame Saber/flame.gob"], [["cog/kyle.cog", 6], ["cog/force_lightning.cog", 11], ["3do/saberyellow.3do", 3]]);
+    assert.deepEqual(d.mod.programs, ["Flame Saber/install.bat"]);
+    assert.equal(d.mod.kind, "gameplay");
+    assert.equal(d.texts[0].n, "Flame Saber/readme.txt");
+    const st = await job.status();
+    assert.equal(st.download_pages, 1);
+    assert.deepEqual(st.mod_kinds, [{ game: "jk1", kind: "gameplay", n: 1 }]);
+    assert.equal(st.by_list.find(b => b.cat === "jkmod").zips, 1);
+    // A day later, and when its page is read again: no download page again.
+    seen.length = 0;
+    const realNow = Date.now;
+    Date.now = () => realNow() + 100 * 24 * 3600 * 1000;
+    try {
+        await runUntilIdle(job, 80);
+    } finally {
+        Date.now = realNow;
+    }
+    assert.ok(seen.includes("/levels/files/634.shtml"));
+    assert.ok(!seen.includes("/levels/download/634/"));
+    assert.equal((await job.status()).download_pages, 1);
+});
+
+await check("mods: a zip of another size on its page is asked for again", async () => {
+    const seen = fakeMods();
+    const { job } = newJob();
+    await runUntilIdle(job, 80);
+    seen.length = 0;
+    fakeMods({ "/levels/files/634.shtml": () => new Response(MOD_PAGE.replace("2.9&nbsp;KiB", "3.1&nbsp;KiB")) });
+    const realNow = Date.now;
+    Date.now = () => realNow() + 100 * 24 * 3600 * 1000;
+    try {
+        await runUntilIdle(job, 80);
+    } finally {
+        Date.now = realNow;
+    }
+    assert.equal((await job.status()).download_pages, 2);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "ok");
+});
+
+await check("mods: one with nothing for the game, or no zip on its download page, stays out", async () => {
+    fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(makeZip([{ name: "setup.exe", data: "MZ" },
+                                                                                        { name: "readme.txt", data: "run setup" }])) });
+    let { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "nomod");
+    assert.equal(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods.length, 0);
+    fakeMods({ "/levels/download/634/": () => new Response("<p>Sorry.</p>") });
+    ({ job, env } = newJob());
+    await runUntilIdle(job, 80);
+    const row = job.sql.exec("SELECT zip_st, err FROM lv WHERE id = 634").toArray()[0];
+    assert.deepEqual([row.zip_st, row.err], ["none", "no zip address on its download page"]);
+});
+
+await check("mods: loose files only, and a zip inside the zip", async () => {
+    const loose = makeZip([{ name: "cog/weap_bryar.cog", data: "# b" }, { name: "cog/weap_rifle.cog", data: "# r" }]);
+    fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(makeZip([{ name: "readme.txt", data: "x" },
+                                                                                        { name: "mod.zip", data: loose, store: true }])) });
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    assert.deepEqual(job.sql.exec("SELECT zip_st, err FROM lv WHERE id = 634").toArray()[0], { zip_st: "ok", err: null });
+    const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/634.json").bytes));
+    assert.deepEqual(d.mod.plan, { inner: "mod.zip", episodes: [], files: [["cog/weap_bryar.cog", "cog/weap_bryar.cog"], ["cog/weap_rifle.cog", "cog/weap_rifle.cog"]] });
+    const m = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods[0];
+    assert.deepEqual([m.k, m.n], ["gameplay", 2]);
+});
+
+await check("mods: a graphics pack, and MotS's list", async () => {
+    const pack = makeZip([{ name: "JK HD Models.gob", data: makeGob([{ name: "3do\\ky.3do", data: "3DO" }]) }]);
+    const MOTS = MOD_LIST.replace(/634/g, "844");
+    fakeMods({
+        "/media/levels/files/jkmod/blackyellow.zip": () => new Response(pack),
+        "/levels/motsmod/?num=9999": () => new Response(MOTS),
+        "/levels/files/844.shtml": () => new Response(MOD_PAGE.replace(/634/g, "844")),
+        "/levels/download/844/": () => new Response(DL_PAGE(844).replace(/jkmod\/blackyellow/g, "motsmod/gold")),
+        "/media/levels/files/motsmod/gold.zip": () => new Response(makeZip([{ name: "gold.goo", data: makeGob([{ name: "cog\\a.cog", data: "a" }]) }])),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job, 120);
+    const jk = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods[0];
+    assert.deepEqual([jk.k, jk.gp], ["graphics", "JK HD Models.gob"]);
+    const mots = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/mots-mods.json").bytes)).mods[0];
+    assert.deepEqual([mots.id, mots.k, mots.n], [844, "gameplay", 1]);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/844.json").bytes)).mod.plan.files, [["gold.goo", "gold.goo"]]);
+});
+
+await check("mods: a big GOB's file table, read as it streams by", async () => {
+    const gob = makeGob([{ name: "cog\\a.cog", data: "x".repeat(5000) }, { name: "3do\\b.3do", data: "y".repeat(7000) }]);
+    const t = gobTable();
+    const chunks = [];
+    for (let i = 0; i < gob.length; i += 1000)
+        chunks.push(gob.subarray(i, i + 1000));
+    await new Blob(chunks).stream().pipeThrough(t.stream).pipeTo(new WritableStream());
+    assert.deepEqual(t.files(), [{ name: "cog/a.cog", size: 5000 }, { name: "3do/b.3do", size: 7000 }]);
+    const notGob = gobTable();
+    await new Blob([enc("not a gob at all")]).stream().pipeThrough(notGob.stream).pipeTo(new WritableStream());
+    assert.equal(notGob.files(), null);
+});
+
+await check("mods: the route serves each game's mods", async () => {
+    fakeMods();
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    let r = await get("/levels/mods/jk1.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(JSON.parse(await r.text()).mods[0].id, 634);
+    r = await get("/levels/mods/mots.json");
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(await r.text()).mods, []);
+    assert.equal((await get("/levels/mods/df2.json")).status, 404);
+    // Its zip, details and pictures go by the levels' routes.
+    assert.equal(sha(new Uint8Array(await (await get("/levels/z/634.zip")).arrayBuffer())), sha(MOD_ZIP));
+    assert.equal(JSON.parse(await (await get("/levels/d/634.json")).text()).mod.kind, "gameplay");
+    assert.equal((await get("/levels/s/634-2.jpg")).status, 200);
 });
 
 if (failed) {
