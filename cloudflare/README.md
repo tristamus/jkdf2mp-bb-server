@@ -287,8 +287,9 @@ has set a player's score, kills, deaths or suicides (`scr` in its reports), and 
 scoreboard then differs from the count, the match is one scored by its level's script (`scored` in
 its detail). Its page shows the host's scoreboard as the game did, says so, and keeps who killed
 whom for the kills between its players; each player's score is the host's; and it isn't `counted`,
-as standings are of kills between players. A game built before it could say so reports no `scr`,
-and its match is by its kills, as before.
+as standings are of kills between players. A script can take points away too (that level's takes
+one off the kills for a civilian), so a row of the host's scoreboard can be below zero. A game built
+before it could say so reports no `scr`, and its match is by its kills, as before.
 
 Each match keeps what it was played with: the game, the level's file, title and episode (one that
 isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest

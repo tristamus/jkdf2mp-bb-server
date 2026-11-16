@@ -1212,6 +1212,24 @@ await check("a level whose script keeps the score is shown by the game's scorebo
     assert.equal(g.m.counted, 0);
     assert.match(textOf(g.html), /Drumsin Host 300 40 4 4 /);
 
+    // A script can take points away (a civilian killed is a point off the
+    // kills), so a row can be below zero. Here it is the only row that isn't
+    // the count's: dropped, the match would pass for one scored by kills.
+    const MINUS = [[1, -5, -1, 4, 4, 0], [2, -3, 0, 5, 3, 0], [3, -3, 1, 5, 4, 0]];
+    assert.deepEqual(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, sb: [[1, -5, -1, -2, -3, 0]] }))).sb,
+                     [[1, -5, -1, -2, -3, 0]], "a row below zero is kept");
+    assert.deepEqual(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, sb: [[1, 0, -100000, 0, 0, 0], [2, 0, 0, 1.5, 0, 0]] }))).sb,
+                     [], "but not one out of range, or not whole");
+    const i = await scoredMatch(newEnv(), KILLS, { sb: MINUS, teams: [0, 0, 0, 0, 0], scr: 3 });
+    assert.equal(i.detail.scored, "script");
+    assert.deepEqual([i.detail.agree.sbRows, i.detail.agree.sbSame], [3, 2]);
+    assert.equal(i.m.counted, 0);
+    assert.deepEqual(i.players.map(r => [r.name, r.score, r.kills, r.place, r.won]),
+                     [["Drumsin", -5, 2, 3, 0], ["Ruri", -3, 0, 1, 0], ["Wushu Jedi", -3, 1, 1, 0]],
+                     "the host's scores, a tie at the top that nobody won");
+    assert.match(textOf(i.html), /Drumsin Host (-|−|&minus;)5 (-|−|&minus;)1 4 4 /);
+    assert.ok(textOf(i.html).includes("This level keeps its own score."));
+
     // A player the host's scoreboard never had: the count's numbers, no score.
     const h = await scoredMatch(newEnv(), KILLS, { sb: COOP.slice(0, 2), teams: [0, 0, 0, 0, 0], scr: 2 });
     assert.equal(h.detail.scored, "script");

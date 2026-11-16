@@ -398,8 +398,10 @@ export function cleanReport(b64) {
         for (const row of r.sb.slice(0, MAX_PLAYERS)) {
             if (!Array.isArray(row))
                 continue;
-            const id = whole(row[0], 64), score = int(row[1], -99999, 99999), kills = whole(row[2], 99999),
-                  deaths = whole(row[3], 99999), suicides = whole(row[4], 99999);
+            // A level's script can take points away, and it writes them into
+            // the kills: any of these can be below zero.
+            const id = whole(row[0], 64), score = int(row[1], -99999, 99999), kills = int(row[2], -99999, 99999),
+                  deaths = int(row[3], -99999, 99999), suicides = int(row[4], -99999, 99999);
             if (!id || score === null || kills === null || deaths === null || suicides === null)
                 continue;
             out.sb.push([id, score, kills, deaths, suicides, whole(row[5], 4) ?? 0]);
