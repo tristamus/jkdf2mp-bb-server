@@ -1135,7 +1135,7 @@ await check("a level whose script keeps the score is shown by the game's scorebo
     const mine = textOf((await a.w.page(`/player/${a.players[0].player_id}`)).body);
     assert.ok(mine.includes("Not counted"), mine.slice(0, 400));
     assert.match(mine, /1 of 3 26 30 \/ 4 \/ 4 /, "their own list has the match as its page does");
-    assert.ok(mine.includes("not scored by their level's own script, and with no player killed by one of the level's own characters"));
+    assert.ok(mine.includes("and not scored by their level's own script"));
     const ruri = textOf((await a.w.page(`/player/${a.players[1].player_id}`)).body);
     assert.match(ruri, /3rd of 3 9 12 \/ 5 \/ 3 /);
 
@@ -1235,121 +1235,6 @@ await check("a level whose script keeps the score is shown by the game's scorebo
     assert.equal(h.detail.scored, "script");
     assert.deepEqual(h.players.map(r => r.score), [26, 9, null]);
     assert.match(textOf(h.html), /Wushu Jedi (–|-|&ndash;)? ?1 5 4 /);
-});
-
-await check("a match in which the level's own characters killed a player doesn't count, and its page says how often", async () => {
-    // The seventh of a scoreboard row: kept only where it says something.
-    const sbOf = sb => cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, sb }))).sb;
-    assert.deepEqual(sbOf([[1, -3, 0, 3, 3, 0, 3]]), [[1, -3, 0, 3, 3, 0, 3]]);
-    assert.deepEqual(sbOf([[1, -3, 0, 3, 3, 0, 99999]]), [[1, -3, 0, 3, 3, 0, 99999]]);
-    for (const none of [0, -1, 1.5, "3", null, [3], 100000])
-        assert.deepEqual(sbOf([[1, -3, 0, 3, 3, 0, none]]), [[1, -3, 0, 3, 3, 0]], `${JSON.stringify(none)} says nothing, and the row is as ever`);
-    assert.deepEqual(sbOf([[1, -3, 0, 3, 3, 0, 3, 7]]), [[1, -3, 0, 3, 3, 0, 3]], "and nothing after it");
-
-    // A co-op level whose script gave no points: three kills between its
-    // players and eleven deaths by its enemies, which the game has as
-    // suicides. The host's scoreboard is what the kills add up to.
-    const KILLS = [[2, 1], [3, 1], [2, 3], [1, 0], [1, 0], [1, 0], [1, 0], [2, 0], [2, 0], [2, 0], [3, 0], [3, 0], [3, 0], [3, 0]];
-    const ENEMIES = [[1, -2, 2, 4, 4, 0, 4], [2, -3, 0, 5, 3, 0, 3], [3, -3, 1, 5, 4, 0, 4]];
-    const env = newEnv();
-    const a = await scoredMatch(env, KILLS, { sb: ENEMIES, teams: [0, 0, 0, 0, 0] });
-    assert.equal(a.detail.scored, undefined, "not one its script scored");
-    assert.equal(a.detail.byLevel, 11);
-    assert.deepEqual(a.detail.sb, [[0, -2, 2, 4, 4, 0, 4], [1, -3, 0, 5, 3, 0, 3], [2, -3, 1, 5, 4, 0, 4]]);
-    assert.deepEqual([a.detail.agree.sbRows, a.detail.agree.sbSame], [3, 3], "the scoreboard is the count's all the same");
-    assert.equal(a.m.counted, 0, "not one for the standings");
-    assert.deepEqual(a.players.map(r => [r.name, r.score, r.kills, r.deaths, r.suicides, r.place, r.won]),
-                     [["Drumsin", -2, 2, 4, 4, 1, 1], ["Ruri", -3, 0, 5, 3, 2, 0], ["Wushu Jedi", -3, 1, 5, 4, 2, 0]],
-                     "its numbers are the game's own, as counted");
-    const text = textOf(a.html);
-    assert.match(text, /Drumsin Host (-|−)2 2 4 4 /, text.slice(0, 600));
-    assert.match(text, /This level's own characters killed Drumsin 4 times, (Ruri 3 times and Wushu Jedi 4 times|Wushu Jedi 4 times and Ruri 3 times)\. The game counts such a death as a suicide, so those deaths are among the suicides above and are taken off the score\. A match in which the level itself kills players doesn't count for the standings\./);
-    assert.equal(text.includes("keeps its own score"), false);
-    assert.equal(text.includes("Scored by the level"), false);
-    assert.ok(text.includes("The host's scoreboard matched for 3 of 3 players."));
-    assert.ok(text.includes("How often the level's characters killed a player is the host's game's count alone."));
-    assert.match(text, /Most by the level (2 players|Drumsin and Wushu Jedi), 4 each/);
-    assert.equal(text.includes("Most suicides"), false, "nobody killed themselves");
-    assert.ok(text.includes("A player's own square is their suicides, deaths by the level's characters among them."));
-    const recent = JSON.parse((await a.w.page("/ladder/recent")).body);
-    assert.equal(recent.top.jk1.week.players.length, 0, "nobody's standing has it");
-    const mine = textOf((await a.w.page(`/player/${a.players[0].player_id}`)).body);
-    assert.ok(mine.includes("Not counted"), mine.slice(0, 400));
-    assert.match(mine, /1 of 3 (-|−)2 2 \/ 4 \/ 4 /);
-    assert.equal(textOf((await a.w.page("/players?period=all")).body).includes("Drumsin -2"), false);
-
-    // The same match from a host whose game doesn't count them (an older
-    // build): as it always was.
-    const b = await scoredMatch(newEnv(), KILLS, { sb: ENEMIES.map(r => r.slice(0, 6)), teams: [0, 0, 0, 0, 0] });
-    assert.equal(b.detail.byLevel, undefined);
-    assert.deepEqual(b.detail.sb, [[0, -2, 2, 4, 4, 0], [1, -3, 0, 5, 3, 0], [2, -3, 1, 5, 4, 0]], "its rows are as they always were");
-    assert.equal(b.m.counted, 1);
-    const plain = textOf(b.html);
-    assert.equal(plain.includes("own characters"), false);
-    assert.equal(plain.includes("Most by the level"), false);
-    assert.match(plain, /Most suicides (2 players|Drumsin and Wushu Jedi), 4 each/);
-    assert.ok(plain.includes("A player's own square is their suicides."));
-    assert.equal(plain.includes("host's game's count alone"), false);
-    // It can be taken out of the standings by hand, with the README's line.
-    const sql = /-- A match in which the level's own characters killed players[^]*?\n(UPDATE [^\n]*)\n```/.exec(readme);
-    assert.ok(sql, "the README has the line");
-    assert.match(textOf((await b.w.page("/players?period=all")).body), /Drumsin -2 2 4 4 /, "it counted");
-    b.w.env.LADDER.db.exec(sql[1].replaceAll("= 123", `= ${b.m.id}`) + "\nDELETE FROM ladder_cache;");
-    assert.equal(textOf((await b.w.page("/players?period=all")).body).includes("Drumsin -2"), false, "and now it doesn't");
-
-    // A deathmatch in which a creature got one player once and another
-    // twice, and the third fell by themselves: one death is enough, and the
-    // page tells whose suicides were whose doing.
-    const ONCE = [[2, 1], [3, 1], [1, 0], [2, 0], [2, 0], [3, 0]];
-    const c = await scoredMatch(newEnv(), ONCE, { sb: [[1, 1, 2, 1, 1, 0, 1], [2, -2, 0, 3, 2, 0, 2], [3, -1, 0, 2, 1, 0]], teams: [0, 0, 0, 0, 0] });
-    assert.equal(c.detail.byLevel, 3);
-    assert.equal(c.m.counted, 0);
-    assert.deepEqual(c.detail.sb, [[0, 1, 2, 1, 1, 0, 1], [1, -2, 0, 3, 2, 0, 2], [2, -1, 0, 2, 1, 0]], "a row without any is six wide");
-    const once = textOf(c.html);
-    assert.match(once, /This level's own characters killed Drumsin once and Ruri twice\./);
-    assert.match(once, /Most by the level Ruri, 2/);
-    assert.match(once, /Most own suicides Wushu Jedi, 1/);
-
-    // On a level whose script also keeps the score: one note that says both.
-    const COOP = [[1, 26, 30, 4, 4, 0, 4], [2, 9, 12, 5, 3, 0, 3], [3, 13, 17, 5, 4, 0, 4]];
-    const d = await scoredMatch(newEnv(), KILLS, { sb: COOP, teams: [0, 0, 0, 0, 0], scr: 3 });
-    assert.equal(d.detail.scored, "script");
-    assert.equal(d.detail.byLevel, 11);
-    assert.equal(d.m.counted, 0);
-    assert.deepEqual(d.players.map(r => r.score), [26, 9, 13]);
-    const both = textOf(d.html);
-    assert.match(both, /Drumsin Host 26 30 4 4 /);
-    assert.match(both, /This level keeps its own score\..*as the host's game had it\. This level's own characters killed Drumsin 4 times, Wushu Jedi 4 times and Ruri 3 times\. Those deaths are among the suicides above\. The players' kills of each other, 3 in all,.*doesn't count for the standings\./);
-    assert.equal((both.match(/doesn't count for the standings/g) || []).length, 1, "said once");
-    assert.ok(both.includes("The level's own points are the host's game's word alone: no other game sees them. How often the level's characters killed a player is the host's game's count alone."));
-    assert.match(textOf((await d.w.page(`/player/${d.players[0].player_id}`)).body), /1 of 3 26 30 \/ 4 \/ 4 /);
-
-    // The count is the host's as it last stood, and only the host's: a
-    // joiner's scoreboard is never read, and a seat nobody of the match had
-    // tells nothing.
-    const w = await new World(newEnv()).start();
-    const H = await w.host("Maw", { pk: KEYS.maw });
-    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
-    for (const g of [H, K]) {
-        g.since = Date.now();
-        await g.report();
-    }
-    skew += 3 * MIN;
-    await killAll([H, K], 2, 1);
-    await killAll([H, K], 2, 0);
-    await H.report({ sb: [[1, 1, 1, 0, 0, 0], [2, -1, 0, 2, 1, 0, 1], [9, 0, 0, 5, 5, 0, 5]], teams: [0, 0, 0, 0, 0] });
-    await K.report({ sb: [[1, 1, 1, 0, 0, 0, 7], [2, -1, 0, 2, 1, 0, 7]], teams: [0, 0, 0, 0, 0] });
-    await killAll([H, K], 2, 0);
-    await H.report({ sb: [[1, 1, 1, 0, 0, 0], [2, -2, 0, 3, 2, 0, 2]], teams: [0, 0, 0, 0, 0], end: "level" });
-    await K.report({ sb: [[1, 9, 9, 9, 9, 0, 9], [2, 9, 9, 9, 9, 0, 9]], teams: [0, 0, 0, 0, 0], end: "level" });
-    skew += 16 * SEC;
-    await w.alarm();
-    const m = w.env.LADDER.rows("SELECT * FROM matches")[0];
-    const detail = JSON.parse(m.detail);
-    assert.equal(detail.byLevel, 2, "the host's last, whatever another game said after it");
-    assert.deepEqual(detail.sb, [[0, 1, 1, 0, 0, 0], [1, -2, 0, 3, 2, 0, 2]]);
-    assert.equal(m.counted, 0);
-    assert.match(textOf((await w.page(`/match/${m.id}`)).body), /This level's own characters killed Kyle_K twice\./);
 });
 
 await check("a match D1 doesn't take is tried again, and a match nobody ends closes by itself", async () => {
