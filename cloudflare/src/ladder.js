@@ -153,19 +153,69 @@ const IDLE_MS = 5 * 60 * 1000;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
 export const COUNT_AGREE = 0.9;
-// The co-op levels, whose matches don't count for standings (above): for each
-// game, the level's file as the games report it, and the name of a mod that
-// is such a level, all in lowercase. One level comes both ways: hosted as a
-// mod its match has the mod's name, from the library only its file's.
-//   thief: Theft on Nar Shaddaa (thief.jkl), Jedi Knight
-export const COOP_LEVELS = { jk1: ["thief.jkl"], mots: [] };
-export const COOP_MODS = { jk1: ["thief"], mots: [] };
+// The co-op levels, whose matches don't count for standings (above), for each
+// game: the levels of the Mod Library and the Level Library whose author
+// calls them co-op (cooperative), and the two made to show enemies in a
+// multiplayer game (AI Synced), as of 2026-11-16.
+//
+// A level is named by its GOB and its level files, as the games report them
+// and in lowercase. The episode of a match is its GOB's file name without the
+// ending, and the Level Library saves a GOB under its own name or, where
+// that's taken, with _ and the level's number in the library (id) after it
+// (gobNames below is placeName in the OpenJKDF2 fork's library.js). Both are
+// needed because a file's name alone isn't one level's: cm.jkl is also Cat
+// and Mouse, academy.jkl The Jedi Academy, catacombs.jkl Catacombs, and
+// jkedit.jkl every level made with JkEdit. A level with no gob here is named
+// by its file under any episode: the record has Theft on Nar Shaddaa under
+// two ("Club" hosted as a mod, "thief" from the library).
+//
+// COOP_MODS has the name of a mod that is such a level (its readme has it
+// installed as a folder of that name): a match hosted with it is on one,
+// whatever its episode and file.
+//
+// Not here, though its author calls it "kind of a Co-op level": Hostile
+// Takeover (1708), whose GOB and file (Hostile.gob, hostile.jkl) are also
+// those of The House In The Woods (1796), a deathmatch level.
+export const COOP_LEVELS = {
+    jk1: [
+        { files: ["thief.jkl"] },                                                        // Theft on Nar Shaddaa (610)
+        { id: 170, gob: "vessel", files: ["vessel.jkl"] },                               // Rebel Destroyer Co-op
+        { id: 235, gob: "goddard", files: ["goddard.jkl"] },                             // Downtown Goddard
+        { id: 328, gob: "chaos", files: ["academy.jkl", "club.jkl", "catacombs.jkl"] },  // Chaos Eternal
+        { id: 431, gob: "ais", files: ["ais.jkl"] },                                     // Synced AI for JK
+        { id: 961, gob: "cmkill", files: ["cm.jkl"] },                                   // Kill Coconut Monkey!!! (MP Co-op)
+        { id: 1554, gob: "wka_training", files: ["wka_training.jkl"] },                  // WKA_Training Facility
+        { id: 2253, gob: "a war", files: ["jkedit.jkl"] },                               // Saber Arenas And War: its co-op war level
+        { id: 2595, gob: "terrorist", files: ["terrorist.jkl"] },                        // Terrorist Warfare
+        { id: 3108, gob: "andossk", files: ["andossk1.jkl"] },                           // Andossk: Fight For Freedom - Level 1
+    ],
+    mots: [
+        { id: 811, gob: "ais", files: ["ais.jkl"] },                                     // AI Synced
+        { id: 953, gob: "reb2", files: ["reb2.jkl"] },                                   // Rebel Base on Yurs IV (Co-op)
+        { id: 1891, gob: "attack!", files: ["synced.jkl"] },                             // Attack!
+        { id: 1001229, gob: "kyarancor2", files: ["kyarancor2.jkl"] },                   // Rancor Swamp Co-Op
+        { id: 1001233, gob: "s5l3_uppersith", files: ["s5l3_uppersith.jkl"] },           // MotS Level 13 Co-Op
+    ],
+};
+export const COOP_MODS = { jk1: ["thief", "cmkill"], mots: [] };
+
+// The names the Level Library saves a level's GOB under in episode/: its own,
+// or with the level's number after it, each cut to an episode name's 31
+// characters.
+export function gobNames(gob, id) {
+    const tag = "_" + id;
+    return [gob.substring(0, 31), gob.substring(0, 31 - tag.length) + tag, gob.substring(0, 30 - tag.length) + tag + "b"];
+}
 
 // Whether a match of this game, on this level's file, hosted with this mod
-// ("" for none) is on a co-op level.
-export function coopLevel(game, map, mod) {
-    const has = (list, name) => !!name && Array.isArray(list[game]) && list[game].includes(String(name).toLowerCase());
-    return has(COOP_LEVELS, map) || has(COOP_MODS, mod);
+// ("" for none), in this episode is on a co-op level.
+export function coopLevel(game, map, mod, episode) {
+    const low = s => String(s || "").toLowerCase();
+    const of = list => Array.isArray(list[game]) ? list[game] : [];
+    const file = low(map), ep = low(episode);
+    if (mod && of(COOP_MODS).includes(low(mod)))
+        return true;
+    return !!file && of(COOP_LEVELS).some(l => l.files.includes(file) && (!l.gob || gobNames(l.gob, l.id).includes(ep)));
 }
 // A match's players are those in a kill, and those whose game reported being
 // in its level for this long: not one who sat in the room without playing
@@ -567,7 +617,7 @@ export function buildRecord(m, why, now) {
     const keys = rows.map(r => r.pk).filter(Boolean);
     const sharedKey = new Set(keys).size < keys.length;
     // Played against the level's own characters, not each other.
-    const coop = coopLevel(m.game, m.map, m.mod);
+    const coop = coopLevel(m.game, m.map, m.mod, m.episode);
     const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted && !coop &&
                     confirmed >= COUNT_AGREE * kills.length;
     const detail = {
