@@ -203,3 +203,8 @@ MATCH_LINKS = "https://beta.jediknight.zone"
 # before it stops (6 when it isn't set).
 # LEVELS_FETCH = "0"
 # LEVELS_MAX_GB = "6"
+# jkdf2.net's levels (levels.js): "0" stops copying them; at most
+# LEVELS_DF2_PER_DAY zips a day (150), none over LEVELS_DF2_MAX_MB (32).
+# LEVELS_DF2 = "0"
+# LEVELS_DF2_PER_DAY = "150"
+# LEVELS_DF2_MAX_MB = "32"
