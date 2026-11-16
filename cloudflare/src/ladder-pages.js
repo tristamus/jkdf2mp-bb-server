@@ -483,6 +483,10 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     // the game showed it, for the players it had.
     const own = gameRows(detail);
     const scripted = detail.scored === "script";
+    // A co-op level, as it was listed when the match was saved.
+    const coop = detail.coop === 1;
+    if (coop)
+        facts.push("Co-op level");
     if ((m.mode & MODE_COG_SCORES) || scripted)
         facts.push("Scored by the level");
     if ((m.mode & MODE_SCORE_LIMIT) && m.score_limit)
@@ -537,7 +541,9 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     const ownNote = scripted ? `<p class="sub own">This level keeps its own score. Its script gives the points, which the game shows
         as kills, and the game counts a death by anything but a player as a suicide. The scoreboard above is the game's own, as the
         host's game had it. The players' kills of each other, ${between} in all, are what the rest of this page is about. It
-        doesn't count for the standings.</p>` : "";
+        doesn't count for the standings.</p>`
+        : coop ? `<p class="sub own">This is a co-op level: its players play against the level's own characters, and the game
+        counts a death by one of them as a suicide. Matches on it don't count for the standings.</p>` : "";
 
     // Highlights: each only when there's something to say, and with every
     // player who shares it. spare: how many more any player might have that
@@ -898,7 +904,7 @@ function tabs(label, items, current) {
 }
 
 const HOW_COUNTED = `Only matches that count are added up: two minutes or longer, reported by two games or more, with no password,
-          and not scored by their level's own script.
+          not scored by their level's own script, and not on a co-op level.
           A week starts on Monday and a month on its first day, at 3 in the morning Pacific time.`;
 
 // GET /players

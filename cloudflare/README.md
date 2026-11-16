@@ -270,8 +270,8 @@ when the level ends writes the match to D1: one row for the match, one for each 
 kills in order. It keeps how many games reported and how many kills two games or more saw, and
 marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
 kills were seen by two games, it had no password, no two of its players had the same browser key,
-and its level's script didn't keep the score (below). The standings add up only the matches that are
-`counted`.
+its level's script didn't keep the score, and its level isn't a co-op level (both below). The
+standings add up only the matches that are `counted`.
 
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
@@ -290,6 +290,18 @@ whom for the kills between its players; each player's score is the host's; and i
 as standings are of kills between players. A script can take points away too (that level's takes
 one off the kills for a civilian), so a row of the host's scoreboard can be below zero. A game built
 before it could say so reports no `scr`, and its match is by its kills, as before.
+
+A co-op level is one its players play against the level's own characters. The game counts a death
+by one of them as a suicide, so a match on it says little about its players against each other,
+whether its script gave points or not. Nothing that happens in a match tells such a level from a
+deathmatch level with a turret or a trap, and matches on those count like any other. So the co-op
+levels are a list in `src/ladder.js`: `COOP_LEVELS` has, for each game, the level's file as the
+games report it, and `COOP_MODS` the name of a mod that is such a level (the same level comes both
+ways: hosted as a mod its match has the mod's name, from the library only its file's). A match on
+one is kept, listed, posted and shown like any other. Its page says it's a co-op level, its detail
+has `coop`, and it isn't `counted`. The list has one level: Theft on Nar Shaddaa (`thief.jkl`, mod
+`thief`) for Jedi Knight. Another is a line in each list and a deploy; its matches from before are
+set right by hand (below).
 
 Each match keeps what it was played with: the game, the level's file, title and episode (one that
 isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest
@@ -566,6 +578,8 @@ UPDATE matches SET counted = 0, detail = json_set(detail, '$.scored', 'script') 
 UPDATE match_players SET score = (SELECT json_extract(j.value, '$[1]') FROM matches m, json_each(m.detail, '$.sb') j WHERE m.id = match_players.match_id AND json_extract(j.value, '$[0]') = match_players.slot) WHERE match_id = 123;
 UPDATE match_players SET place = 1 + (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND COALESCE(o.score, -1000000000) > COALESCE(match_players.score, -1000000000)) WHERE match_id = 123;
 UPDATE match_players SET won = (place = 1 AND (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND o.place = 1) = 1) WHERE match_id = 123;
+-- A match on a co-op level, saved before the level was listed: out of the standings, and its page says why
+UPDATE matches SET counted = 0, detail = json_set(detail, '$.coop', 1) WHERE id = 123;
 ```
 
 ### What it costs
@@ -625,6 +639,9 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
   game's word alone: no other game sees a script's points, only the scoreboard the host sends.
 - A match its level's script scored, from before the games could say so, stays by its kills. Its
   rows can be set right by hand: the host's scoreboard is in its detail (`sb`).
+- The co-op levels are a list kept by hand, by file name and mod name. A co-op level that isn't on
+  it counts until it's added (unless its script gave points, which takes the match out by itself),
+  and the same level under another file name and no mod isn't recognised.
 - A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
   game told could change who holds them.
 - A player with no key whose name is no record's, or the name of more than one, has no record: the

@@ -85,10 +85,19 @@
 // longer and someone died. It counts for standings (counted) when it also ran
 // COUNT_SECS, two games or more reported, nine in ten of its kills were seen
 // by two games, it had no password, no two of its players had the same
-// browser key (one person in two tabs), and its level's script didn't keep
-// the score (above). The standings (src/ladder-pages.js)
-// add up the matches that count; the numbers it's worked out from are kept,
-// so the rule can change.
+// browser key (one person in two tabs), its level's script didn't keep the
+// score (above), and its level isn't a co-op level (below). The standings
+// (src/ladder-pages.js) add up the matches that count; the numbers it's
+// worked out from are kept, so the rule can change.
+//
+// A co-op level is one its players play against the level's own characters.
+// The game counts a death by one of them as a suicide, so a match on it says
+// little about its players against each other, whether its script gave
+// points or not. There's no telling such a level from a deathmatch level
+// with a turret or a trap by what happens in it, and those count like any
+// other. So the co-op levels are a list (COOP_LEVELS, COOP_MODS): a match on
+// one is kept and shown like any other, marked detail.coop, and isn't
+// counted.
 //
 // Most matches are played with a mod, which everyone in the room runs (a
 // joiner's game is restarted into the host's, mods.js), so a match has one:
@@ -144,6 +153,20 @@ const IDLE_MS = 5 * 60 * 1000;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
 export const COUNT_AGREE = 0.9;
+// The co-op levels, whose matches don't count for standings (above): for each
+// game, the level's file as the games report it, and the name of a mod that
+// is such a level, all in lowercase. One level comes both ways: hosted as a
+// mod its match has the mod's name, from the library only its file's.
+//   thief: Theft on Nar Shaddaa (thief.jkl), Jedi Knight
+export const COOP_LEVELS = { jk1: ["thief.jkl"], mots: [] };
+export const COOP_MODS = { jk1: ["thief"], mots: [] };
+
+// Whether a match of this game, on this level's file, hosted with this mod
+// ("" for none) is on a co-op level.
+export function coopLevel(game, map, mod) {
+    const has = (list, name) => !!name && Array.isArray(list[game]) && list[game].includes(String(name).toLowerCase());
+    return has(COOP_LEVELS, map) || has(COOP_MODS, mod);
+}
 // A match's players are those in a kill, and those whose game reported being
 // in its level for this long: not one who sat in the room without playing
 // (still loading, gone before it began, or a host that only serves).
@@ -543,7 +566,9 @@ export function buildRecord(m, why, now) {
     // Two of its players with one browser key are one person in two tabs.
     const keys = rows.map(r => r.pk).filter(Boolean);
     const sharedKey = new Set(keys).size < keys.length;
-    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted &&
+    // Played against the level's own characters, not each other.
+    const coop = coopLevel(m.game, m.map, m.mod);
+    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted && !coop &&
                     confirmed >= COUNT_AGREE * kills.length;
     const detail = {
         v: 1,
@@ -575,6 +600,8 @@ export function buildRecord(m, why, now) {
         detail.scr = scr;
     if (scripted)
         detail.scored = "script";
+    if (coop)
+        detail.coop = 1;
     return {
         uid: crypto.randomUUID(),
         game: m.game, map: m.map, title: m.title || m.map, episode: m.episode, roomName: m.name,
