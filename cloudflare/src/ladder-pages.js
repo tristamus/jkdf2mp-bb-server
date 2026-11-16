@@ -43,7 +43,7 @@
 // nowhere else, and /ladder/recent says so ("shots", its limits) for the
 // landing page to send them. Its routes are answered from here too.
 
-import { COUNT_AGREE, KEY_COOKIE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, cookieKey, ensureSchema, hashKey,
+import { COUNT_AGREE, KEY_COOKIE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, cookieKey, ensureSchema, gameRow, gameRows, hashKey,
          winnerOf } from "./ladder.js";
 import { SHOTS, shotRoute, shotsOn, shotsQuery } from "./ladder-shots.js";
 
@@ -479,7 +479,11 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     else if (m.episode)
         facts.push(esc(m.episode));
     facts.push(teams ? "Team play" : "Free-for-all");
-    if (m.mode & MODE_COG_SCORES)
+    // Scored by its level's script: the scoreboard below is the host's, as
+    // the game showed it, for the players it had.
+    const own = gameRows(detail);
+    const scripted = detail.scored === "script";
+    if ((m.mode & MODE_COG_SCORES) || scripted)
         facts.push("Scored by the level");
     if ((m.mode & MODE_SCORE_LIMIT) && m.score_limit)
         facts.push(`Score limit ${m.score_limit}`);
@@ -512,18 +516,28 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
 
     // A name is a link to its player, for one who has a record to show.
     const linked = (r, i) => r.pid && !r.hidden && r.name ? `<a href="${playerLink(r.pid, m.game, "")}">${esc(names[i])}</a>` : esc(names[i]);
-    const board = rows.map((r, i) => `
+    const board = rows.map((r, i) => {
+        const n = own.get(r.slot) || r;
+        return `
             <tr class="${[r.won ? "winner" : "", you && r.pid === you ? "you" : ""].join(" ").trim()}">
               <td class="num">${placeCell(r.place)}</td>
               <td class="name"><b>${linked(r, i)}</b>${you && r.pid === you ? ` <span class="tag">You</span>` : ""}${r.host ? ` <span class="tag soft">Host</span>` : ""}</td>
               ${teams ? `<td><span class="team t${r.team}">${TEAMS[r.team] || "None"}</span></td>` : ""}
               <td class="num strong">${r.score ?? "&ndash;"}</td>
-              <td class="num">${r.kills}</td>
-              <td class="num">${r.deaths}</td>
-              <td class="num">${r.suicides}</td>
+              <td class="num">${n.kills}</td>
+              <td class="num">${n.deaths}</td>
+              <td class="num">${n.suicides}</td>
               <td class="num">${r.streak}</td>
               <td class="num">${length(r.secs)}</td>
-            </tr>`).join("");
+            </tr>`;
+    }).join("");
+    // What its scoreboard is, said under it, and how many kills there were
+    // between its players, which the rest of the page is about.
+    const between = rows.reduce((a, r) => a + r.kills, 0);
+    const ownNote = scripted ? `<p class="sub own">This level keeps its own score. Its script gives the points, which the game shows
+        as kills, and the game counts a death by anything but a player as a suicide. The scoreboard above is the game's own, as the
+        host's game had it. The players' kills of each other, ${between} in all, are what the rest of this page is about. It
+        doesn't count for the standings.</p>` : "";
 
     // Highlights: each only when there's something to say, and with every
     // player who shares it. spare: how many more any player might have that
@@ -594,11 +608,15 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     const agree = isObject(detail.agree) ? detail.agree : {};
     const how = `Each player's game reports the kills it sees to the lobby. ${count(m.reporters, "game")} of ${m.players} reported this match, and ` +
                 `${m.confirmed} of its ${count(m.kills, "kill")} ${m.confirmed === 1 ? "was" : "were"} seen by two games or more.` +
-                (agree.sbRows ? ` The host's scoreboard matched for ${agree.sbSame} of ${count(agree.sbRows, "player")}.` : "") +
+                (scripted ? " The level's own points are the host's game's word alone: no other game sees them."
+                 : agree.sbRows ? ` The host's scoreboard matched for ${agree.sbSame} of ${count(agree.sbRows, "player")}.` : "") +
                 (detail.sharedKey ? " Two of its players played from the same browser." : "");
 
     const title = `${m.title}${result ? ": " + (winner.name !== null ? (winner.name || "Anonymous") + " wins" : TEAMS[winner.team] + " team wins") : ""}`;
-    const top = rows.slice(0, 8).map((r, i) => `${r.place}. ${names[i]} ${r.score ?? "-"} (${r.kills}/${r.deaths}/${r.suicides})`).join(" | ");
+    const top = rows.slice(0, 8).map((r, i) => {
+        const n = own.get(r.slot) || r;
+        return `${r.place}. ${names[i]} ${r.score ?? "-"} (${n.kills}/${n.deaths}/${n.suicides})`;
+    }).join(" | ");
     const body = `
       <div class="ladder-main">
         <div class="ladder-head">
@@ -625,6 +643,7 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
             </tbody>
           </table>
         </div>
+        ${ownNote}
         <div class="cards">
           ${highlights.length ? `<section class="card"><h3>Highlights</h3><div class="body"><table>
             ${highlights.map(([k, v]) => `<tr><td class="soft">${k}</td><td class="num">${v}</td></tr>`).join("")}
@@ -878,7 +897,8 @@ function tabs(label, items, current) {
         `<a href="${href}"${key === current ? ` aria-current="page"` : ""}>${text}</a>`).join("")}</nav>`;
 }
 
-const HOW_COUNTED = `Only matches that count are added up: two minutes or longer, reported by two games or more, and with no password.
+const HOW_COUNTED = `Only matches that count are added up: two minutes or longer, reported by two games or more, with no password,
+          and not scored by their level's own script.
           A week starts on Monday and a month on its first day, at 3 in the morning Pacific time.`;
 
 // GET /players
@@ -1029,8 +1049,13 @@ export async function playerPage(db, id, url, viewerHash, now) {
                     GROUP BY m.episode, m.map ORDER BY n DESC, latest DESC LIMIT 3`).bind(...args),
         db.prepare(`SELECT m.mod, m.pack, COUNT(*) AS n ${mine} GROUP BY m.mod, m.pack ORDER BY n DESC, MAX(m.id) DESC LIMIT 3`).bind(...args),
         db.prepare(`SELECT m.id, m.title, mp.kills ${mine} ORDER BY mp.kills DESC, m.id DESC LIMIT 1`).bind(...args),
+        // own: in a match scored by its level's script, the host's
+        // scoreboard row for them, which is what its page shows.
         db.prepare(`SELECT m.id, m.title, m.episode, m.mod, m.pack, m.players, m.secs, m.ended_at, m.counted, m.mode,
-                           mp.name, mp.place, mp.won, mp.score, mp.kills, mp.deaths, mp.suicides
+                           mp.name, mp.place, mp.won, mp.score, mp.kills, mp.deaths, mp.suicides,
+                           (SELECT j.value FROM json_each(m.detail, '$.sb') j
+                            WHERE json_extract(m.detail, '$.scored') = 'script'
+                              AND json_extract(j.value, '$[0]') = mp.slot) AS own
                     FROM match_players mp JOIN matches m ON m.id = mp.match_id
                     WHERE ${MINE} AND m.game = ? AND m.hidden = 0 AND m.locked = 0
                     ORDER BY m.id DESC LIMIT ${PLAYER_MATCHES}`).bind(id, id, game),
@@ -1144,16 +1169,19 @@ export async function playerPage(db, id, url, viewerHash, now) {
            ${period !== "all" && in_.counted ? `<a href="${playerLink(id, game, "all")}">Show all time</a>` : ""}</p>`;
 
     const recent = answers[4].results;
-    const matchRows = recent.map(r => `
+    const matchRows = recent.map(r => {
+        const n = gameRow(parse(r.own, null)) || r;
+        return `
             <tr>
               <td class="level"><a href="/match/${r.id}">${esc(r.title)}</a>${customMap(r.episode) ? ` <span class="tag soft">Custom</span>` : ""}${r.counted ? "" : ` <span class="tag soft">Not counted</span>`}</td>
               <td class="mod">${esc(r.mod) || (r.pack ? "Remastered pack" : `<span class="soft">&ndash;</span>`)}</td>
               <td class="num">${r.won ? `<span class="place p1">1</span>` : ordinal(r.place)} of ${r.players}</td>
               <td class="num strong">${r.score ?? "&ndash;"}</td>
-              <td class="num">${r.kills} / ${r.deaths} / ${r.suicides}</td>
+              <td class="num">${n.kills} / ${n.deaths} / ${n.suicides}</td>
               <td class="num">${length(r.secs)}</td>
               <td class="when">${time(r.ended_at, "ago")}</td>
-            </tr>`).join("");
+            </tr>`;
+    }).join("");
     const main = `
       <div class="ladder-main full">
         ${head}
@@ -1361,6 +1389,8 @@ main { padding: 12px 8px 24px; }
 .stats dd a { font-size: 13px; }
 h3.part { margin: 18px 0 6px; color: var(--gold); font: bold 14px Verdana, Geneva, sans-serif; }
 .foot { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+/* Under a scoreboard that is the level's own. */
+.sub.own { margin: 10px 0 0; }
 .empty { margin: 28px auto; max-width: 460px; text-align: center; color: var(--muted); }
 .empty b { display: block; margin-bottom: 6px; color: #fff; font-size: 14px; }
 .pager { margin: 12px 0 0; font-weight: bold; }

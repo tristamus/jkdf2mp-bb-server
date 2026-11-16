@@ -269,12 +269,26 @@ in a room. The lobby puts the reports together, counting a kill once however man
 when the level ends writes the match to D1: one row for the match, one for each player, and the
 kills in order. It keeps how many games reported and how many kills two games or more saw, and
 marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
-kills were seen by two games, it had no password and no two of its players had the same browser key.
-The standings add up only the matches that are `counted`.
+kills were seen by two games, it had no password, no two of its players had the same browser key,
+and its level's script didn't keep the score (below). The standings add up only the matches that are
+`counted`.
 
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
 can announce what it likes, and two players can agree to feed each other kills.
+
+A level can keep the score by itself. One that says so in the game's mode (Capture the Flag) has
+the host's score for each player and its kills as counted, and counts like any other. Another only
+writes over the game's counters from its script: a co-op level gives a player "kills" for the
+enemies they shoot, and the game counts a death by an enemy as a suicide, so the game's scoreboard
+is nothing like what the kills between its players add up to (the first such match on the site read
+120 on the game's score screen and -18 on its page). The host's game says when its level's script
+has set a player's score, kills, deaths or suicides (`scr` in its reports), and where the host's
+scoreboard then differs from the count, the match is one scored by its level's script (`scored` in
+its detail). Its page shows the host's scoreboard as the game did, says so, and keeps who killed
+whom for the kills between its players; each player's score is the host's; and it isn't `counted`,
+as standings are of kills between players. A game built before it could say so reports no `scr`,
+and its match is by its kills, as before.
 
 Each match keeps what it was played with: the game, the level's file, title and episode (one that
 isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest
@@ -534,8 +548,8 @@ Hiding a match (`UPDATE matches SET hidden = 1`, below) stops its pictures being
 
 ### By hand
 
-With `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`. After any of the first
-three, `DELETE FROM ladder_cache;` shows it in the standings at once.
+With `npx wrangler d1 execute jkdf2mp-ladder --remote --command "<SQL>"`. After any but the
+`SELECT`, `DELETE FROM ladder_cache;` shows it in the standings at once.
 
 ```
 -- Take a match, or a player's name, off the pages
@@ -545,6 +559,12 @@ UPDATE players SET hidden = 1 WHERE id = 45;
 UPDATE players SET merged_into = 45 WHERE id = 46 OR merged_into = 46;
 -- The matches of the last week by mod
 SELECT mod, COUNT(*) FROM matches WHERE ended_at > (unixepoch() - 7 * 86400) * 1000 GROUP BY mod;
+-- A free-for-all match its level's script scored, saved by its kills before the games could say so:
+-- the host's score for each player and their places by it, and out of the standings
+UPDATE matches SET counted = 0, detail = json_set(detail, '$.scored', 'script') WHERE id = 123;
+UPDATE match_players SET score = (SELECT json_extract(j.value, '$[1]') FROM matches m, json_each(m.detail, '$.sb') j WHERE m.id = match_players.match_id AND json_extract(j.value, '$[0]') = match_players.slot) WHERE match_id = 123;
+UPDATE match_players SET place = 1 + (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND COALESCE(o.score, -1000000000) > COALESCE(match_players.score, -1000000000)) WHERE match_id = 123;
+UPDATE match_players SET won = (place = 1 AND (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND o.place = 1) = 1) WHERE match_id = 123;
 ```
 
 ### What it costs
@@ -600,6 +620,10 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
 - A game whose connection to the lobby is down when its level ends can't send its last report. The
   kills only it saw while the connection was down and, from the host, the final scoreboard are
   lost; the match is saved from what the other games sent and the last scoreboard that arrived.
+- The score of a level that keeps its own (Capture the Flag, or a script's points) is the host's
+  game's word alone: no other game sees a script's points, only the scoreboard the host sends.
+- A match its level's script scored, from before the games could say so, stays by its kills. Its
+  rows can be set right by hand: the host's scoreboard is in its detail (`sb`).
 - A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
   game told could change who holds them.
 - A player with no key whose name is no record's, or the name of more than one, has no record: the
