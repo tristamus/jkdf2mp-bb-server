@@ -386,6 +386,19 @@ export class LevelJob extends DurableObject {
             }
             this.kv("tex_v", 2);
         }
+        // Once: the 3D data asked for again for each level that went without
+        // it, its zip in hand and not a mod. Its map was asked for before
+        // the preview's page was opened, and a zip on jkdf2.net isn't found
+        // that way (readPreview).
+        if (this.kv("pv_again") !== "1") {
+            try {
+                this.sql.exec(`UPDATE lv SET pv_st = NULL, pv_at = NULL, pv_maps = NULL, pv_got = 0, pv_size = 0
+                               WHERE pv_st = 'none' AND zip_st = 'ok' AND cat NOT IN (${MOD_SQL})`);
+            } catch {
+                // A table too old to have them (only in tests).
+            }
+            this.kv("pv_again", 1);
+        }
     }
 
     // Each level's place in its own game's list (and priority), most
@@ -1224,12 +1237,24 @@ export class LevelJob extends DurableObject {
     // Nth that loads): for a zip of one GOB of one level, map 0; otherwise
     // the preview's page first, for the maps it lists. Kept gzip, as the page
     // gets it.
+    // The preview fetches a zip from another site (jkdf2.net) only when its
+    // page is opened: a part asked for before that is not found. So a
+    // jkdf2.net zip always goes by its page, and a part not found (the
+    // preview may have let the zip go since) has the page opened once more
+    // (maps[0].page: 1 to open it, 2 opened) before the level goes without.
     async readPreview(row, now) {
         const at = row.zip_url;
         // Its url= as the preview's own page writes it, unless it can't be.
         const zipArg = /[\s&#+?%]/.test(at) ? encodeURIComponent(at) : at;
         let maps = row.pv_maps ? JSON.parse(row.pv_maps) : null;
         try {
+            if (maps && maps.length && maps[0].page === 1) {
+                await (await this.get(`${PREVIEW}?url=${zipArg}`, MAX_PAGE)).text();
+                maps[0].page = 2;
+                this.sql.exec("UPDATE lv SET pv_maps = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
+                              JSON.stringify(maps), now, row.id);
+                return;
+            }
             if (!maps) {
                 const gobs = (JSON.parse(row.info || "{}").gobs || []).filter(g => g.ep || (g.lv && g.lv.length));
                 if (!gobs.length) {
@@ -1237,7 +1262,7 @@ export class LevelJob extends DurableObject {
                     this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", now, row.id);
                     return;
                 }
-                if (gobs.length === 1 && gobs[0].lv && gobs[0].lv.length === 1) {
+                if (!isDf2(row) && gobs.length === 1 && gobs[0].lv && gobs[0].lv.length === 1) {
                     maps = [{ n: gobs[0].lv[0].replace(/\.jkl$/i, ""), e: 0 }];
                 } else {
                     const html = await (await this.get(`${PREVIEW}?url=${zipArg}`, MAX_PAGE)).text();
@@ -1268,7 +1293,14 @@ export class LevelJob extends DurableObject {
             if (done)
                 this.dirty();
         } catch (e) {
-            if (e.tooBig || e instanceof HttpError && (e.status === 404 || e.status === 410)) {
+            const gone = e instanceof HttpError && (e.status === 404 || e.status === 410);
+            if (gone && maps && maps.length && !maps[0].page) {
+                maps[0].page = 1;
+                this.sql.exec("UPDATE lv SET pv_maps = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
+                              JSON.stringify(maps), now, row.id);
+                return;
+            }
+            if (e.tooBig || gone) {
                 this.sql.exec("UPDATE lv SET pv_st = ?, pv_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?",
                               e.tooBig ? "big" : "none", now, row.id);
                 this.dirty();

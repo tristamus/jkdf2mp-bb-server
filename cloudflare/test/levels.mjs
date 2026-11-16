@@ -617,6 +617,50 @@ await check("the 3D data: one GOB of one level goes straight to its map, named f
     assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {}, parts: [] });
 });
 
+await check("a map not found (the preview let its zip go): the preview's page once more, then the map", async () => {
+    // One GOB of one level: straight to its map, which the preview has only
+    // once its page is opened.
+    const one = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: JKL }]);
+    let opened = false;
+    const seen = fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(makeZip([{ name: "6000.gob", data: one }])),
+        [`pv:/level/?url=${PV_ZIP}`]: () => (opened = true, new Response(VIEWER1)),
+        [pvUrl("map")]: () => opened ? new Response(PV_MAP) : new Response("Not found", { status: 404 }),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), [pvUrl("map"), `pv:/level/?url=${PV_ZIP}`, pvUrl("map"), pvUrl("mat")]);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(idx.levels[0].pv, ["6000"]);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "ok");
+    // A part not found again after that: the level goes without.
+    let n = 0;
+    fakeMassassi({ [pvUrl("map")]: () => (n++, new Response("Not found", { status: 404 })) });
+    job.sql.exec("UPDATE lv SET pv_st = NULL, pv_got = 0 WHERE id = 323");
+    await runUntilIdle(job);
+    assert.equal(n, 1);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+});
+
+await check("levels that went without 3D data are asked for it again, once; mods aren't", async () => {
+    const seen = fakeMassassi({ [pvUrl("map")]: () => new Response("Not found", { status: 404 }) });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+    job.sql.exec(`INSERT INTO lv (id, cat, game, prio, name, page_st, zip_st, pv_st) VALUES (9, 'jkmod', 'jk1', 1, 'm', 'ok', 'ok', 'none')`);
+    job.sql.exec("DELETE FROM kv WHERE k = 'pv_again'");
+    fakeMassassi();
+    const again = new LevelJob(job.ctx, env);
+    const rows = again.sql.exec("SELECT id, pv_st, pv_maps FROM lv WHERE id IN (9, 323) ORDER BY id").toArray();
+    assert.deepEqual(rows.map(r => [r.id, r.pv_st, r.pv_maps]), [[9, "none", null], [323, null, null]]);
+    await runUntilIdle(again);
+    assert.equal(again.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "ok");
+    // Once only.
+    again.sql.exec("UPDATE lv SET pv_st = 'none' WHERE id = 323");
+    new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+});
+
 await check("levels with their 3D data from before get the textures' list, without asking Massassi", async () => {
     const seen = fakeMassassi();
     const { job, env } = newJob();
@@ -691,7 +735,8 @@ await check("no 3D data for a level (404): it's in the library without it", asyn
     const seen = fakeMassassi({ [pvUrl("map")]: () => new Response("Not found", { status: 404 }) });
     const { job, env } = newJob();
     await runUntilIdle(job);
-    assert.ok(!seen.includes(pvUrl("mat")));
+    // Its map not found, the preview's page once more, then the map again.
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), [`pv:/level/?url=${PV_ZIP}`, pvUrl("map"), `pv:/level/?url=${PV_ZIP}`, pvUrl("map")]);
     const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
     assert.equal(idx.levels.length, 1);
     assert.equal(idx.levels[0].pv, undefined);
@@ -1312,7 +1357,14 @@ const QAT_ZIP = makeZip([{ name: "Qat.goo", data: QAT_GOB, date: "2000-08-01" }]
 const COPY_ZIP = makeZip([{ name: "six.gob", data: GOB, date: "1999-10-15" }]);
 
 function fakeDf2(extra) {
+    // Massassi's preview fetches a zip from jkdf2.net only when its page is
+    // opened: the map and textures aren't found before.
+    const dirge = encodeURIComponent(DIRGE_URL);
+    let opened = false;
+    const viewer = `<script>var maps = JSON.parse("[[\\"dirge\\", \\"?url=${DIRGE_URL}\\u0026episode=0\\"]]");</script>`;
+    const notYet = () => new Response("Not found", { status: 404 });
     return fakeMassassi(Object.assign({
+        [`pv:/level/?url=${dirge}`]: () => (opened = true, new Response(viewer)),
         [DF2_DIR("jkmp")]: () => new Response(df2Folder("jkmp", [
             // Massassi's, and a second download of it: never asked for.
             { name: "6000.zip", size: kb(ZIP) }, { name: "6000[1].zip", size: kb(ZIP) },
@@ -1329,8 +1381,8 @@ function fakeDf2(extra) {
         [DF2_FILE("jkmp", "DIRGE.zip")]: () => new Response(DIRGE_ZIP, { headers: { "Content-Length": String(DIRGE_ZIP.length) } }),
         [DF2_FILE("jkmp", "copy6000.zip")]: () => new Response(COPY_ZIP),
         [DF2_FILE("motsmp", "qat.zip")]: () => new Response(QAT_ZIP),
-        [pvUrl("map", encodeURIComponent(DIRGE_URL))]: () => new Response(PV_MAP),
-        [pvUrl("mat", encodeURIComponent(DIRGE_URL))]: () => new Response(PV_MAT),
+        [pvUrl("map", dirge)]: () => opened ? new Response(PV_MAP) : notYet(),
+        [pvUrl("mat", dirge)]: () => opened ? new Response(PV_MAT) : notYet(),
     }, extra || {}));
 }
 const idxOf = (env, key) => JSON.parse(new TextDecoder().decode(env.LEVELS.m.get(key).bytes));
@@ -1387,7 +1439,10 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     assert.deepEqual(d.pv, ["dirge"]);
     assert.equal(gunzip(env.LEVELS.m.get(`pv/${d.id}-0.map.json`).bytes), PV_MAP);
     assert.ok(env.LEVELS.m.has(`pv/${d.id}.tex.json`));
-    assert.ok(seen.includes(pvUrl("map", encodeURIComponent(DIRGE_URL))));
+    // The preview's page first: a jkdf2.net zip is fetched by the preview only then.
+    const dirge = encodeURIComponent(DIRGE_URL);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:") && p.includes("DIRGE")),
+                     [`pv:/level/?url=${dirge}`, pvUrl("map", dirge), pvUrl("mat", dirge)]);
     assert.deepEqual(d.g, [{ n: "DIRGE.gob", h: sha(DIRGE_GOB), b: DIRGE_GOB.length, ep: "Square Dirge", ty: 2, lv: ["dirge.jkl"] }]);
     assert.equal(all.left, 0);
     assert.deepEqual(all.from, { "jkdf2.net": 1 });
