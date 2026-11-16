@@ -270,8 +270,8 @@ when the level ends writes the match to D1: one row for the match, one for each 
 kills in order. It keeps how many games reported and how many kills two games or more saw, and
 marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
 kills were seen by two games, it had no password, no two of its players had the same browser key,
-and its level's script didn't keep the score (below). The standings add up only the matches that are
-`counted`.
+its level's script didn't keep the score, and its level isn't a co-op level (both below). The
+standings add up only the matches that are `counted`.
 
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
@@ -290,6 +290,46 @@ whom for the kills between its players; each player's score is the host's; and i
 as standings are of kills between players. A script can take points away too (that level's takes
 one off the kills for a civilian), so a row of the host's scoreboard can be below zero. A game built
 before it could say so reports no `scr`, and its match is by its kills, as before.
+
+A co-op level is one its players play against the level's own characters. The game counts a death
+by one of them as a suicide, so a match on it says little about its players against each other,
+whether its script gave points or not. Nothing that happens in a match tells such a level from a
+deathmatch level with a turret or a trap, and matches on those count like any other. So the co-op
+levels are a list in `src/ladder.js`, for each game. `COOP_LEVELS` names a level of the Level
+Library by its GOB and its level files, as the games report them: a match's episode is its GOB's
+file name without the ending, which the library saves under its own name or, where that's taken,
+with `_` and the level's number in the library after it. Both are needed because a file's name
+alone isn't one level's (`cm.jkl` is also Cat and Mouse, `jkedit.jkl` every level made with
+JkEdit). `COOP_MODS` has the name of a mod that is such a level. A match on one is kept, listed,
+posted and shown like any other. Its page says it's a co-op level, its detail has `coop`, and it
+isn't `counted`.
+
+The list has the levels of both libraries whose author calls them co-op (cooperative), and the two
+made to show enemies in a multiplayer game, as of 2026-11-16:
+
+| Game | Level (its number in the library) | GOB, level files |
+| --- | --- | --- |
+| Jedi Knight | Theft on Nar Shaddaa (610) | `thief.jkl` under any episode, or the mod `thief` |
+| | Rebel Destroyer Co-op (170) | `Vessel.gob`, `vessel.jkl` |
+| | Downtown Goddard (235) | `goddard.gob`, `goddard.jkl` |
+| | Chaos Eternal (328) | `chaos.gob`, `academy.jkl`, `club.jkl`, `catacombs.jkl` |
+| | Synced AI for JK (431) | `ais.gob`, `ais.jkl` |
+| | Kill Coconut Monkey!!! (961) | `cmkill.gob`, `cm.jkl`, or the mod `cmkill` |
+| | WKA_Training Facility (1554) | `WKA_Training.gob`, `wka_training.jkl` |
+| | Saber Arenas And War (2253), its war level | `A War.gob`, `jkedit.jkl` |
+| | Terrorist Warfare (2595) | `Terrorist.gob`, `terrorist.jkl` |
+| | Andossk: Fight For Freedom - Level 1 (3108) | `andossk.gob`, `andossk1.jkl` |
+| Mysteries of the Sith | AI Synced (811) | `ais.goo`, `ais.jkl` |
+| | Rebel Base on Yurs IV (953) | `Reb2.goo`, `reb2.jkl` |
+| | Attack! (1891) | `Attack!.goo`, `synced.jkl` |
+| | Rancor Swamp Co-Op (1001229) | `kyarancor2.goo`, `kyarancor2.jkl` |
+| | MotS Level 13 Co-Op (1001233) | `s5l3_uppersith.goo`, `s5l3_uppersith.jkl` |
+
+Not on it: Hostile Takeover (1708, "kind of a Co-op level" in its author's words), whose GOB and
+file are also those of The House In The Woods (1796), a deathmatch level; and deathmatch levels
+that have some enemies in them (Imperial City, Final Namek, Spaceport(ai), the Rbots mods), which
+count like any other. Another level is a line in the list and a deploy; its matches from before
+are set right by hand (below).
 
 Each match keeps what it was played with: the game, the level's file, title and episode (one that
 isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest
@@ -566,6 +606,8 @@ UPDATE matches SET counted = 0, detail = json_set(detail, '$.scored', 'script') 
 UPDATE match_players SET score = (SELECT json_extract(j.value, '$[1]') FROM matches m, json_each(m.detail, '$.sb') j WHERE m.id = match_players.match_id AND json_extract(j.value, '$[0]') = match_players.slot) WHERE match_id = 123;
 UPDATE match_players SET place = 1 + (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND COALESCE(o.score, -1000000000) > COALESCE(match_players.score, -1000000000)) WHERE match_id = 123;
 UPDATE match_players SET won = (place = 1 AND (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND o.place = 1) = 1) WHERE match_id = 123;
+-- A match on a co-op level, saved before the level was listed: out of the standings, and its page says why
+UPDATE matches SET counted = 0, detail = json_set(detail, '$.coop', 1) WHERE id = 123;
 ```
 
 ### What it costs
@@ -625,6 +667,10 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
   game's word alone: no other game sees a script's points, only the scoreboard the host sends.
 - A match its level's script scored, from before the games could say so, stays by its kills. Its
   rows can be set right by hand: the host's scoreboard is in its detail (`sb`).
+- The co-op levels are a list kept by hand, by GOB and file name and by mod name, from what the
+  libraries had on 2026-11-16. A co-op level that isn't on it counts until it's added (unless its
+  script gave points, which takes the match out by itself): one the libraries get later, one whose
+  author doesn't call it co-op, and a listed one hosted from a GOB of another name.
 - A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
   game told could change who holds them.
 - A player with no key whose name is no record's, or the name of more than one, has no record: the

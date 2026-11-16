@@ -25,7 +25,7 @@ export async function resolve(specifier, context, next) {
 }`));
 const { FakeStorage, FakeCtx } = await import("./cfstub.mjs");
 const { Lobby, default: worker } = await import("../src/lobby.js");
-const { cleanReport, discordMessage, hashKey, joinableName, MAX_REPORT_B64 } = await import("../src/ladder.js");
+const { cleanReport, COOP_LEVELS, COOP_MODS, coopLevel, gobNames, discordMessage, hashKey, joinableName, MAX_REPORT_B64 } = await import("../src/ladder.js");
 const { periodStart } = await import("../src/ladder-pages.js");
 const { SHOTS, jpegSize, shotRoute, shotsRoom } = await import("../src/ladder-shots.js");
 const readme = (await import("node:fs")).readFileSync(new URL("../README.md", import.meta.url), "utf8");
@@ -1069,12 +1069,15 @@ await check("teams: the team with the most wins, and a custom map is marked", as
 // A three-player match as the host's game and the others report it: kills
 // are [victim's seat, killer's seat (0 for nobody)], last is what the host's
 // last report has besides its end (its scoreboard, what its script set).
-async function scoredMatch(env, kills, last, mode = 0) {
+// level: the game, the level's file and the host's mod, by default a level of
+// a mod's own that is on no list.
+async function scoredMatch(env, kills, last, mode = 0, level = {}) {
+    const { game = "jk1", map = "heist.jkl", mod = "heist", episode = "Club" } = level;
     const w = await new World(env).start();
-    const H = await w.host("Drumsin", { episode: "Club", map: "thief.jkl", title: "thief.jkl", pk: KEYS.maw,
-                                        tail: modTail("thief", MOD_FP) });
-    const R = await w.join("Ruri", H, { pk: KEYS.kyle });
-    const W = await w.join("Wushu Jedi", H, { pk: KEYS.boc });
+    const H = await w.host("Drumsin", { game, episode, map, title: map, pk: KEYS.maw,
+                                        tail: mod ? modTail(mod, MOD_FP) : "" });
+    const R = await w.join("Ruri", H, { game, pk: KEYS.kyle });
+    const W = await w.join("Wushu Jedi", H, { game, pk: KEYS.boc });
     const rules = { mode, sl: 0, tl: 0 };
     for (const g of [H, R, W]) {
         g.since = Date.now();
@@ -1135,7 +1138,9 @@ await check("a level whose script keeps the score is shown by the game's scorebo
     const mine = textOf((await a.w.page(`/player/${a.players[0].player_id}`)).body);
     assert.ok(mine.includes("Not counted"), mine.slice(0, 400));
     assert.match(mine, /1 of 3 26 30 \/ 4 \/ 4 /, "their own list has the match as its page does");
-    assert.ok(mine.includes("and not scored by their level's own script"));
+    assert.ok(mine.includes("not scored by their level's own script, and not on a co-op level"));
+    assert.equal(a.detail.coop, undefined, "its level is on no list: the script alone took it out");
+    assert.equal(text.includes("Co-op level"), false);
     const ruri = textOf((await a.w.page(`/player/${a.players[1].player_id}`)).body);
     assert.match(ruri, /3rd of 3 9 12 \/ 5 \/ 3 /);
 
@@ -1235,6 +1240,151 @@ await check("a level whose script keeps the score is shown by the game's scorebo
     assert.equal(h.detail.scored, "script");
     assert.deepEqual(h.players.map(r => r.score), [26, 9, null]);
     assert.match(textOf(h.html), /Wushu Jedi (–|-|&ndash;)? ?1 5 4 /);
+});
+
+await check("a match on a co-op level doesn't count, whatever happened in it, and any other level's does", async () => {
+    // The list: by game, the level's file, or the host's mod by its name.
+    assert.equal(coopLevel("jk1", "thief.jkl", ""), true);
+    assert.equal(coopLevel("jk1", "thief.jkl", "", "Club"), true, "thief is its file under any episode");
+    assert.equal(coopLevel("jk1", "thief.jkl", "", "thief"), true);
+    assert.equal(coopLevel("jk1", "m2.jkl", "cmkill", "JK1MP"), true, "the other level that installs as a mod");
+    // A level of the Level Library: its GOB's name as the episode (under
+    // its own name or with its number in the library after it, whatever the
+    // letters' case) and one of its files, of its game.
+    let listed = 0;
+    for (const [game, levels] of Object.entries(COOP_LEVELS)) {
+        for (const l of levels) {
+            assert.ok(l.files.length && l.files.every(f => /^[^A-Z]+\.jkl$/.test(f)), JSON.stringify(l));
+            if (!l.gob)
+                continue;
+            assert.ok(Number.isInteger(l.id) && l.gob === l.gob.toLowerCase() && l.gob.length <= 31, JSON.stringify(l));
+            const other = game === "jk1" ? "mots" : "jk1";
+            for (const f of l.files) {
+                listed++;
+                for (const ep of [l.gob, l.gob.toUpperCase(), `${l.gob}_${l.id}`, `${l.gob}_${l.id}b`])
+                    assert.equal(coopLevel(game, f, "", ep), true, `${game} ${ep} ${f}`);
+                for (const ep of ["", undefined, "Club", l.gob + "2", `${l.gob}_${l.id + 1}`, `${l.gob}_`, "x" + l.gob])
+                    assert.equal(coopLevel(game, f, "", ep), false, `${game} ${ep} ${f}`);
+                assert.equal(coopLevel(game, "x" + f, "", l.gob), false);
+                if (!COOP_LEVELS[other].some(o => o.gob === l.gob && o.files.includes(f)))
+                    assert.equal(coopLevel(other, f, "", l.gob), false, `${other} ${l.gob} ${f}`);
+            }
+        }
+    }
+    assert.equal(listed, 16, "the levels of 2026-11-16: 11 files of 9 for Jedi Knight, 5 for Mysteries of the Sith");
+    assert.deepEqual(COOP_MODS, { jk1: ["thief", "cmkill"], mots: [] });
+    // Levels of the library with a co-op level's file name, which aren't
+    // one: Cat and Mouse, The Jedi Academy, Catacombs, a JkEdit level, the
+    // two saber arenas that come with the co-op war level, and the two that
+    // share Hostile.gob and hostile.jkl (one of them a deathmatch level).
+    for (const [map, episode] of [["cm.jkl", "CM"], ["academy.jkl", "Academy"], ["catacombs.jkl", "Catacombs"], ["club.jkl", "Club"],
+                                  ["jkedit.jkl", "BHM"], ["jkedit.jkl", "Bar"], ["jkedit.jkl", "Saber Infirmary"],
+                                  ["hostile.jkl", "Hostile"], ["hostile.jkl", "Hostile_1796"], ["vessel.jkl", "JK1MP"]])
+        assert.equal(coopLevel("jk1", map, "", episode), false, `${episode} ${map}`);
+    assert.equal(coopLevel("jk1", "jkedit.jkl", "", "A War"), true);
+    assert.equal(coopLevel("mots", "jkedit.jkl", "", "A War"), false);
+    assert.deepEqual(gobNames("a-gob-with-a-name-of-31-letters", 1001233),
+                     ["a-gob-with-a-name-of-31-letters", "a-gob-with-a-name-of-31_1001233", "a-gob-with-a-name-of-3_1001233b"],
+                     "cut as the library cuts them, to an episode name's 31 characters");
+    assert.equal(coopLevel("jk1", "m2.jkl", "thief"), true);
+    assert.equal(coopLevel("jk1", "m2.jkl", "Thief"), true, "a mod's name whatever its letters' case");
+    assert.equal(coopLevel("mots", "thief.jkl", "thief"), false, "another game's level of that name is another level");
+    for (const [map, mod] of [["m2.jkl", ""], ["thief2.jkl", ""], ["thief", ""], ["m2.jkl", "thief2"], ["", ""], [undefined, undefined]])
+        assert.equal(coopLevel("jk1", map, mod), false, `${map} ${mod}`);
+    assert.equal(coopLevel("jk9", "thief.jkl", "thief"), false);
+
+    // A deathmatch between its players on the co-op level, as from the
+    // library (no mod): three kills, two suicides, no script points. It's
+    // kept and shown like any other, and doesn't count.
+    const PVP = [[2, 1], [3, 1], [2, 3], [1, 0], [3, 0]];
+    const SB = [[1, 1, 2, 1, 1, 0], [2, 0, 0, 2, 0, 0], [3, 0, 1, 2, 1, 0]];
+    const env = newEnv({ DISCORD_WEBHOOK: "https://discord.test/api/webhooks/1/abc" });
+    discord.length = 0;
+    const a = await scoredMatch(env, PVP, { sb: SB, teams: [0, 0, 0, 0, 0] }, 0, { map: "thief.jkl", mod: "" });
+    assert.equal(a.detail.coop, 1);
+    assert.equal(a.detail.scored, undefined);
+    assert.equal(a.m.counted, 0, "not one for the standings");
+    assert.deepEqual([a.m.mod, a.m.map], ["", "thief.jkl"]);
+    assert.deepEqual(a.players.map(r => [r.name, r.score, r.kills, r.deaths, r.suicides, r.place, r.won]),
+                     [["Drumsin", 1, 2, 1, 1, 1, 1], ["Ruri", 0, 0, 2, 0, 2, 0], ["Wushu Jedi", 0, 1, 2, 1, 2, 0]],
+                     "its numbers are the count's, as for any match");
+    assert.deepEqual([a.detail.agree.sbRows, a.detail.agree.sbSame], [3, 3]);
+    const text = textOf(a.html);
+    assert.ok(text.includes("Co-op level"), text.slice(0, 600));
+    assert.match(text, /Drumsin Host 1 2 1 1 /);
+    assert.match(text, /This is a co-op level: its players play against the level's own characters, and the game counts a death by one of them as a suicide\. Matches on it don't count for the standings\./);
+    assert.equal(text.includes("Scored by the level"), false);
+    assert.equal(text.includes("keeps its own score"), false);
+    assert.ok(text.includes("The host's scoreboard matched for 3 of 3 players."));
+    assert.ok(text.includes("Most suicides"), "its highlights are as any match's");
+    assert.equal(discord.length, 1, "posted like any other");
+    const recent = JSON.parse((await a.w.page("/ladder/recent")).body);
+    assert.equal(recent.games.jk1[0].name, "Drumsin", "and listed like any other");
+    assert.equal(recent.top.jk1.week.players.length, 0, "nobody's standing has it");
+    const mine = textOf((await a.w.page(`/player/${a.players[0].player_id}`)).body);
+    assert.ok(mine.includes("Not counted"), mine.slice(0, 400));
+    assert.equal(textOf((await a.w.page("/players?period=all")).body).includes("Drumsin 1 2"), false);
+
+    // The same match hosted as the mod, on whatever file: the mod's name says it.
+    const b = await scoredMatch(newEnv(), PVP, { sb: SB, teams: [0, 0, 0, 0, 0] }, 0, { map: "club.jkl", mod: "Thief" });
+    assert.deepEqual([b.detail.coop, b.m.counted, b.m.mod], [1, 0, "Thief"]);
+    assert.ok(textOf(b.html).includes("This is a co-op level"));
+
+    // A level of the Level Library, under its GOB's name and under the
+    // name the library gives it when that's taken.
+    for (const level of [{ map: "vessel.jkl", mod: "", episode: "Vessel" }, { game: "mots", map: "reb2.jkl", mod: "", episode: "Reb2_953" }]) {
+        const v = await scoredMatch(newEnv(), PVP, { sb: SB, teams: [0, 0, 0, 0, 0] }, 0, level);
+        assert.deepEqual([v.detail.coop, v.m.counted, v.m.episode], [1, 0, level.episode], JSON.stringify(level));
+        assert.ok(textOf(v.html).includes("This is a co-op level"));
+    }
+
+    // The same match on any other level counts, as it always did: also one
+    // with a name close to it, another game's level of that name, a level
+    // with a co-op level's file name in another GOB (Cat and Mouse, a JkEdit
+    // level), and a level where every death was nobody's kill (a trap, a
+    // turret).
+    for (const level of [{ map: "m2.jkl", mod: "" }, { map: "thief2.jkl", mod: "thiefs" }, { game: "mots", map: "thief.jkl", mod: "thief" },
+                         { map: "cm.jkl", mod: "", episode: "CM" }, { map: "jkedit.jkl", mod: "", episode: "BHM" },
+                         { game: "mots", map: "vessel.jkl", mod: "", episode: "Vessel" }]) {
+        const c = await scoredMatch(newEnv(), PVP, { sb: SB, teams: [0, 0, 0, 0, 0] }, 0, level);
+        assert.deepEqual([c.detail.coop, c.m.counted], [undefined, 1], JSON.stringify(level));
+        const plain = textOf(c.html);
+        assert.equal(plain.includes("Co-op level"), false);
+        assert.equal(plain.includes("co-op level"), false);
+        const game = level.game === "mots" ? "?game=mots&period=all" : "?period=all";
+        assert.match(textOf((await c.w.page("/players" + game)).body), /Drumsin 1 2 1 1 /, "and is in the standings");
+    }
+    const TRAPS = [[1, 0], [1, 0], [2, 0], [3, 0], [3, 0], [3, 0]];
+    const d = await scoredMatch(newEnv(), TRAPS, { sb: [[1, -2, 0, 2, 2, 0], [2, -1, 0, 1, 1, 0], [3, -3, 0, 3, 3, 0]], teams: [0, 0, 0, 0, 0] },
+                                0, { map: "turrets.jkl", mod: "" });
+    assert.deepEqual([d.detail.coop, d.m.counted], [undefined, 1], "a level that kills its players counts");
+    assert.match(textOf((await d.w.page("/players?period=all")).body), /Ruri -1 0 1 1 /);
+
+    // On the co-op level with the script's points too: the game's
+    // scoreboard, and one note, which says it once.
+    const KILLS = [[2, 1], [3, 1], [2, 3], [1, 0], [1, 0], [1, 0], [1, 0], [2, 0], [2, 0], [2, 0], [3, 0], [3, 0], [3, 0], [3, 0]];
+    const COOP = [[1, 26, 30, 4, 4, 0], [2, 9, 12, 5, 3, 0], [3, 13, 17, 5, 4, 0]];
+    const e = await scoredMatch(newEnv(), KILLS, { sb: COOP, teams: [0, 0, 0, 0, 0], scr: 3 }, 0, { map: "thief.jkl", mod: "thief" });
+    assert.deepEqual([e.detail.scored, e.detail.coop, e.m.counted], ["script", 1, 0]);
+    const both = textOf(e.html);
+    assert.match(both, /Drumsin Host 26 30 4 4 /);
+    assert.ok(both.includes("Co-op level"));
+    assert.ok(both.includes("Scored by the level"));
+    assert.ok(both.includes("This level keeps its own score."));
+    assert.equal(both.includes("This is a co-op level"), false);
+    assert.equal((both.match(/count for the standings/g) || []).length, 1, "said once");
+
+    // A match on such a level from before it was listed is set right by
+    // hand, with the README's line: out of the standings, and its page says why.
+    const sql = /-- A match on a co-op level, saved before the level was listed[^]*?\n(UPDATE [^\n]*)\n```/.exec(readme);
+    assert.ok(sql, "the README has the line");
+    const f = await scoredMatch(newEnv(), PVP, { sb: SB, teams: [0, 0, 0, 0, 0] }, 0, { map: "later.jkl", mod: "" });
+    assert.equal(f.m.counted, 1);
+    assert.match(textOf((await f.w.page("/players?period=all")).body), /Drumsin 1 2 1 1 /);
+    f.w.env.LADDER.db.exec(sql[1].replaceAll("= 123", `= ${f.m.id}`) + "\nDELETE FROM ladder_cache;");
+    assert.equal(f.w.env.LADDER.rows("SELECT counted FROM matches")[0].counted, 0);
+    assert.ok(textOf((await f.w.page(`/match/${f.m.id}`)).body).includes("This is a co-op level"));
+    assert.equal(textOf((await f.w.page("/players?period=all")).body).includes("Drumsin 1 2"), false);
 });
 
 await check("a match D1 doesn't take is tried again, and a match nobody ends closes by itself", async () => {
