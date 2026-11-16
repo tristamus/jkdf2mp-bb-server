@@ -10,6 +10,8 @@
 //   parseEpisode(text)     an episode.jk's title, type and levels
 //   decodeText(bytes)      a readme as text, as find_dates.py decodes it
 //   releaseDate(...)       a level's real release date (see below)
+//   parseArchive(html)     a folder of jkdf2.net's archive: its files
+//   readmeAuthor(texts)    who made a level, from its readmes (for jkdf2.net's)
 //
 // The release date is a port of find_dates.py (builds/level-library/
 // release-dates in the project files), tested there on 43 Massassi levels on
@@ -883,4 +885,86 @@ export function modGroup(title, author) {
         .replace(/[^a-z0-9]+/g, " ").trim();
     const a = String(author || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     return (t || String(title || "").toLowerCase().trim()) + "|" + a;
+}
+
+// ---- jkdf2.net (www.jkdf2.net), the Level Library's second source: the
+// levels in its archive (/JKBot/JKArchive/, a Directory Lister site) that
+// Massassi doesn't have. Antonio has its owner's permission (JKLE_Cougar,
+// 2026-11-16).
+
+// A folder of jkdf2.net's archive (?dir=JKDF2/JKDF2/Game%20Files/<folder>):
+// its files, in the page's order, each with its name, its address as the
+// page gives it (relative to /JKBot/JKArchive/), its size as the page writes
+// it ("380.21KB", "2.74MB") and its date ("2011-05-28 17:41:37"). Folders
+// (their size is "-", their address a ?dir=) and ".." are left out.
+export function parseArchive(html) {
+    const out = [];
+    const re = /<li data-name="([^"]*)" data-href="([^"]*)">([\s\S]*?)<\/li>/g;
+    let m;
+    while ((m = re.exec(html || ""))) {
+        const size = /class="file-size[^"]*">\s*([^<]*?)\s*<\/span>/.exec(m[3]);
+        const date = /class="file-modified[^"]*">\s*([^<]*?)\s*<\/span>/.exec(m[3]);
+        const name = unescapeHtml(m[1]), href = unescapeHtml(m[2]);
+        if (name === ".." || !size || size[1] === "-" || href.startsWith("?") || /^[a-z]+:/i.test(href) || href.startsWith("/"))
+            continue;
+        out.push({ name, href, size: size[1], date: date && /^\d{4}-\d{2}-\d{2}/.test(date[1]) ? date[1] : null });
+    }
+    return out;
+}
+
+// A zip's name as the job compares them across the two sources: lower case,
+// without the " (2)" or "[1]" a browser adds to a second download.
+export function zipKey(name) {
+    return String(name || "").trim().toLowerCase().replace(/\s*(?:\[\d+\]|\(\d+\))(?=\.[a-z0-9]+$)/, "");
+}
+
+// How far a size as a page writes it ("380.21KB" on jkdf2.net, "226.0 KiB"
+// on Massassi) can be from the file's bytes: half its last digit, and a byte.
+export function sizeSlack(s) {
+    const m = /([\d.]+)\s*(B|KiB|MiB|GiB|KB|MB|GB)/i.exec(s || "");
+    if (!m)
+        return 0;
+    const unit = { b: 1, kib: 1024, kb: 1024, mib: 1048576, mb: 1048576, gib: 1073741824, gb: 1073741824 }[m[2].toLowerCase()];
+    const dec = (m[1].split(".")[1] || "").length;
+    return Math.ceil(unit * 0.5 * 10 ** -dec) + 1;
+}
+
+const AUTHOR_RES = [
+    /^\s*(?:level\s+|map\s+)?authors?(?:\s*\(s\))?\s*\.*\s*[:=]\s*(.+)$/i,
+    /^\s*(?:created|made|designed|built|level|map|edited)\s+by\s*[:\-]?\s*(.+)$/i,
+    /^\s*by\s*:\s*(.+)$/i,
+];
+
+// Who made a level, from its readmes: the first "Author: ..." line (or
+// "Created by", "Level by", "Made by", "By:"), without email addresses or
+// web addresses. Null when no readme says, or what it says doesn't look
+// like a name (empty, or longer than 60 letters).
+export function readmeAuthor(texts) {
+    for (const r of texts || []) {
+        if (r.text == null)
+            continue;
+        for (const line of String(r.text).split(/\r\n|\r|\n/).slice(0, 200)) {
+            for (const re of AUTHOR_RES) {
+                const m = re.exec(line);
+                if (!m)
+                    continue;
+                const v = m[1]
+                    .replace(/[<(\[]?\s*(?:mailto:)?[\w.+-]+@[\w-]+(?:\.[\w-]+)+\s*[>)\]]?/g, " ")
+                    .replace(/[<(\[]?\s*(?:https?:\/\/|www\.)\S+\s*[>)\]]?/gi, " ")
+                    .replace(/\s+/g, " ").replace(/^[\s:,;.\-]+|[\s:,;\-]+$/g, "").trim();
+                if (v && v.length <= 60 && /[a-z0-9]/i.test(v))
+                    return v;
+            }
+        }
+    }
+    return null;
+}
+
+// A level's title from jkdf2.net: its episode's title (episode.jk) when it
+// has one, else its zip's name without ".zip", "_" as spaces.
+export function df2Title(episode, zipName) {
+    const ep = String(episode || "").replace(/\s+/g, " ").trim();
+    if (ep && /[a-z0-9]/i.test(ep))
+        return ep.slice(0, 64);
+    return String(zipName || "").replace(/\.[a-z0-9]+$/i, "").replace(/_/g, " ").replace(/\s+/g, " ").trim() || "Untitled";
 }

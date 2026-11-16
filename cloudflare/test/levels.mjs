@@ -376,9 +376,9 @@ function fakeMassassi(extra) {
     }, extra || {});
     globalThis.fetch = async (url, init) => {
         const u = new URL(url);
-        assert.ok(["https://www.massassi.net", "https://3dpreview.massassi.net"].includes(u.origin), u.origin);
+        assert.ok(["https://www.massassi.net", "https://3dpreview.massassi.net", "https://www.jkdf2.net"].includes(u.origin), u.origin);
         assert.match(init.headers["User-Agent"], /^Mozilla\/5\.0 \(compatible; level-index/);
-        const p = (u.origin.startsWith("https://3d") ? "pv:" : "") + u.pathname + u.search;
+        const p = (u.origin.startsWith("https://3d") ? "pv:" : u.origin.includes("jkdf2") ? "df2:" : "") + u.pathname + u.search;
         seen.push(p);
         const r = routes[p];
         if (r) return r();
@@ -396,7 +396,8 @@ class Ctx {
 }
 
 function newJob(vars) {
-    const env = { LEVELS: new FakeR2(), LEVELS_PACE_MS: "1000", ...vars };
+    // jkdf2.net's part of the job is off unless a check turns it on.
+    const env = { LEVELS: new FakeR2(), LEVELS_PACE_MS: "1000", LEVELS_DF2: "0", ...vars };
     const job = new LevelJob(new Ctx(), env);
     env.LEVELJOB = { idFromName: () => 1, get: () => ({ fetch: r => job.fetch(new Request(r)) }) };
     return { job, env };
@@ -1269,6 +1270,226 @@ await check("mods: the route serves each game's mods", async () => {
     assert.equal(sha(new Uint8Array(await (await get("/levels/z/634.zip")).arrayBuffer())), sha(MOD_ZIP));
     assert.equal(JSON.parse(await (await get("/levels/d/634.json")).text()).mod.kind, "gameplay");
     assert.equal((await get("/levels/s/634-2.jpg")).status, 200);
+});
+
+// ---- jkdf2.net: the levels in its archive that Massassi doesn't have
+
+// A folder of jkdf2.net's archive (Directory Lister), as its page has it.
+function df2Folder(dir, files) {
+    const li = (name, href, size, date, icon) => `
+                                    <li data-name="${name}" data-href="${href}">
+                        <a href="${href}" class="clearfix" data-name="${name}">
+                            <div class="row">
+                                <span class="file-name col-md-7 col-sm-6 col-xs-9">
+                                    <i class="fa ${icon} fa-fw"></i>
+                                    ${name}                                </span>
+                                <span class="file-size col-md-2 col-sm-2 col-xs-3 text-right">
+                                    ${size}                                </span>
+                                <span class="file-modified col-md-3 col-sm-4 hidden-xs text-right">
+                                    ${date}                                </span>
+                            </div>
+                        </a>
+                    </li>`;
+    return `<ul id="directory-listing" class="nav nav-pills nav-stacked">` +
+        li("..", "https://www.jkdf2.net/JKBot/JKArchive/?dir=JKDF2%2FJKDF2%2FGame%20Files", "-", "2021-12-07 04:27:19", "fa-level-up") +
+        li("info", `?dir=JKDF2/JKDF2/Game%20Files/${dir}/info`, "-", "2021-12-07 04:27:19", "fa-folder") +
+        files.map(f => li(f.name.replace(/&/g, "&amp;"), `JKDF2/JKDF2/Game%20Files/${dir}/${encodeURIComponent(f.name)}`,
+                          f.size, f.date || "2011-05-28 17:41:37", "fa-file-archive-o")).join("") + "</ul>";
+}
+const kb = b => (b.length / 1024).toFixed(2) + "KB";
+const DF2_DIR = dir => `df2:/JKBot/JKArchive/?dir=JKDF2/JKDF2/Game%20Files/${dir}`;
+const DF2_FILE = (dir, name) => `df2:/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/${dir}/${encodeURIComponent(name)}`;
+
+const DIRGE_GOB = makeGob([{ name: "episode.jk", data: `"Square Dirge"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL dirge.jkl 0 0 -1 -1\n` },
+                           { name: "jkl\\dirge.jkl", data: "SECTION: JK\n" }]);
+const DIRGE_ZIP = makeZip([{ name: "DIRGE.gob", data: DIRGE_GOB, date: "2001-03-02" },
+                           { name: "DIRGE_Readme.txt", data: "Square Dirge\r\nAuthor: Some Body (some@body.example)\r\nDate of Release : March 3, 2001\r\n",
+                             date: "2001-03-03" }]);
+const QAT_GOB = makeGob([{ name: "episode.jk", data: `"Qat Crystac"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL qat.jkl 0 0 -1 -1\n` },
+                         { name: "jkl\\qat.jkl", data: "SECTION: JK\n" }]);
+const QAT_ZIP = makeZip([{ name: "Qat.goo", data: QAT_GOB, date: "2000-08-01" }]);
+// Massassi's 6000 Block under another name: the same GOB.
+const COPY_ZIP = makeZip([{ name: "six.gob", data: GOB, date: "1999-10-15" }]);
+
+function fakeDf2(extra) {
+    return fakeMassassi(Object.assign({
+        [DF2_DIR("jkmp")]: () => new Response(df2Folder("jkmp", [
+            // Massassi's, and a second download of it: never asked for.
+            { name: "6000.zip", size: kb(ZIP) }, { name: "6000[1].zip", size: kb(ZIP) },
+            { name: "DIRGE.zip", size: kb(DIRGE_ZIP), date: "2014-12-01 10:13:09" },
+            // The same file again in the archive.
+            { name: "DIRGE (2).zip", size: kb(DIRGE_ZIP) },
+            { name: "copy6000.zip", size: kb(COPY_ZIP) },
+            { name: "huge & big.zip", size: "40.00MB" },
+            { name: "notes.txt", size: "1.00KB" },
+        ])),
+        [DF2_DIR("jkctf")]: () => new Response(df2Folder("jkctf", [])),
+        [DF2_DIR("motsmp")]: () => new Response(df2Folder("motsmp", [{ name: "qat.zip", size: kb(QAT_ZIP) }])),
+        [DF2_DIR("motskfy")]: () => new Response(df2Folder("motskfy", [])),
+        [DF2_FILE("jkmp", "DIRGE.zip")]: () => new Response(DIRGE_ZIP, { headers: { "Content-Length": String(DIRGE_ZIP.length) } }),
+        [DF2_FILE("jkmp", "copy6000.zip")]: () => new Response(COPY_ZIP),
+        [DF2_FILE("motsmp", "qat.zip")]: () => new Response(QAT_ZIP),
+    }, extra || {}));
+}
+const idxOf = (env, key) => JSON.parse(new TextDecoder().decode(env.LEVELS.m.get(key).bytes));
+
+await check("jkdf2.net: a folder of its archive, names, sizes, readme authors and titles", async () => {
+    const files = read.parseArchive(df2Folder("motskfy", [{ name: "KFY.zip", size: "380.21KB" }, { name: "a & b.zip", size: "2.74MB", date: "-" }]));
+    assert.deepEqual(files, [
+        { name: "KFY.zip", href: "JKDF2/JKDF2/Game%20Files/motskfy/KFY.zip", size: "380.21KB", date: "2011-05-28 17:41:37" },
+        { name: "a & b.zip", href: "JKDF2/JKDF2/Game%20Files/motskfy/a%20%26%20b.zip", size: "2.74MB", date: null },
+    ]);
+    assert.equal(read.zipKey("DPclean[1].zip"), "dpclean.zip");
+    assert.equal(read.zipKey("Dirge (2).ZIP"), "dirge.zip");
+    assert.equal(read.zipKey("v2 (final).zip"), "v2 (final).zip");
+    assert.equal(read.sizeSlack("380.21KB"), 7);
+    assert.equal(read.sizeSlack("226.0 KiB"), 53);
+    assert.equal(read.sizeSlack(""), 0);
+    assert.equal(read.readmeAuthor([{ text: "Title: Foo\nAuthor(s) : Brian Lozier <brian@example.com>\n" }]), "Brian Lozier");
+    assert.equal(read.readmeAuthor([{ text: null }, { text: "A level\nCreated by: PSXPat\n" }]), "PSXPat");
+    assert.equal(read.readmeAuthor([{ text: "by the way, have fun" }]), null);
+    assert.equal(read.df2Title("  Square   Dirge ", "DIRGE.zip"), "Square Dirge");
+    assert.equal(read.df2Title(null, "nicks_bridge.zip"), "nicks bridge");
+});
+
+await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of their own", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    const df2 = seen.filter(p => p.startsWith("df2:"));
+    // Each folder, then the zips: never Massassi's (by name, or by a second
+    // download's name), nor the big one, nor a second copy.
+    assert.deepEqual(df2.slice(0, 4), ["jkmp", "jkctf", "motsmp", "motskfy"].map(DF2_DIR));
+    assert.deepEqual(df2.slice(4).sort(), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip"), DF2_FILE("motsmp", "qat.zip")].sort());
+    // Jedi Knight's only once Massassi's pages for it have all been read.
+    const lastPage = seen.indexOf("/levels/files/400.shtml");
+    assert.ok(lastPage > 0);
+    assert.ok(seen.indexOf(DF2_FILE("jkmp", "DIRGE.zip")) > lastPage);
+    assert.ok(seen.indexOf(DF2_FILE("jkmp", "copy6000.zip")) > lastPage);
+    // The levels' index is Massassi's alone, as before.
+    const jk = idxOf(env, "index/jk1.json");
+    assert.deepEqual(jk.levels.map(l => l.id), [323]);
+    assert.equal(jk.listed, 2);
+    // Both, in the other.
+    const all = idxOf(env, "index/jk1-all.json");
+    assert.deepEqual(all.sources, ["https://www.massassi.net", "https://www.jkdf2.net"]);
+    assert.deepEqual(all.levels.map(l => l.t), ["6000 Block", "Square Dirge"]);
+    const d = all.levels[1];
+    assert.ok(d.id > 1000000);
+    assert.deepEqual([d.o, d.k, d.a, d.rel, d.rp, d.src, d.z, d.h, d.sz, d.sh], ["jkdf2.net", "mp", "Some Body", "2001-03-03", "d", "r",
+                                                                              "DIRGE.zip", sha(DIRGE_ZIP), DIRGE_ZIP.length, 0]);
+    // No Massassi date, rating, downloads or 3D view.
+    assert.deepEqual([d.add, d.r, d.v, d.dl, d.pv], [undefined, undefined, undefined, undefined, undefined]);
+    assert.deepEqual(d.g, [{ n: "DIRGE.gob", h: sha(DIRGE_GOB), b: DIRGE_GOB.length, ep: "Square Dirge", ty: 2, lv: ["dirge.jkl"] }]);
+    assert.equal(all.left, 0);
+    assert.deepEqual(all.from, { "jkdf2.net": 1 });
+    // 323, 400 (gone), DIRGE, and the big one waiting.
+    assert.equal(all.listed, 4);
+    const mots = idxOf(env, "index/mots-all.json");
+    assert.deepEqual(mots.levels.map(l => [l.t, l.o, l.z]), [["Qat Crystac", "jkdf2.net", "qat.zip"]]);
+    assert.deepEqual(idxOf(env, "index/mots.json").levels, []);
+    // Its detail says where it came from.
+    const det = idxOf(env, `detail/${d.id}.json`);
+    assert.deepEqual([det.from, det.url, det.massassi, det.title, det.author],
+                     ["jkdf2.net", "https://www.jkdf2.net/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/jkmp/DIRGE.zip", undefined,
+                      "Square Dirge", "Some Body"]);
+    // The copy of 6000 Block was read and let go.
+    const rows = job.sql.exec("SELECT name, zip_st, info FROM lv WHERE id > 1000000 ORDER BY name").toArray();
+    assert.deepEqual(rows.map(r => [r.name, r.zip_st]), [["6000.zip", "dupe"], ["DIRGE.zip", "ok"], ["copy6000.zip", "dupe"],
+                                                         ["huge & big.zip", "big"], ["qat.zip", "ok"]]);
+    assert.equal(JSON.parse(rows[0].info).mas, 323);
+    assert.equal(JSON.parse(rows[2].info).same, 323);
+    const copyId = job.sql.exec("SELECT id FROM lv WHERE name = 'copy6000.zip'").toArray()[0].id;
+    assert.ok(!env.LEVELS.m.has(`zip/${copyId}.zip`));
+    assert.ok(!env.LEVELS.m.has(`detail/${copyId}.json`));
+    const st = await job.status();
+    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 150, 32]);
+    assert.deepEqual([st.lists.df2jkmp.n, st.lists.df2jkmp.same_as_massassi, st.lists.df2jkmp.copies], [6, 0, 2]);
+    assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", by_name: 1, by_gobs: 1 }]);
+    // The next day's look at the folder knows 6000.zip by name now.
+    job.kv("list_at:df2jkmp", 0);
+    seen.length = 0;
+    await runUntilIdle(job, 20);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp")]);
+    assert.equal((await job.status()).lists.df2jkmp.same_as_massassi, 1);
+    // The routes.
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    let r = await get("/levels/all/jk1.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(JSON.parse(await r.text()).levels.length, 2);
+    assert.equal((await get("/levels/all/mots.json")).status, 200);
+    assert.equal((await get("/levels/all/df2.json")).status, 404);
+    r = await get(`/levels/z/${d.id}.zip?h=${d.h}`);
+    assert.equal(sha(new Uint8Array(await r.arrayBuffer())), sha(DIRGE_ZIP));
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+});
+
+await check("jkdf2.net: at most LEVELS_DF2_PER_DAY zips a day, smallest first, and the big ones once the cap is raised", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "1" });
+    await runUntilIdle(job, 80);
+    const zips = seen.filter(p => p.startsWith("df2:") && p.endsWith(".zip"));
+    // MotS's has no Massassi pages to wait for: its first.
+    assert.deepEqual(zips, [DF2_FILE("motsmp", "qat.zip")]);
+    const st = await job.status();
+    assert.equal(st.jkdf2.today, 1);
+    // 6000.zip (Massassi's, as it will find), DIRGE.zip and copy6000.zip; not the big one.
+    assert.equal(idxOf(env, "index/jk1-all.json").left, 3);
+    // A new day.
+    job.kv("df2_day", "2000-01-01");
+    env.LEVELS_DF2_PER_DAY = "5";
+    seen.length = 0;
+    await runUntilIdle(job, 40);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip")]);
+    // The big one waits for a higher cap, and comes at the folder's next look.
+    env.LEVELS_DF2_MAX_MB = "64";
+    const BIG = makeZip([{ name: "big.gob", data: makeGob([{ name: "episode.jk", data: `"Big One"\nTYPE 2\n10: 0 0 LEVEL big.jkl 0 0 -1 -1\n` }]) }]);
+    const seen2 = fakeDf2({ [DF2_FILE("jkmp", "huge & big.zip")]: () => new Response(BIG) });
+    job.kv("list_at:df2jkmp", 0);
+    await runUntilIdle(job, 40);
+    assert.deepEqual(seen2.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp"), DF2_FILE("jkmp", "huge & big.zip")]);
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Big One"));
+});
+
+await check("jkdf2.net busy: only its own work waits; LEVELS_DF2 = \"0\" asks it nothing", async () => {
+    const seen = fakeDf2({ [DF2_FILE("motsmp", "qat.zip")]: () => new Response("busy", { status: 503 }) });
+    const { job } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    assert.ok(Number(job.kv("df2_backoff_until")) > Date.now());
+    assert.ok(!job.kv("backoff_until") || Number(job.kv("backoff_until")) < Date.now());
+    assert.equal(job.sql.exec("SELECT tries, zip_st FROM lv WHERE name = 'qat.zip'").toArray()[0].zip_st, null);
+    // Massassi's levels went on.
+    assert.ok(seen.includes("/levels/files/400.shtml"));
+    const off = fakeDf2();
+    const { job: job2 } = newJob();
+    await runUntilIdle(job2, 80);
+    assert.ok(!off.some(p => p.startsWith("df2:")));
+    assert.equal((await job2.status()).jkdf2.on, false);
+});
+
+await check("jkdf2.net: one Massassi gets later, with the same GOBs, leaves the index of both", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Square Dirge"));
+    // Massassi adds it, under another name.
+    const page = PAGE.replace(/323/g, "500").replace("6000 Block</h1>", "Square Dirge</h1>").replace(/jkmp\/6000\.zip/g, "jkmp/sqdirge.zip");
+    const list = LIST + `<div class="level-list-screenshot"></div><div class="level-list-item">
+    <strong><a href="/levels/files/500.shtml">Square Dirge</a></strong><br>
+    <span class="mute">By:</span> Some Body<br><span class="mute">Added:</span> 2026-11-20<br></div>
+    <div class="level-list-details"><span class="mute">Downloads:</span> 3</div>`;
+    const MAS_DIRGE = makeZip([{ name: "dirge.gob", data: DIRGE_GOB }]);
+    fakeDf2({
+        "/levels/jkmp/?num=9999": () => new Response(list),
+        "/levels/files/500.shtml": () => new Response(page),
+        "/media/levels/files/jkmp/sqdirge.zip": () => new Response(MAS_DIRGE),
+    });
+    job.kv("list_at:jkmp", 0);
+    await runUntilIdle(job, 80);
+    const all = idxOf(env, "index/jk1-all.json");
+    assert.deepEqual(all.levels.map(l => [l.id, l.o]), [[323, undefined], [500, undefined]]);
+    assert.deepEqual(all.from, { "jkdf2.net": 0 });
 });
 
 if (failed) {
