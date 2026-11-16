@@ -37,8 +37,11 @@
 //                            seat ids (killer 0 when nobody did it), kind is
 //                            1 saber, 2 shot, 3 splash, 4 Force, 5 other, 0
 //                            not known (only the victim's game knows)
-//     sb: [[id, score, kills, deaths, suicides, team], ...],
-//     teams: [5 scores],     the host's scoreboard as it stands
+//     sb: [[id, score, kills, deaths, suicides, team, byLevel], ...],
+//     teams: [5 scores],     the host's scoreboard as it stands. byLevel: how
+//                            many of the deaths were by one of the level's
+//                            own characters (below), which only the host's
+//                            game counts; none from a game built before
 //     scr: 2,                the host's: what the level's script has set of a
 //                            player's by itself, 1 score, 2 kills, 4 deaths,
 //                            8 suicides added up (below)
@@ -70,6 +73,18 @@
 // doesn't count for standings, which are of kills between players. Like any
 // scoreboard it's one game's word: no other game sees a script's points.
 //
+// A level can have characters of its own: a co-op level's enemies, a
+// creature, a turret that is an actor of the level. The game counts a
+// player's death by one as a suicide, as it does any death no player caused.
+// The host's game counts those deaths for each player and sends the count
+// with the player's scoreboard row (byLevel, only where there is one). A
+// match with any doesn't count for standings, whether its level's script
+// keeps the score or not: its "suicides" aren't its players' own doing, and
+// the game's scoreboard, which its page shows, has them as suicides all the
+// same. Its page says how many there were (detail.byLevel in all, the
+// seventh of a row of detail.sb for a player). A trap or an explosion the
+// level sets off has no character behind it and stays a plain suicide.
+//
 // The same kill from two games: same victim and killer, seen within WINDOW_MS
 // of each other going by each game's ago, the nearest first. A player can't
 // die twice that quickly. A kill counts when the victim's own game reported
@@ -85,10 +100,10 @@
 // longer and someone died. It counts for standings (counted) when it also ran
 // COUNT_SECS, two games or more reported, nine in ten of its kills were seen
 // by two games, it had no password, no two of its players had the same
-// browser key (one person in two tabs), and its level's script didn't keep
-// the score (above). The standings (src/ladder-pages.js)
-// add up the matches that count; the numbers it's worked out from are kept,
-// so the rule can change.
+// browser key (one person in two tabs), its level's script didn't keep the
+// score and none of the level's own characters killed a player (both above).
+// The standings (src/ladder-pages.js) add up the matches that count; the
+// numbers it's worked out from are kept, so the rule can change.
 //
 // Most matches are played with a mod, which everyone in the room runs (a
 // joiner's game is restarted into the host's, mods.js), so a match has one:
@@ -404,7 +419,13 @@ export function cleanReport(b64) {
                   deaths = int(row[3], -99999, 99999), suicides = int(row[4], -99999, 99999);
             if (!id || score === null || kills === null || deaths === null || suicides === null)
                 continue;
-            out.sb.push([id, score, kills, deaths, suicides, whole(row[5], 4) ?? 0]);
+            const clean = [id, score, kills, deaths, suicides, whole(row[5], 4) ?? 0];
+            // The seventh only where it says something: a row is as it
+            // always was for a player none of the level's characters killed.
+            const byLevel = whole(row[6], 99999);
+            if (byLevel)
+                clean.push(byLevel);
+            out.sb.push(clean);
         }
         if (Array.isArray(r.teams) && r.teams.length === 5 && r.teams.every(s => int(s, -99999, 99999) !== null))
             out.teams = r.teams.slice();
@@ -510,6 +531,11 @@ export function buildRecord(m, why, now) {
     }
     // Scored by its level's script: the host's scoreboard is the match's.
     const scripted = own > 0;
+    // Deaths by one of the level's own characters (an enemy, a civilian, a
+    // turret), as the host's game counted them for the players it has. The
+    // game scores each as a suicide, so a match that has any is no more a
+    // deathmatch between its players than one its script scores.
+    const byLevel = kept.reduce((n, i) => n + ((m.rows[i] && m.rows[i][5]) || 0), 0);
     const rows = kept.map((i, slot) => {
         const p = m.players[i], s = stats[i], sb = m.rows[i] || null;
         return {
@@ -543,7 +569,7 @@ export function buildRecord(m, why, now) {
     // Two of its players with one browser key are one person in two tabs.
     const keys = rows.map(r => r.pk).filter(Boolean);
     const sharedKey = new Set(keys).size < keys.length;
-    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted &&
+    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted && !byLevel &&
                     confirmed >= COUNT_AGREE * kills.length;
     const detail = {
         v: 1,
@@ -552,7 +578,9 @@ export function buildRecord(m, why, now) {
                                c.k < 0 ? -1 : slotOf[c.k], c.kind, c.by.length]),
         firstBlood: firstBlood < 0 ? -1 : slotOf[firstBlood],
         teams: teamScores,
-        // The host's scoreboard rows: [slot, score, kills, deaths, suicides, team]
+        // The host's scoreboard rows: [slot, score, kills, deaths, suicides, team],
+        // and after them, for a player the level's own characters killed,
+        // how often
         sb: kept.map((i, slot) => m.rows[i] ? [slot, ...m.rows[i]] : null).filter(Boolean),
         agree: { reported: m.kills.length, kept: kills.length, confirmed, sbRows, sbSame },
         // For a rule against feeding kills, should one be wanted: whether two
@@ -575,6 +603,9 @@ export function buildRecord(m, why, now) {
         detail.scr = scr;
     if (scripted)
         detail.scored = "script";
+    // How often the level's own characters killed a player, in all.
+    if (byLevel)
+        detail.byLevel = byLevel;
     return {
         uid: crypto.randomUUID(),
         game: m.game, map: m.map, title: m.title || m.map, episode: m.episode, roomName: m.name,
@@ -816,6 +847,20 @@ export function gameRows(detail) {
     return rows;
 }
 
+// How often the level's own characters killed each player of a match, as the
+// host's game counted it (the seventh of a row of detail.sb): slot -> times,
+// for the players it happened to. The game scores each as a suicide.
+export function levelDeaths(detail) {
+    const deaths = new Map();
+    if (detail && Array.isArray(detail.sb)) {
+        for (const row of detail.sb) {
+            if (Array.isArray(row) && Number.isInteger(row[0]) && Number.isInteger(row[6]) && row[6] > 0)
+                deaths.set(row[0], row[6]);
+        }
+    }
+    return deaths;
+}
+
 // Discord's markdown has no say inside a code block, which only ``` ends.
 function plain(text) {
     return text.replace(/`/g, "'");
@@ -1055,10 +1100,12 @@ export class Ladder {
         for (const e of r.ev)
             this.kill(m, pi, e, now);
         if (isHost && r.sb) {
-            for (const [id, score, kills, deaths, suicides, team] of r.sb) {
+            for (const [id, score, kills, deaths, suicides, team, byLevel] of r.sb) {
                 const who = this.who(m, id, now);
+                // A row is as it always was unless the level's characters
+                // killed its player.
                 if (who >= 0)
-                    m.rows[who] = [score, kills, deaths, suicides, team];
+                    m.rows[who] = byLevel ? [score, kills, deaths, suicides, team, byLevel] : [score, kills, deaths, suicides, team];
             }
             m.teams = r.teams;
         }

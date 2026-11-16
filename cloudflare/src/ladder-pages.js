@@ -43,7 +43,7 @@
 // nowhere else, and /ladder/recent says so ("shots", its limits) for the
 // landing page to send them. Its routes are answered from here too.
 
-import { COUNT_AGREE, KEY_COOKIE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, cookieKey, ensureSchema, gameRow, gameRows, hashKey,
+import { COUNT_AGREE, KEY_COOKIE, MODE_COG_SCORES, MODE_TEAMS, NAME_KEY, TEAMS, cookieKey, ensureSchema, gameRow, gameRows, hashKey, levelDeaths,
          winnerOf } from "./ladder.js";
 import { SHOTS, shotRoute, shotsOn, shotsQuery } from "./ladder-shots.js";
 
@@ -534,10 +534,20 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     // What its scoreboard is, said under it, and how many kills there were
     // between its players, which the rest of the page is about.
     const between = rows.reduce((a, r) => a + r.kills, 0);
+    // Deaths by one of the level's own characters, which the game scores as
+    // suicides: who and how often, as the host's game counted them.
+    const byLevel = levelDeaths(detail);
+    const times = n => n === 1 ? "once" : n === 2 ? "twice" : `${n} times`;
+    const killed = rows.map((r, i) => byLevel.has(r.slot) ? `${esc(names[i])} ${times(byLevel.get(r.slot))}` : "").filter(Boolean);
+    const levelKilled = killed.length
+        ? `This level's own characters killed ${killed.length > 1 ? killed.slice(0, -1).join(", ") + " and " : ""}${killed[killed.length - 1]}.` : "";
     const ownNote = scripted ? `<p class="sub own">This level keeps its own score. Its script gives the points, which the game shows
         as kills, and the game counts a death by anything but a player as a suicide. The scoreboard above is the game's own, as the
-        host's game had it. The players' kills of each other, ${between} in all, are what the rest of this page is about. It
-        doesn't count for the standings.</p>` : "";
+        host's game had it.${levelKilled ? ` ${levelKilled} Those deaths are among the suicides above.` : ""} The players' kills of
+        each other, ${between} in all, are what the rest of this page is about. It doesn't count for the standings.</p>`
+        : levelKilled ? `<p class="sub own">${levelKilled} The game counts such a death as a suicide, so those deaths are among the
+        suicides above and are taken off the score. A match in which the level itself kills players doesn't count for the
+        standings.</p>` : "";
 
     // Highlights: each only when there's something to say, and with every
     // player who shares it. spare: how many more any player might have that
@@ -577,9 +587,14 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
     const deaths = best("deaths", 1);
     if (deaths)
         highlights.push(["Most deaths", held(deaths)]);
-    const suicides = best("suicides", 1);
+    // Where the level's characters killed, those deaths are told apart from
+    // a player's own doing; the scoreboard's suicides are both.
+    const byTheLevel = best(r => byLevel.get(r.slot) || 0, 1);
+    if (byTheLevel)
+        highlights.push(["Most by the level", held(byTheLevel)]);
+    const suicides = best(r => Math.max(0, r.suicides - (byLevel.get(r.slot) || 0)), 1);
     if (suicides)
-        highlights.push(["Most suicides", held(suicides)]);
+        highlights.push([byLevel.size ? "Most own suicides" : "Most suicides", held(suicides)]);
 
     const kindRows = KIND_NAMES.slice(1).map((name, i) => kindTotals[i] ? `<tr><td>${name}</td><td class="num">${kindTotals[i]}</td></tr>` : "")
         .join("") + (killsByOthers > known ? `<tr><td class="soft">Not known</td><td class="num soft">${killsByOthers - known}</td></tr>` : "");
@@ -610,6 +625,7 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
                 `${m.confirmed} of its ${count(m.kills, "kill")} ${m.confirmed === 1 ? "was" : "were"} seen by two games or more.` +
                 (scripted ? " The level's own points are the host's game's word alone: no other game sees them."
                  : agree.sbRows ? ` The host's scoreboard matched for ${agree.sbSame} of ${count(agree.sbRows, "player")}.` : "") +
+                (byLevel.size ? " How often the level's characters killed a player is the host's game's count alone." : "") +
                 (detail.sharedKey ? " Two of its players played from the same browser." : "");
 
     const title = `${m.title}${result ? ": " + (winner.name !== null ? (winner.name || "Anonymous") + " wins" : TEAMS[winner.team] + " team wins") : ""}`;
@@ -651,7 +667,7 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
           ${kindRows ? `<section class="card"><h3>Kills by</h3><div class="body"><table>${kindRows}</table></div></section>` : ""}
           <section class="card wide"><h3>Who killed whom</h3><div class="body">
             <div class="scroll">${matrix}</div>
-            <p class="later">Rows killed columns. A player's own square is their suicides.</p>
+            <p class="later">Rows killed columns. A player's own square is their suicides${byLevel.size ? ", deaths by the level's characters among them" : ""}.</p>
           </div></section>${opts.shots ? shotsCard(shots, rows, names, linked, Array.isArray(detail.kills) ? detail.kills : [], opts.contact || "",
                                                   (opts.now || Date.now()) - m.ended_at < SHOTS.days * DAY_MS, you) : ""}
         </div>
@@ -898,7 +914,7 @@ function tabs(label, items, current) {
 }
 
 const HOW_COUNTED = `Only matches that count are added up: two minutes or longer, reported by two games or more, with no password,
-          and not scored by their level's own script.
+          not scored by their level's own script, and with no player killed by one of the level's own characters.
           A week starts on Monday and a month on its first day, at 3 in the morning Pacific time.`;
 
 // GET /players

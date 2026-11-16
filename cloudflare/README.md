@@ -270,8 +270,8 @@ when the level ends writes the match to D1: one row for the match, one for each 
 kills in order. It keeps how many games reported and how many kills two games or more saw, and
 marks a match `counted` when it ran two minutes, two games or more reported it, nine in ten of its
 kills were seen by two games, it had no password, no two of its players had the same browser key,
-and its level's script didn't keep the score (below). The standings add up only the matches that are
-`counted`.
+its level's script didn't keep the score, and none of the level's own characters killed a player
+(both below). The standings add up only the matches that are `counted`.
 
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
@@ -290,6 +290,18 @@ whom for the kills between its players; each player's score is the host's; and i
 as standings are of kills between players. A script can take points away too (that level's takes
 one off the kills for a civilian), so a row of the host's scoreboard can be below zero. A game built
 before it could say so reports no `scr`, and its match is by its kills, as before.
+
+A level can have characters of its own that kill: a co-op level's enemies, a creature, a turret that
+is one of the level's actors. The game counts a player's death by one as a suicide, as it does any
+death no player caused, so on such a level a player who never killed themselves has a row of
+suicides and a score below zero. The host's game counts those deaths for each player and sends the
+count with the player's scoreboard row (a seventh value, only where there is one). A match with any
+isn't `counted`, whether its level's script keeps the score or not. Its page keeps the game's own
+numbers, as the game's score screen has them, and says under the scoreboard how often the level's
+characters killed each player; its highlights tell those deaths from a player's own suicides. The
+match's detail has the count (`byLevel` in all, the seventh of a row of `sb` for a player). A trap
+or an explosion the level sets off has no character behind it and stays a plain suicide. A game
+built before it could count sends no seventh value, and its match is as before.
 
 Each match keeps what it was played with: the game, the level's file, title and episode (one that
 isn't the games' own is shown as a custom map), teams or not, the score and time limits, the highest
@@ -566,6 +578,9 @@ UPDATE matches SET counted = 0, detail = json_set(detail, '$.scored', 'script') 
 UPDATE match_players SET score = (SELECT json_extract(j.value, '$[1]') FROM matches m, json_each(m.detail, '$.sb') j WHERE m.id = match_players.match_id AND json_extract(j.value, '$[0]') = match_players.slot) WHERE match_id = 123;
 UPDATE match_players SET place = 1 + (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND COALESCE(o.score, -1000000000) > COALESCE(match_players.score, -1000000000)) WHERE match_id = 123;
 UPDATE match_players SET won = (place = 1 AND (SELECT COUNT(*) FROM match_players o WHERE o.match_id = match_players.match_id AND o.place = 1) = 1) WHERE match_id = 123;
+-- A match in which the level's own characters killed players, saved before the games could count
+-- that: out of the standings. (How often isn't known for it, so its page says nothing more.)
+UPDATE matches SET counted = 0 WHERE id = 123;
 ```
 
 ### What it costs
@@ -625,6 +640,13 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
   game's word alone: no other game sees a script's points, only the scoreboard the host sends.
 - A match its level's script scored, from before the games could say so, stays by its kills. Its
   rows can be set right by hand: the host's scoreboard is in its detail (`sb`).
+- How often a level's own characters killed a player is the host's game's count alone, like the
+  scoreboard it comes with: a host whose game doesn't send it (an older build, or a changed one)
+  has a match that counts. A match from before the games could count it stays as it was saved, and
+  can be taken out of the standings by hand.
+- One death by a level's character takes the whole match out of the standings, so a deathmatch level
+  with a creature or a turret that kills a player once doesn't count either. The rule is the
+  match's, not the death's: the game's score has the death as a suicide whatever the lobby does.
 - A match's weapon highlights (most saber kills and the like) are left out when kills of a kind no
   game told could change who holds them.
 - A player with no key whose name is no record's, or the name of more than one, has no record: the
