@@ -28,6 +28,7 @@ const { Lobby, default: worker } = await import("../src/lobby.js");
 const { cleanReport, discordMessage, hashKey, joinableName, MAX_REPORT_B64 } = await import("../src/ladder.js");
 const { periodStart } = await import("../src/ladder-pages.js");
 const { SHOTS, jpegSize, shotRoute, shotsRoom } = await import("../src/ladder-shots.js");
+const readme = (await import("node:fs")).readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
 const logged = [];
 const realLog = console.log;
@@ -1063,6 +1064,177 @@ await check("teams: the team with the most wins, and a custom map is marked", as
     const list = (await w.page("/matches?game=mots")).body;
     assert.ok(list.includes("Red team won") || list.includes("Red team"));
     assert.ok(list.includes('<span class="tag soft">Custom</span>'));
+});
+
+// A three-player match as the host's game and the others report it: kills
+// are [victim's seat, killer's seat (0 for nobody)], last is what the host's
+// last report has besides its end (its scoreboard, what its script set).
+async function scoredMatch(env, kills, last, mode = 0) {
+    const w = await new World(env).start();
+    const H = await w.host("Drumsin", { episode: "Club", map: "thief.jkl", title: "thief.jkl", pk: KEYS.maw,
+                                        tail: modTail("thief", MOD_FP) });
+    const R = await w.join("Ruri", H, { pk: KEYS.kyle });
+    const W = await w.join("Wushu Jedi", H, { pk: KEYS.boc });
+    const rules = { mode, sl: 0, tl: 0 };
+    for (const g of [H, R, W]) {
+        g.since = Date.now();
+        await g.report({ rules });
+    }
+    skew += 5 * MIN;
+    for (const [victim, killer] of kills)
+        await killAll([H, R, W], victim, killer, 5);
+    await H.report({ rules, ...last, end: "level" });
+    for (const g of [R, W])
+        await g.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches ORDER BY id DESC")[0];
+    const players = env.LADDER.rows("SELECT * FROM match_players WHERE match_id = ? ORDER BY slot", m.id);
+    return { w, m, detail: JSON.parse(m.detail), players, html: (await w.page(`/match/${m.id}`)).body };
+}
+
+await check("a level whose script keeps the score is shown by the game's scoreboard, and doesn't count", async () => {
+    assert.equal(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, scr: 10 }))).scr, 10);
+    for (const bad of [16, -1, 2.5, "2", null, [2]])
+        assert.equal(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, scr: bad }))).scr, 0, JSON.stringify(bad));
+    assert.equal(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0 }))).scr, 0, "an older game says nothing");
+
+    // A co-op level: three kills between its players, eleven deaths by its
+    // enemies, and the script's points in the host's kills.
+    const KILLS = [[2, 1], [3, 1], [2, 3], [1, 0], [1, 0], [1, 0], [1, 0], [2, 0], [2, 0], [2, 0], [3, 0], [3, 0], [3, 0], [3, 0]];
+    const COOP = [[1, 26, 30, 4, 4, 0], [2, 9, 12, 5, 3, 0], [3, 13, 17, 5, 4, 0]];
+    const env = newEnv({ DISCORD_WEBHOOK: "https://discord.test/api/webhooks/1/abc" });
+    discord.length = 0;
+    const a = await scoredMatch(env, KILLS, { sb: COOP, teams: [0, 0, 0, 0, 0], scr: 3 });
+    assert.equal(a.detail.scored, "script");
+    assert.equal(a.detail.scr, 3);
+    assert.deepEqual(a.detail.agree.sbRows, 3);
+    assert.deepEqual(a.detail.agree.sbSame, 0);
+    assert.deepEqual(a.players.map(r => [r.name, r.score, r.kills, r.deaths, r.suicides, r.place, r.won]),
+                     [["Drumsin", 26, 2, 4, 4, 1, 1], ["Ruri", 9, 0, 5, 3, 3, 0], ["Wushu Jedi", 13, 1, 5, 4, 2, 0]],
+                     "the host's score, places by it, and the kills as the games counted them");
+    assert.equal(a.m.counted, 0, "not one for the standings");
+    assert.equal(a.m.mode, 0, "its mode is the game's own");
+    const text = textOf(a.html);
+    assert.ok(text.includes("Scored by the level"), text.slice(0, 600));
+    assert.match(text, /Drumsin Host 26 30 4 4 /, "the scoreboard as the game showed it");
+    assert.match(text, /Wushu Jedi 13 17 5 4 /);
+    assert.match(text, /Ruri 9 12 5 3 /);
+    assert.match(text, /This level keeps its own score\..*The players' kills of each other, 3 in all,.*doesn't count for the standings\./);
+    assert.ok(text.includes("The level's own points are the host's game's word alone"));
+    assert.equal(text.includes("The host's scoreboard matched"), false);
+    assert.match(a.html, /<meta name="description" content="[^"]*1\. Drumsin 26 \(30\/4\/4\)/);
+    // Who killed whom is still of the players' own kills.
+    assert.match(text, /Rows killed columns/);
+    assert.equal(discord.length, 1);
+    assert.match(discord[0].embeds[0].description, /1\. Drumsin +26 +30\/4\/4/);
+    assert.match(discord[0].embeds[0].description, /3\. Ruri +9 +12\/5\/3/);
+    const recent = JSON.parse((await a.w.page("/ladder/recent")).body);
+    assert.deepEqual([recent.games.jk1[0].name, recent.games.jk1[0].score], ["Drumsin", 26]);
+    assert.equal(recent.top.jk1.week.players.length, 0, "nobody's standing has it");
+    const mine = textOf((await a.w.page(`/player/${a.players[0].player_id}`)).body);
+    assert.ok(mine.includes("Not counted"), mine.slice(0, 400));
+    assert.match(mine, /1 of 3 26 30 \/ 4 \/ 4 /, "their own list has the match as its page does");
+    assert.ok(mine.includes("and not scored by their level's own script"));
+    const ruri = textOf((await a.w.page(`/player/${a.players[1].player_id}`)).body);
+    assert.match(ruri, /3rd of 3 9 12 \/ 5 \/ 3 /);
+
+    // The same match from a game that doesn't say what its script did (an
+    // older build): as it always was, by its kills.
+    const b = await scoredMatch(newEnv(), KILLS, { sb: COOP, teams: [0, 0, 0, 0, 0] });
+    assert.equal(b.detail.scored, undefined);
+    assert.equal(b.detail.scr, undefined);
+    assert.deepEqual(b.players.map(r => r.score), [-2, -3, -3]);
+    assert.equal(b.m.counted, 1);
+    assert.match(textOf(b.html), /Drumsin Host -2 2 4 4 /);
+    assert.match(textOf((await b.w.page(`/player/${b.players[0].player_id}`)).body), /1 of 3 -2 2 \/ 4 \/ 4 /);
+    assert.ok(textOf(b.html).includes("The host's scoreboard matched for 0 of 3 players"));
+
+    // Such a match can be set right by hand, with the README's lines: its
+    // page and its players' lists are then as the first one's.
+    const sql = /-- A free-for-all match its level's script scored[^]*?\n(UPDATE [^]*?)\n```/.exec(readme);
+    assert.ok(sql, "the README has the lines");
+    const before = textOf((await b.w.page("/players?period=all")).body);
+    assert.match(before, /Drumsin -2 2 4 4 /, "it counted, by its kills");
+    b.w.env.LADDER.db.exec(sql[1].replaceAll("= 123", `= ${b.m.id}`) + "\nDELETE FROM ladder_cache;");
+    const fixed = env2 => env2.LADDER.rows("SELECT name, score, kills, deaths, suicides, place, won FROM match_players ORDER BY slot")
+        .map(r => Object.values(r));
+    assert.deepEqual(fixed(b.w.env), fixed(env));
+    assert.equal(b.w.env.LADDER.rows("SELECT counted FROM matches")[0].counted, 0);
+    const after = textOf((await b.w.page(`/match/${b.m.id}`)).body);
+    assert.match(after, /Drumsin Host 26 30 4 4 .*Wushu Jedi 13 17 5 4 .*Ruri 9 12 5 3 /);
+    assert.ok(after.includes("This level keeps its own score."));
+    assert.equal(textOf((await b.w.page("/players?period=all")).body).includes("Drumsin -2"), false, "and no standing has it");
+
+    // A script that set something, with a scoreboard that's what the kills
+    // add up to all the same: nothing of its own to show.
+    const SAME = [[1, -2, 2, 4, 4, 0], [2, -3, 0, 5, 3, 0], [3, -3, 1, 5, 4, 0]];
+    const c = await scoredMatch(newEnv(), KILLS, { sb: SAME, teams: [0, 0, 0, 0, 0], scr: 15 });
+    assert.equal(c.detail.scored, undefined);
+    assert.equal(c.detail.scr, 15, "what it set is kept all the same");
+    assert.equal(c.m.counted, 1);
+    assert.deepEqual(c.players.map(r => r.score), [-2, -3, -3]);
+    assert.equal(textOf(c.html).includes("Scored by the level"), false);
+
+    // A kill the count is short of, in a level whose script only set a score
+    // that the game then worked out again: the count's, as in any deathmatch.
+    const SHORT = [[1, -1, 3, 4, 4, 0], [2, -3, 0, 6, 3, 0], [3, -3, 1, 5, 4, 0]];
+    const d = await scoredMatch(newEnv(), KILLS, { sb: SHORT, teams: [0, 0, 0, 0, 0], scr: 1 });
+    assert.equal(d.detail.scored, undefined);
+    assert.equal(d.m.counted, 1);
+    assert.deepEqual(d.players.map(r => r.score), [-2, -3, -3]);
+    assert.ok(textOf(d.html).includes("The host's scoreboard matched for 1 of 3 players"));
+
+    // A script that gives points to the score alone, in a mode that doesn't
+    // say the level scores: the host's score, and its own count beside it.
+    const BONUS = [[1, 48, 2, 4, 4, 0], [2, -3, 0, 5, 3, 0], [3, 7, 1, 5, 4, 0]];
+    const e = await scoredMatch(newEnv(), KILLS, { sb: BONUS, teams: [0, 0, 0, 0, 0], scr: 1 });
+    assert.equal(e.detail.scored, "script");
+    assert.deepEqual(e.players.map(r => [r.score, r.place]), [[48, 1], [-3, 3], [7, 2]]);
+    assert.equal(e.m.counted, 0);
+    assert.match(textOf(e.html), /Drumsin Host 48 2 4 4 /);
+
+    // A level that says in its mode that it scores (Capture the Flag) is as
+    // it was: the host's score, the kills as counted, and it counts.
+    const CTF = [[1, 300, 2, 4, 4, 0], [2, 100, 0, 5, 3, 0], [3, 0, 1, 5, 4, 0]];
+    const f = await scoredMatch(newEnv(), KILLS, { sb: CTF, teams: [0, 0, 0, 0, 0], scr: 1 }, 0x4);
+    assert.equal(f.detail.scored, undefined);
+    assert.deepEqual(f.players.map(r => [r.score, r.kills, r.place]), [[300, 2, 1], [100, 0, 2], [0, 1, 3]]);
+    assert.equal(f.m.counted, 1);
+    const ctf = textOf(f.html);
+    assert.ok(ctf.includes("Scored by the level"));
+    assert.match(ctf, /Drumsin Host 300 2 4 4 /);
+    assert.ok(ctf.includes("The host's scoreboard matched for 3 of 3 players"));
+    assert.equal(ctf.includes("keeps its own score"), false);
+    // But one whose script also wrote over the kills is the level's own.
+    const g = await scoredMatch(newEnv(), KILLS, { sb: [[1, 300, 40, 4, 4, 0], CTF[1], CTF[2]], teams: [0, 0, 0, 0, 0], scr: 3 }, 0x4);
+    assert.equal(g.detail.scored, "script");
+    assert.equal(g.m.counted, 0);
+    assert.match(textOf(g.html), /Drumsin Host 300 40 4 4 /);
+
+    // A script can take points away (a civilian killed is a point off the
+    // kills), so a row can be below zero. Here it is the only row that isn't
+    // the count's: dropped, the match would pass for one scored by kills.
+    const MINUS = [[1, -5, -1, 4, 4, 0], [2, -3, 0, 5, 3, 0], [3, -3, 1, 5, 4, 0]];
+    assert.deepEqual(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, sb: [[1, -5, -1, -2, -3, 0]] }))).sb,
+                     [[1, -5, -1, -2, -3, 0]], "a row below zero is kept");
+    assert.deepEqual(cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, sb: [[1, 0, -100000, 0, 0, 0], [2, 0, 0, 1.5, 0, 0]] }))).sb,
+                     [], "but not one out of range, or not whole");
+    const i = await scoredMatch(newEnv(), KILLS, { sb: MINUS, teams: [0, 0, 0, 0, 0], scr: 3 });
+    assert.equal(i.detail.scored, "script");
+    assert.deepEqual([i.detail.agree.sbRows, i.detail.agree.sbSame], [3, 2]);
+    assert.equal(i.m.counted, 0);
+    assert.deepEqual(i.players.map(r => [r.name, r.score, r.kills, r.place, r.won]),
+                     [["Drumsin", -5, 2, 3, 0], ["Ruri", -3, 0, 1, 0], ["Wushu Jedi", -3, 1, 1, 0]],
+                     "the host's scores, a tie at the top that nobody won");
+    assert.match(textOf(i.html), /Drumsin Host (-|−|&minus;)5 (-|−|&minus;)1 4 4 /);
+    assert.ok(textOf(i.html).includes("This level keeps its own score."));
+
+    // A player the host's scoreboard never had: the count's numbers, no score.
+    const h = await scoredMatch(newEnv(), KILLS, { sb: COOP.slice(0, 2), teams: [0, 0, 0, 0, 0], scr: 2 });
+    assert.equal(h.detail.scored, "script");
+    assert.deepEqual(h.players.map(r => r.score), [26, 9, null]);
+    assert.match(textOf(h.html), /Wushu Jedi (–|-|&ndash;)? ?1 5 4 /);
 });
 
 await check("a match D1 doesn't take is tried again, and a match nobody ends closes by itself", async () => {

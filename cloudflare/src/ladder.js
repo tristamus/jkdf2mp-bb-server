@@ -39,6 +39,9 @@
 //                            not known (only the victim's game knows)
 //     sb: [[id, score, kills, deaths, suicides, team], ...],
 //     teams: [5 scores],     the host's scoreboard as it stands
+//     scr: 2,                the host's: what the level's script has set of a
+//                            player's by itself, 1 score, 2 kills, 4 deaths,
+//                            8 suicides added up (below)
 //     end: "level" | "left"  its level is over, or its player left }
 //
 // when its level starts, within a couple of seconds of a kill, every 30 s
@@ -54,6 +57,19 @@
 // its map. The lobby knows who's in which seat, so a seat id in a report is
 // the player who had that seat at the time, whoever takes it afterwards.
 //
+// A level can keep the score by itself. One that says so in its mode (Capture
+// the Flag) has the host's score for each player, and its kills as counted.
+// Another only writes over the game's counters from its script: a co-op level
+// gives a player "kills" for the enemies they shoot, and the game counts a
+// death by an enemy as a suicide. The game's scoreboard is then the level's
+// own, and nothing like what the kills between its players add up to. The
+// host's game says when its level's script has done that (scr), and where the
+// host's scoreboard then differs from the count, the match is one scored by
+// its level's script (detail.scored "script"): each player's score is the
+// host's, its page shows the host's scoreboard as the game did, and it
+// doesn't count for standings, which are of kills between players. Like any
+// scoreboard it's one game's word: no other game sees a script's points.
+//
 // The same kill from two games: same victim and killer, seen within WINDOW_MS
 // of each other going by each game's ago, the nearest first. A player can't
 // die twice that quickly. A kill counts when the victim's own game reported
@@ -68,8 +84,9 @@
 // A match is kept if two players or more were in it, it ran MIN_SECS or
 // longer and someone died. It counts for standings (counted) when it also ran
 // COUNT_SECS, two games or more reported, nine in ten of its kills were seen
-// by two games, it had no password, and no two of its players had the same
-// browser key (one person in two tabs). The standings (src/ladder-pages.js)
+// by two games, it had no password, no two of its players had the same
+// browser key (one person in two tabs), and its level's script didn't keep
+// the score (above). The standings (src/ladder-pages.js)
 // add up the matches that count; the numbers it's worked out from are kept,
 // so the rule can change.
 //
@@ -159,6 +176,10 @@ const ENDS = ["level", "left"];
 // The game's multiplayer mode flags (types_enums.h in the OpenJKDF2 fork).
 export const MODE_TEAMS = 0x1;
 export const MODE_COG_SCORES = 0x4;
+// What a level's script set of a player's by itself, in a report's scr
+// (STDCOMM_WSRELAY_SCRIPTED_* in the OpenJKDF2 fork).
+const SCR_SCORE = 1;
+const SCR_COUNTS = 2 | 4 | 8;
 export const KINDS = ["", "saber", "shot", "splash", "Force", "other"];
 // The teams as the game's end-of-match screen names them (jkGUIMultiTally.c).
 export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
@@ -185,12 +206,15 @@ export const TEAMS = ["", "Red", "Gold", "Blue", "Green"];
 // mod_fp its fingerprint (the SHA-256 of its files, mods.js), both empty for
 // none; pack says the MotS Remastered pack was on; max_rank is the highest
 // Force rank the host allowed. detail is JSON: the kills in order, the host's
-// scoreboard, how well the games' reports agreed, and for a match its host
-// left (or whose room closed) how far into it that was (over). hidden takes
-// it off the pages.
+// scoreboard, how well the games' reports agreed, for a match its host left
+// (or whose room closed) how far into it that was (over), and for one scored
+// by its level's script that it was (scored "script"; scr is what the script
+// set). hidden takes it off the pages.
 //
 // match_players: one row for each player in a match. slot is their number in
-// the match's detail. player_id is the players row of the key their game
+// the match's detail. kills, deaths and suicides are the ones counted from
+// the games' reports, also in a match scored by its level, whose score alone
+// is the host's. player_id is the players row of the key their game
 // sent, so whose match it is takes COALESCE(merged_into, id) of that row. For
 // a player whose game sent no key it's the stand-in row of the one record
 // that has their name, and empty when there's no such record (or more than
@@ -350,6 +374,7 @@ export function cleanReport(b64) {
         idle: r.idle === 1,
         build: typeof r.build === "string" && BUILD_RE.test(r.build) ? r.build : "",
         end: ENDS.includes(r.end) ? r.end : "",
+        scr: whole(r.scr, SCR_SCORE | SCR_COUNTS) ?? 0,
         rules: null, ev: [], sb: null, teams: null,
     };
     if (isObject(r.rules)) {
@@ -373,8 +398,10 @@ export function cleanReport(b64) {
         for (const row of r.sb.slice(0, MAX_PLAYERS)) {
             if (!Array.isArray(row))
                 continue;
-            const id = whole(row[0], 64), score = int(row[1], -99999, 99999), kills = whole(row[2], 99999),
-                  deaths = whole(row[3], 99999), suicides = whole(row[4], 99999);
+            // A level's script can take points away, and it writes them into
+            // the kills: any of these can be below zero.
+            const id = whole(row[0], 64), score = int(row[1], -99999, 99999), kills = int(row[2], -99999, 99999),
+                  deaths = int(row[3], -99999, 99999), suicides = int(row[4], -99999, 99999);
             if (!id || score === null || kills === null || deaths === null || suicides === null)
                 continue;
             out.sb.push([id, score, kills, deaths, suicides, whole(row[5], 4) ?? 0]);
@@ -462,20 +489,34 @@ export function buildRecord(m, why, now) {
     const rules = m.rules || { mode: 0, sl: 0, tl: 0 };
     const teams = (rules.mode & MODE_TEAMS) !== 0;
     const cogScores = (rules.mode & MODE_COG_SCORES) !== 0;
+    const scr = m.scr || 0;
     // How the host's scoreboard and the kills agree, for the players it has.
-    let sbRows = 0, sbSame = 0;
+    // own: the rows that are the level's script's doing: kills, deaths or
+    // suicides it set that aren't the ones counted, or a score it set that
+    // isn't what the game makes of its own kills and suicides (which it
+    // works out again at every death, in a mode that doesn't say the level
+    // scores).
+    let sbRows = 0, sbSame = 0, own = 0;
+    for (const i of kept) {
+        const s = stats[i], sb = m.rows[i];
+        if (!sb)
+            continue;
+        sbRows++;
+        const same = sb[1] === s.kills && sb[2] === s.deaths && sb[3] === s.suicides;
+        if (same)
+            sbSame++;
+        if ((!same && (scr & SCR_COUNTS)) || (!cogScores && (scr & SCR_SCORE) && sb[0] !== sb[1] - sb[3]))
+            own++;
+    }
+    // Scored by its level's script: the host's scoreboard is the match's.
+    const scripted = own > 0;
     const rows = kept.map((i, slot) => {
         const p = m.players[i], s = stats[i], sb = m.rows[i] || null;
-        if (sb) {
-            sbRows++;
-            if (sb[1] === s.kills && sb[2] === s.deaths && sb[3] === s.suicides)
-                sbSame++;
-        }
         return {
             slot, pk: p.anon ? "" : p.pk, name: p.anon ? "" : p.name, team: sb ? sb[4] : 0,
-            // A level that keeps its own score (Capture the Flag): the
-            // host's, or none.
-            score: cogScores ? (sb ? sb[0] : null) : s.kills - s.suicides,
+            // A level that keeps its own score (Capture the Flag, or one
+            // whose script does): the host's, or none.
+            score: cogScores || scripted ? (sb ? sb[0] : null) : s.kills - s.suicides,
             kills: s.kills, deaths: s.deaths, suicides: s.suicides, streak: s.streak, secs: secsOf(p),
             place: 0, won: 0, host: p.seat === 1 ? 1 : 0, reported: p.reports ? 1 : 0, kinds: s.kinds.slice(1),
         };
@@ -502,7 +543,7 @@ export function buildRecord(m, why, now) {
     // Two of its players with one browser key are one person in two tabs.
     const keys = rows.map(r => r.pk).filter(Boolean);
     const sharedKey = new Set(keys).size < keys.length;
-    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey &&
+    const counted = secs >= COUNT_SECS && reporters >= 2 && !m.locked && !sharedKey && !scripted &&
                     confirmed >= COUNT_AGREE * kills.length;
     const detail = {
         v: 1,
@@ -528,6 +569,12 @@ export function buildRecord(m, why, now) {
     // then can be its final scoreboard (ladder-shots.js).
     if (m.overAt && m.ended !== "level")
         detail.over = Math.max(0, m.overAt - m.startedAt);
+    // What the level's script set by itself, as the host's game said, and
+    // whether that made the match one scored by it.
+    if (scr)
+        detail.scr = scr;
+    if (scripted)
+        detail.scored = "script";
     return {
         uid: crypto.randomUUID(),
         game: m.game, map: m.map, title: m.title || m.map, episode: m.episode, roomName: m.name,
@@ -749,6 +796,26 @@ export function winnerOf(mode, rows, teamScores) {
     return { name: winners[0].name, team: 0, score: winners[0].score };
 }
 
+// A row of the host's scoreboard as a match's detail has it ([slot, score,
+// kills, deaths, suicides, team]): what the game showed for that player. null
+// if it isn't one.
+export function gameRow(row) {
+    return Array.isArray(row) && row.length >= 5 && row.slice(0, 5).every(Number.isInteger)
+        ? { slot: row[0], kills: row[2], deaths: row[3], suicides: row[4] } : null;
+}
+
+// For a match scored by its level's script, the host's scoreboard as the game
+// showed it: slot -> its row (gameRow), of the players it had. Empty for any
+// other match, whose numbers are the ones counted.
+export function gameRows(detail) {
+    const rows = new Map();
+    if (detail && detail.scored === "script" && Array.isArray(detail.sb)) {
+        for (const r of detail.sb.map(gameRow).filter(Boolean))
+            rows.set(r.slot, r);
+    }
+    return rows;
+}
+
 // Discord's markdown has no say inside a code block, which only ``` ends.
 function plain(text) {
     return text.replace(/`/g, "'");
@@ -763,10 +830,12 @@ function minutes(secs) {
 export function discordMessage(id, rec, origin) {
     const rows = [...rec.rows].sort((a, b) => a.place - b.place || a.slot - b.slot).slice(0, 16);
     const width = Math.max(4, ...rows.map(r => Array.from(r.name || "Anonymous").length));
+    const shown = gameRows(rec.detail);
     const lines = rows.map(r => {
         const name = plain(r.name || "Anonymous");
+        const n = shown.get(r.slot) || r;
         return `${String(r.place).padStart(2)}. ${name}${" ".repeat(width - Array.from(name).length)}  ` +
-               `${String(r.score ?? "-").padStart(4)}  ${r.kills}/${r.deaths}/${r.suicides}`;
+               `${String(r.score ?? "-").padStart(4)}  ${n.kills}/${n.deaths}/${n.suicides}`;
     });
     const w = winnerOf(rec.mode, rec.rows, rec.detail.teams);
     const title = plain(rec.title) + (w.name !== null ? `: ${plain(w.name || "Anonymous")} wins`
@@ -981,6 +1050,8 @@ export class Ladder {
         }
         if (isHost && r.rules)
             m.rules = r.rules;
+        if (isHost && r.scr)
+            m.scr = (m.scr || 0) | r.scr;
         for (const e of r.ev)
             this.kill(m, pi, e, now);
         if (isHost && r.sb) {
