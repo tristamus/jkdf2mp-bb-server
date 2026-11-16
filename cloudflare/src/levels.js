@@ -83,11 +83,13 @@
 // doesn't have: not a zip of the same name and size as one of Massassi's (the
 // lists' pages say each zip's name), and not one whose GOBs are all the same
 // files (SHA-256) as a level already in the library. Those levels are rows of
-// their own, with ids from DF2_ID + 1 (Massassi's are far below), and nothing
-// on them but the zip: no page, no screenshots, no 3D data (Massassi's
-// preview isn't asked about another site's zips). Their title is their
-// episode's, their author from a readme ("Author: ..."), their date from the
-// readmes and files, never jkdf2.net's (the day it was uploaded there).
+// their own, with ids from DF2_ID + 1 (Massassi's are far below), with their
+// zip and its 3D data but no page or screenshots: Massassi's 3D preview is
+// asked about their zips on jkdf2.net as about Massassi's own (Antonio, on
+// 2026-11-16: "let them all be read and have 3d previews. We have
+// permission."). Their title is their episode's, their author from a readme
+// ("Author: ..."), their date from the readmes and files, never jkdf2.net's
+// (the day it was uploaded there).
 // Slowly, as Antonio asked: in turns with Massassi's work, at most
 // LEVELS_DF2_PER_DAY zips a day (DF2_PER_DAY when it isn't set), none over
 // LEVELS_DF2_MAX_MB (DF2_MAX_MB: bigger ones wait as "big" until it's raised),
@@ -524,23 +526,25 @@ export class LevelJob extends DurableObject {
         }
         const full = await this.full();
         const mas = this.sql.exec(
-            `SELECT * FROM lv WHERE id <= ${DF2_ID} AND (retry_at IS NULL OR retry_at <= ?) AND (
-                 page_at IS NULL
-                 OR (page_st = 'ok' AND zip_st IS NULL AND (zip_url IS NOT NULL OR cat IN (${MOD_SQL})) AND ? = 0)
+            `SELECT * FROM lv WHERE (retry_at IS NULL OR retry_at <= ?) AND (
+                 (id <= ${DF2_ID} AND page_at IS NULL)
+                 OR (id <= ${DF2_ID} AND page_st = 'ok' AND zip_st IS NULL AND (zip_url IS NOT NULL OR cat IN (${MOD_SQL})) AND ? = 0)
                  OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got < json_array_length(shots) AND ? = 0)
                  OR (page_st = 'ok' AND zip_st = 'ok' AND shots_got >= json_array_length(COALESCE(shots, '[]'))
                      AND pv_st IS NULL AND zip_url IS NOT NULL AND ? = 0)
                  OR (pv_st = 'ok' AND pv_tex = 0 AND ? = 0))
              ORDER BY prio, rk, dl DESC, id LIMIT 1`, now, full ? 1 : 0, full ? 1 : 0,
             full || this.env.LEVELS_PREVIEW === "0" || this.previewFull() ? 1 : 0, this.env.LEVELS_PREVIEW === "0" ? 1 : 0).toArray()[0];
+        // jkdf2.net's zips in turns with the rest (their 3D data is the
+        // rest's: from Massassi's preview).
         const other = df2 && !full ? this.df2Next(now) : null;
         const row = other && (!mas || this.kv("df2_turn") === "1") ? other : mas;
         if (row) {
-            this.kv("df2_turn", isDf2(row) ? 0 : 1);
+            this.kv("df2_turn", row === other ? 0 : 1);
             let local = false;
             await this.guard(async () => {
                 local = await this.work(row, now) === LOCAL;
-            }, row);
+            }, row, row === other);
             this.kv("steps", Number(this.kv("steps") || 0) + 1);
             return local ? LOCAL : true;
         }
@@ -607,9 +611,9 @@ export class LevelJob extends DurableObject {
     // away (429, a 5xx, no answer): everything waits, and the level isn't
     // charged a try. Anything else about one level: that level waits, and
     // after MAX_TRIES is left until its page is read again (REPAGE_MS).
-    // jkdf2.net (df2, or a row of its) busy or away: only its work waits.
+    // jkdf2.net busy or away (df2: the request was to it): only its work waits.
     async guard(fn, row, df2) {
-        const pre = df2 || (row && isDf2(row)) ? "df2_" : "";
+        const pre = df2 ? "df2_" : "";
         try {
             await fn();
             this.kv(pre + "fails", 0);
@@ -1050,10 +1054,8 @@ export class LevelJob extends DurableObject {
         this.sql.exec(
             `UPDATE lv SET zip_st = ?, zip_at = ?, zip_size = ?, zip_sha = ?, info = ?, tries = 0, retry_at = NULL, err = ?
              WHERE id = ?`, status, now, size, sha, JSON.stringify(info), found.bad || null, row.id);
-        // Mods have no 3D data: no level to show (and no address for the
-        // preview). Nor have jkdf2.net's levels: the preview isn't asked
-        // about another site's zips.
-        if (mod || df2)
+        // Mods have no 3D data: no level to show (and no address for the preview).
+        if (mod)
             this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ? WHERE id = ?", now, row.id);
         this.dirty();
     }

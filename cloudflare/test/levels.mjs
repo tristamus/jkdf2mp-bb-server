@@ -1329,9 +1329,13 @@ function fakeDf2(extra) {
         [DF2_FILE("jkmp", "DIRGE.zip")]: () => new Response(DIRGE_ZIP, { headers: { "Content-Length": String(DIRGE_ZIP.length) } }),
         [DF2_FILE("jkmp", "copy6000.zip")]: () => new Response(COPY_ZIP),
         [DF2_FILE("motsmp", "qat.zip")]: () => new Response(QAT_ZIP),
+        [pvUrl("map", encodeURIComponent(DIRGE_URL))]: () => new Response(PV_MAP),
+        [pvUrl("mat", encodeURIComponent(DIRGE_URL))]: () => new Response(PV_MAT),
     }, extra || {}));
 }
 const idxOf = (env, key) => JSON.parse(new TextDecoder().decode(env.LEVELS.m.get(key).bytes));
+// Massassi's 3D preview reads jkdf2.net's zips as it reads Massassi's.
+const DIRGE_URL = "https://www.jkdf2.net/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/jkmp/DIRGE.zip";
 
 await check("jkdf2.net: a folder of its archive, names, sizes, readme authors and titles", async () => {
     const files = read.parseArchive(df2Folder("motskfy", [{ name: "KFY.zip", size: "380.21KB" }, { name: "a & b.zip", size: "2.74MB", date: "-" }]));
@@ -1378,8 +1382,12 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     assert.ok(d.id > 1000000);
     assert.deepEqual([d.o, d.k, d.a, d.rel, d.rp, d.src, d.z, d.h, d.sz, d.sh], ["jkdf2.net", "mp", "Some Body", "2001-03-03", "d", "r",
                                                                               "DIRGE.zip", sha(DIRGE_ZIP), DIRGE_ZIP.length, 0]);
-    // No Massassi date, rating, downloads or 3D view.
-    assert.deepEqual([d.add, d.r, d.v, d.dl, d.pv], [undefined, undefined, undefined, undefined, undefined]);
+    // No Massassi date, rating or downloads; its 3D view from Massassi's preview.
+    assert.deepEqual([d.add, d.r, d.v, d.dl], [undefined, undefined, undefined, undefined]);
+    assert.deepEqual(d.pv, ["dirge"]);
+    assert.equal(gunzip(env.LEVELS.m.get(`pv/${d.id}-0.map.json`).bytes), PV_MAP);
+    assert.ok(env.LEVELS.m.has(`pv/${d.id}.tex.json`));
+    assert.ok(seen.includes(pvUrl("map", encodeURIComponent(DIRGE_URL))));
     assert.deepEqual(d.g, [{ n: "DIRGE.gob", h: sha(DIRGE_GOB), b: DIRGE_GOB.length, ep: "Square Dirge", ty: 2, lv: ["dirge.jkl"] }]);
     assert.equal(all.left, 0);
     assert.deepEqual(all.from, { "jkdf2.net": 1 });
