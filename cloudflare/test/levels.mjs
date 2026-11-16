@@ -27,7 +27,8 @@ const { FakeStorage } = await import("./cfstub.mjs");
 // The stub's Response is for the lobby's 101; these routes need the real one.
 globalThis.Response = realResponse;
 const read = await import("../src/levels-read.js");
-const { LevelJob, levelsRoute } = await import("../src/levels.js");
+const parts = await import("../src/levels-parts.js");
+const { LevelJob, levelsRoute, gobTable } = await import("../src/levels.js");
 const { JkUnzip } = await import("../src/vendor/jkunzip.js");
 
 let failed = 0;
@@ -337,6 +338,9 @@ class FakeR2 {
         const o = this.m.get(key);
         return o ? { ...this.obj(key, o), body: undefined } : null;
     }
+    async delete(key) {
+        this.m.delete(key);
+    }
 }
 
 const LIST = `<div class="level-list-screenshot"></div><div class="level-list-item">
@@ -372,9 +376,9 @@ function fakeMassassi(extra) {
     }, extra || {});
     globalThis.fetch = async (url, init) => {
         const u = new URL(url);
-        assert.ok(["https://www.massassi.net", "https://3dpreview.massassi.net"].includes(u.origin), u.origin);
+        assert.ok(["https://www.massassi.net", "https://3dpreview.massassi.net", "https://www.jkdf2.net"].includes(u.origin), u.origin);
         assert.match(init.headers["User-Agent"], /^Mozilla\/5\.0 \(compatible; level-index/);
-        const p = (u.origin.startsWith("https://3d") ? "pv:" : "") + u.pathname + u.search;
+        const p = (u.origin.startsWith("https://3d") ? "pv:" : u.origin.includes("jkdf2") ? "df2:" : "") + u.pathname + u.search;
         seen.push(p);
         const r = routes[p];
         if (r) return r();
@@ -392,7 +396,8 @@ class Ctx {
 }
 
 function newJob(vars) {
-    const env = { LEVELS: new FakeR2(), LEVELS_PACE_MS: "1000", ...vars };
+    // jkdf2.net's part of the job is off unless a check turns it on.
+    const env = { LEVELS: new FakeR2(), LEVELS_PACE_MS: "1000", LEVELS_DF2: "0", ...vars };
     const job = new LevelJob(new Ctx(), env);
     env.LEVELJOB = { idFromName: () => 1, get: () => ({ fetch: r => job.fetch(new Request(r)) }) };
     return { job, env };
@@ -424,7 +429,7 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     ]);
     // Never the download link.
     assert.ok(!seen.some(p => p.includes("/levels/download/")));
-    assert.equal(seen.filter(p => p.includes("num=9999")).length, 6);
+    assert.equal(seen.filter(p => p.includes("num=9999")).length, 8);
     const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
     assert.equal(idx.listed, 2);
     assert.equal(idx.left, 0);
@@ -455,7 +460,7 @@ await check("the job: lists, then each level's page, zip and pictures, then the 
     assert.equal(env.LEVELS.m.get("zip/323.zip").customMetadata.sha256, sha(ZIP));
     assert.ok(env.LEVELS.m.has("shot/323-2"));
     const st = await job.status();
-    assert.equal(st.requests_total, 14);
+    assert.equal(st.requests_total, 16);
     assert.deepEqual(st.not_ready, [{ st: "gone", n: 1 }]);
     const mp = st.by_list.find(b => b.cat === "jkmp");
     assert.deepEqual([mp.previews, mp.previews_left, mp.previews_none], [1, 0, 0]);
@@ -489,14 +494,14 @@ await check("the job asks Massassi again only for what's new", async () => {
     } finally {
         Date.now = realNow;
     }
-    assert.equal(seen.length, 6);
+    assert.equal(seen.length, 8);
     assert.ok(seen.every(p => p.endsWith("?num=9999")));
 });
 
 await check("Massassi busy: everything waits, and the level isn't charged", async () => {
     const seen = fakeMassassi({ "/levels/files/323.shtml": () => new Response("busy", { status: 503 }) });
     const { job } = newJob();
-    for (let i = 0; i < 7; i++)
+    for (let i = 0; i < 9; i++)
         await job.alarm();
     const before = seen.length;
     await job.alarm();
@@ -558,9 +563,11 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal((await get("/levels/z/323.zip/x")).status, 404);
     assert.equal(await get("/levels/../x"), null);
     r = await get("/levels/status");
-    assert.equal(JSON.parse(await r.text()).requests_total, 14);
+    assert.equal(JSON.parse(await r.text()).requests_total, 16);
     r = await get("/levels/p/323.tex.json");
     assert.equal(r.status, 200);
+    // It changes when the job makes a level's parts: kept for an hour.
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=3600");
     assert.deepEqual(JSON.parse(await r.text()).cmp, { 6000: "lev6000.cmp" });
     r = await get("/levels/p/323-0.map.json");
     assert.equal(r.status, 200);
@@ -607,7 +614,51 @@ await check("the 3D data: one GOB of one level goes straight to its map, named f
     assert.deepEqual(idx.levels[0].pv, ["6000"]);
     // The level's colormap isn't in its GOB: the game's own, which the page has.
     const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
-    assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {} });
+    assert.deepEqual(tex, { own: [], cmp: { 6000: "lev6000.cmp" }, pal: {}, parts: [] });
+});
+
+await check("a map not found (the preview let its zip go): the preview's page once more, then the map", async () => {
+    // One GOB of one level: straight to its map, which the preview has only
+    // once its page is opened.
+    const one = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: JKL }]);
+    let opened = false;
+    const seen = fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(makeZip([{ name: "6000.gob", data: one }])),
+        [`pv:/level/?url=${PV_ZIP}`]: () => (opened = true, new Response(VIEWER1)),
+        [pvUrl("map")]: () => opened ? new Response(PV_MAP) : new Response("Not found", { status: 404 }),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), [pvUrl("map"), `pv:/level/?url=${PV_ZIP}`, pvUrl("map"), pvUrl("mat")]);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(idx.levels[0].pv, ["6000"]);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "ok");
+    // A part not found again after that: the level goes without.
+    let n = 0;
+    fakeMassassi({ [pvUrl("map")]: () => (n++, new Response("Not found", { status: 404 })) });
+    job.sql.exec("UPDATE lv SET pv_st = NULL, pv_got = 0 WHERE id = 323");
+    await runUntilIdle(job);
+    assert.equal(n, 1);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+});
+
+await check("levels that went without 3D data are asked for it again, once; mods aren't", async () => {
+    const seen = fakeMassassi({ [pvUrl("map")]: () => new Response("Not found", { status: 404 }) });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
+    job.sql.exec(`INSERT INTO lv (id, cat, game, prio, name, page_st, zip_st, pv_st) VALUES (9, 'jkmod', 'jk1', 1, 'm', 'ok', 'ok', 'none')`);
+    job.sql.exec("DELETE FROM kv WHERE k = 'pv_again'");
+    fakeMassassi();
+    const again = new LevelJob(job.ctx, env);
+    const rows = again.sql.exec("SELECT id, pv_st, pv_maps FROM lv WHERE id IN (9, 323) ORDER BY id").toArray();
+    assert.deepEqual(rows.map(r => [r.id, r.pv_st, r.pv_maps]), [[9, "none", null], [323, null, null]]);
+    await runUntilIdle(again);
+    assert.equal(again.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "ok");
+    // Once only.
+    again.sql.exec("UPDATE lv SET pv_st = 'none' WHERE id = 323");
+    new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_st FROM lv WHERE id = 323").toArray()[0].pv_st, "none");
 });
 
 await check("levels with their 3D data from before get the textures' list, without asking Massassi", async () => {
@@ -684,7 +735,8 @@ await check("no 3D data for a level (404): it's in the library without it", asyn
     const seen = fakeMassassi({ [pvUrl("map")]: () => new Response("Not found", { status: 404 }) });
     const { job, env } = newJob();
     await runUntilIdle(job);
-    assert.ok(!seen.includes(pvUrl("mat")));
+    // Its map not found, the preview's page once more, then the map again.
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:")), [`pv:/level/?url=${PV_ZIP}`, pvUrl("map"), `pv:/level/?url=${PV_ZIP}`, pvUrl("map")]);
     const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
     assert.equal(idx.levels.length, 1);
     assert.equal(idx.levels[0].pv, undefined);
@@ -776,6 +828,731 @@ await check("LEVELS_FETCH = \"0\" stops the job", async () => {
     assert.equal(await job.ctx.storage.getAlarm(), null);
     await job.alarm();
     assert.equal(seen.length, 0);
+});
+
+// ---- The parts of models the preview leaves out (src/levels-parts.js)
+
+// A model of two parts side by side at the top of its tree, as The Death
+// Star's Falcon has nine: the preview keeps the last (part1), the job makes
+// the first. part0's three faces: one of the preview's textures, one the
+// level ships, one of the game's.
+const model3do = (name0, name1) => `# a model
+SECTION: HEADER
+3DO 2.1
+
+SECTION: MODELRESOURCE
+MATERIALS 3
+0:      known.mat
+1:      OwnMat.mat
+2:      game.mat
+
+SECTION: GEOMETRYDEF
+RADIUS 1.0
+INSERT OFFSET 0.0 0.0 0.0
+GEOSETS 1
+GEOSET 0
+MESHES 2
+
+MESH 0
+NAME ${name0}
+RADIUS 1.0
+GEOMETRYMODE 4
+LIGHTINGMODE 3
+TEXTUREMODE 3
+VERTICES 3
+0:  1.000000  0.000000  0.000000  0.0000
+1:  0.000000  1.000000  0.000000  0.0000
+2:  0.000000  0.000000  1.000000  0.0000
+TEXTURE VERTICES 3
+0:  0.000000  0.000000
+1:  32.000000  0.000000
+2:  32.000000  16.000000
+VERTEX NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+FACES 3
+#  num:  material:   type:  geo:  light:   tex:  extralight:  verts:
+0:  0  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+1:  1  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+2:  2  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+FACE NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+
+MESH 1
+NAME ${name1}
+RADIUS 1.0
+GEOMETRYMODE 4
+LIGHTINGMODE 3
+TEXTUREMODE 3
+VERTICES 3
+0:  0.000000  0.000000  0.000000  0.0000
+1:  2.000000  0.000000  0.000000  0.0000
+2:  0.000000  2.000000  0.000000  0.0000
+TEXTURE VERTICES 3
+0:  0.000000  0.000000
+1:  16.000000  0.000000
+2:  0.000000  8.000000
+VERTEX NORMALS
+0:  0.0 0.0 1.0
+1:  0.0 0.0 1.0
+2:  0.0 0.0 1.0
+FACES 1
+0:  0  0x0  4  3  3  0.0000  3  0, 0  1, 1  2, 2
+FACE NORMALS
+0:  0.0 0.0 1.0
+
+SECTION: HIERARCHYDEF
+HIERARCHY NODES 2
+0:  0x0  0x1  0  -1  -1  -1  0  0.500000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.250000  ${name0}
+1:  0x0  0x1  1  -1  -1  -1  0  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  0.000000  ${name1}
+`;
+// The same model with one part at the top: nothing cut.
+const ONE_ROOT = model3do("a", "b").replace(/\n1:  0x0  0x1  1  -1 /, "\n1:  0x0  0x1  1  0 ");
+// Falcon at (1, 2, 3) turned 90 to the left; the tree has the name of one of
+// the games' own (the preview draws the game's); falcon2 is in a sector the
+// level doesn't have; the box has one part at the top.
+const PARTS_JKL = `SECTION: JK
+Version 1
+
+SECTION: MATERIALS
+World materials 1
+0:      dflt.mat        1.000000        1.000000
+end
+
+SECTION: GEORESOURCE
+World Colormaps 1
+0:      lev6000.cmp
+
+SECTION: SECTORS
+World sectors 1
+SECTOR  0
+FLAGS   0x0
+
+SECTION: TEMPLATES
+World templates 3
+falcon          none            model3d=falcon.3do
+tree            none            model3d=tree.3do
+box             none            model3d=box.3do
+end
+
+SECTION: THINGS
+World things 4
+#num template    name     X        Y        Z        Pitch    Yaw      Roll     Sector
+0:   falcon      falcon   1.000000 2.000000 3.000000 0.000000 90.000000 0.000000 0  thingflags=0x0
+1:   tree        tree     0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0
+2:   falcon      falcon2  0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 5
+3:   box         box      0.000000 0.000000 0.000000 0.000000 0.000000 0.000000 0
+end
+`;
+// A MAT of 64 x 32: "MAT ", version 50, type 2 (textures), one texture.
+const OWN_MAT = new Uint8Array(76 + 40 + 24 + 64 * 32);
+OWN_MAT.set(enc("MAT "));
+new DataView(OWN_MAT.buffer).setUint32(4, 50, true);
+new DataView(OWN_MAT.buffer).setUint32(8, 2, true);
+new DataView(OWN_MAT.buffer).setUint32(12, 1, true);
+new DataView(OWN_MAT.buffer).setUint32(116, 64, true);
+new DataView(OWN_MAT.buffer).setUint32(120, 32, true);
+// A PNG's start, as far as its size: 32 x 16.
+const png = (w, h) => {
+    const b = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]).copy(b);
+    b.write("IHDR", 12, "latin1");
+    b.writeUInt32BE(w, 16);
+    b.writeUInt32BE(h, 20);
+    return "data:image/png;base64," + b.toString("base64");
+};
+const PARTS_MAT = [{ name: "3do/mat/dflt.mat", data: png(8, 8) }, { name: "3do/mat/known.mat", data: png(32, 16) }];
+const PARTS_GOB = makeGob([
+    { name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+    { name: "3do\\falcon.3do", data: model3do("hull", "sensors") }, { name: "3do\\tree.3do", data: model3do("trunk", "leaves") },
+    { name: "3do\\box.3do", data: ONE_ROOT }, { name: "3do\\mat\\OwnMat.mat", data: OWN_MAT },
+    { name: "misc\\cmp\\lev6000.cmp", data: CMP },
+]);
+const partsFiles = () => parts.gobFinder([PARTS_GOB], read.parseGob);
+const OFFICIAL = new Set(["tree"]);
+// The falcon's hull: placed by its node's offset (0.5, 0, 0) and pivot
+// (0, 0, 0.25), then by the thing: (x, y, z) -> (-y, x, z) + (1, 2, 3).
+const HULL = [[1, 3.5, 3.25], [0, 2.5, 3.25], [1, 2.5, 4.25]];
+
+await check("parts: a model's top-level parts but the last, placed and textured as the preview does the rest", async () => {
+    const p = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL);
+    assert.equal(p.v, 1);
+    assert.equal(p.base, 2);
+    // The level's own MAT, with its size; the game's, raw.
+    assert.deepEqual(p.mats, [{ name: "3do/mat/OwnMat.mat", mat: Buffer.from(OWN_MAT).toString("base64") }, { name: "mat/game.mat", raw: true }]);
+    assert.deepEqual(p.model_surfaces, [
+        // The preview's known.mat, 32 x 16.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [1, 0]], [HULL[2], [1, 1]]], material: 1 },
+        // The level's, 64 x 32.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [0.5, 0]], [HULL[2], [0.5, 0.5]]], material: 2 },
+        // The game's: the page divides by its size.
+        { vertices: [[HULL[0], [0, 0]], [HULL[1], [32, 0]], [HULL[2], [32, 16]]], material: 3 },
+    ]);
+});
+
+await check("parts: the one the preview keeps, made the same way (what the checks against its data compare)", async () => {
+    const p = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "kept", OFFICIAL);
+    assert.deepEqual(p.mats, []);
+    assert.deepEqual(p.model_surfaces, [{ vertices: [[[1, 2, 3], [0, 0]], [[1, 4, 3], [0.5, 0]], [[-1, 2, 3], [0, 0.5]]], material: 1 }]);
+});
+
+await check("parts: none for the games' own models, one-part models, or a level without models", async () => {
+    // Without the official list, the tree is made too (at 0, 0, 0, unturned).
+    const all = parts.levelParts(partsFiles(), "jkl/6000.jkl", PARTS_MAT, "left", null);
+    assert.equal(all.model_surfaces.length, 6);
+    assert.deepEqual(all.model_surfaces[3].vertices[0][0], [1.5, 0, 0.25]);
+    const files = parts.gobFinder([makeGob([{ name: "jkl\\6000.jkl", data: PARTS_JKL.replace(/falcon\.3do|tree\.3do/g, "box.3do") },
+                                            { name: "3do\\box.3do", data: ONE_ROOT }])], read.parseGob);
+    assert.equal(parts.levelParts(files, "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL), null);
+    assert.equal(parts.levelParts(partsFiles(), "jkl/other.jkl", PARTS_MAT, "left", OFFICIAL), null);
+    // A model the preview can't read (no HIERARCHYDEF) it has none of.
+    const bad = parts.gobFinder([makeGob([{ name: "jkl\\6000.jkl", data: PARTS_JKL },
+                                          { name: "3do\\falcon.3do", data: model3do("a", "b").replace(/SECTION: HIERARCHYDEF[^]*/, "") }])], read.parseGob);
+    assert.equal(parts.levelParts(bad, "jkl/6000.jkl", PARTS_MAT, "left", OFFICIAL), null);
+});
+
+await check("parts: the job makes them with the textures' step, and the route sends them", async () => {
+    const zip = makeZip([{ name: "6000.gob", data: PARTS_GOB }]);
+    fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(zip, { headers: { "Content-Length": String(zip.length) } }),
+        [pvUrl("mat")]: () => new Response(JSON.stringify(PARTS_MAT)),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    const tex = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes));
+    assert.deepEqual(tex.parts, [0]);
+    const o = env.LEVELS.m.get("pv/323-0.parts.json");
+    assert.equal(o.httpMetadata.contentEncoding, "gzip");
+    const p = JSON.parse(gunzip(o.bytes));
+    assert.equal(p.base, 2);
+    assert.equal(p.model_surfaces.length, 3);
+    assert.deepEqual(p.model_surfaces[0].vertices[0][0], HULL[0]);
+    assert.equal(job.kv("last_parts_error"), null);
+    const get = path => levelsRoute(new Request("https://beta.example" + path), env, new URL("https://beta.example" + path));
+    const r = await get("/levels/p/323-0.parts.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Encoding"), "gzip");
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.deepEqual(JSON.parse(gunzip(new Uint8Array(await r.arrayBuffer()))), p);
+    assert.equal((await get("/levels/p/323-1.parts.json")).status, 404);
+    // The textures' step again, with nothing cut now: its parts.json goes.
+    job.sql.exec("UPDATE lv SET pv_tex = 0");
+    const gob1 = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+                            { name: "3do\\falcon.3do", data: ONE_ROOT }]);
+    const zip2 = makeZip([{ name: "6000.gob", data: gob1 }]);
+    await env.LEVELS.put("zip/323.zip", zip2, { customMetadata: { sha256: sha(zip2) } });
+    await runUntilIdle(job);
+    assert.ok(!env.LEVELS.m.has("pv/323-0.parts.json"));
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes)).parts, []);
+});
+
+await check("parts: a map the job can't read is noted, and the rest of the step goes on", async () => {
+    const gob = makeGob([{ name: "episode.jk", data: EPISODE.replace(/\n20:.*\n/, "\n") }, { name: "jkl\\6000.jkl", data: PARTS_JKL },
+                         { name: "3do\\falcon.3do", data: model3do("hull", "sensors") }]);
+    const zip = makeZip([{ name: "6000.gob", data: gob }]);
+    fakeMassassi({
+        "/media/levels/files/jkmp/6000.zip": () => new Response(zip, { headers: { "Content-Length": String(zip.length) } }),
+        [pvUrl("mat")]: () => new Response("{ not json"),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    // The preview's mat.json wasn't JSON: no 3D data, so no parts.
+    assert.ok(!env.LEVELS.m.has("pv/323-0.parts.json"));
+    // A mat.json in the bucket that isn't gzip: noted, tex.json still written.
+    job.sql.exec("UPDATE lv SET pv_st = 'ok', pv_maps = ?, pv_tex = 0, tries = 0, retry_at = NULL WHERE id = 323", JSON.stringify([{ n: "6000", e: 0 }]));
+    await env.LEVELS.put("pv/323-0.mat.json", "[]");
+    await runUntilIdle(job);
+    assert.match(job.kv("last_parts_error"), /level 323 map 0/);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("pv/323.tex.json").bytes)).parts, []);
+});
+
+await check("parts: once, every level with 3D data goes through the textures' step again", async () => {
+    fakeMassassi();
+    const { job, env } = newJob();
+    await runUntilIdle(job);
+    assert.equal(job.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+    job.sql.exec("DELETE FROM kv WHERE k = 'tex_v'");
+    let again = new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 0);
+    await runUntilIdle(again);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+    again = new LevelJob(job.ctx, env);
+    assert.equal(again.sql.exec("SELECT pv_tex FROM lv WHERE id = 323").toArray()[0].pv_tex, 1);
+});
+
+
+// ---- Mods
+
+const DL_PAGE = id => `<div id="content"><h1>Black and Yellow Flame Saber</h1>
+    <meta http-equiv="Refresh" content="2; URL=/media/levels/files/jkmod/blackyellow.zip">
+    <p style="margin: 1em;">Your download should begin automatically in 2 seconds. If it doesn't, please <a
+            href="/media/levels/files/jkmod/blackyellow.zip">click here</a>.</p></div>`;
+
+await check("mods: the zip's address on a mod's download page", async () => {
+    assert.equal(read.downloadZip(DL_PAGE(634)), "https://www.massassi.net/media/levels/files/jkmod/blackyellow.zip");
+    // The link alone will do.
+    assert.equal(read.downloadZip('<a href="/media/levels/files/motsmod/x%20y.zip">click here</a>'),
+                 "https://www.massassi.net/media/levels/files/motsmod/x%20y.zip");
+    // Only Massassi's own files.
+    assert.equal(read.downloadZip('<meta http-equiv="Refresh" content="0; URL=https://evil.example/media/levels/files/jkmod/a.zip">'), null);
+    assert.equal(read.downloadZip('<meta http-equiv="Refresh" content="0; URL=/levels/files/634.shtml">'), null);
+    assert.equal(read.downloadZip(""), null);
+});
+
+await check("mods: what goes into the mod's folder, and what's an episode", async () => {
+    const e = names => names.map(n => ({ name: n, dir: n.endsWith("/") }));
+    let plan = read.modPlan(e(["SBX/SBX-JK v31.gob", "SBX/readme.txt", "SBX/SBX Launcher.exe", "SBX/shot.jpg"]), "gob", []);
+    assert.deepEqual(plan.files, [["SBX/SBX-JK v31.gob", "SBX-JK v31.gob"]]);
+    assert.deepEqual(plan.left.programs, ["SBX/SBX Launcher.exe"]);
+    assert.equal(plan.left.other, 0);
+    // Loose files go under the first of the game's folders in their path;
+    // a second copy somewhere else is left out.
+    plan = read.modPlan(e(["Saber/", "Saber/Resource/cog/a.cog", "Saber/Resource/3do/mat/b.mat", "Saber/Resource/misc/pup/c.pup",
+                           "Saber/Optional/cog/a.cog", "__MACOSX/Saber/._a.cog", "Saber/notes.doc", "Saber/x.dat"]), "gob", []);
+    assert.deepEqual(plan.files, [["Saber/Resource/cog/a.cog", "cog/a.cog"], ["Saber/Resource/3do/mat/b.mat", "3do/mat/b.mat"],
+                                  ["Saber/Resource/misc/pup/c.pup", "misc/pup/c.pup"]]);
+    assert.equal(plan.left.other, 2);
+    assert.deepEqual(plan.left.others, ["Saber/x.dat", "Saber/Optional/cog/a.cog"]);
+    // A GOB with an episode.jk goes into episode/, the rest into the mod.
+    plan = read.modPlan(e(["swoop.gob", "Resource/swoopres.gob", "a.goo"]), "gob", ["swoop.gob"]);
+    assert.deepEqual(plan.files, [["Resource/swoopres.gob", "swoopres.gob"]]);
+    assert.deepEqual(plan.episodes, ["swoop.gob"]);
+    assert.equal(plan.left.other, 1);
+    // MotS: GOOs.
+    plan = read.modPlan(e(["mod.goo", "mod.gob"]), "goo", []);
+    assert.deepEqual(plan.files, [["mod.goo", "mod.goo"]]);
+});
+
+await check("mods: their kind, guessed from their files", async () => {
+    assert.equal(read.modKind(["cog/force_lightning.cog", "cog/weap_bryar.cog", "3do/bryv.3do"], []), "gameplay");
+    assert.equal(read.modKind(["3do/ky.3do", "3do/mat/kyhead.mat", "cog/kyle.cog"], []), "characters");
+    assert.equal(read.modKind(["mat/dflt.mat", "ui/bm/bkmain.bm"], []), "graphics");
+    assert.equal(read.modKind(["sound/thrmlpu2.wav"], []), "other");
+    assert.equal(read.modKind(["jkl/01narshadda.jkl", "cog/x.cog"], [{ ty: 1 }]), "campaign");
+    assert.equal(read.modKind(["jkl/swoop.jkl"], [{ ty: 2 }]), "gameplay");
+    assert.equal(read.modKind(["3do/a.3do"], [], "JK HD Models.gob"), "graphics");
+});
+
+await check("mods: versions of one mod go together", async () => {
+    const g = read.modGroup;
+    assert.equal(g("Saber Battle X - JK v3.1", "SBX Team"), g("Saber Battle X - JK v1.0", "SBX Team"));
+    assert.equal(g("James Bond 007 v2.0 Beta", "Q"), g("James Bond 007", "Q"));
+    assert.equal(g("Power Weapons Pack 2 (preview)", "Z"), g("Power Weapons Pack 2", "Z"));
+    assert.notEqual(g("Jango Fett", "One"), g("Jango Fett", "Two"));
+    assert.notEqual(g("Ultimate Skin Pack 2", "A"), g("Ultimate Skin Pack 3", "A"));
+});
+
+const MOD_LIST = `<div class="level-list-screenshot"></div><div class="level-list-item">
+    <strong><a href="/levels/files/634.shtml">Black and Yellow Flame Saber</a></strong><br>
+    <span class="mute">By:</span> Vindicare<br><span class="mute">Added:</span> 2000-06-02<br></div>
+    <div class="level-list-details"><span class="mute">Downloads:</span> 9000</div>`;
+const MOD_PAGE = PAGE.replace(/323/g, "634").replace("6000 Block</h1>", "Black and Yellow Flame Saber</h1>")
+    .replace('href="/levels/jkmp/">Jedi Knight Multiplayer Level', 'href="/levels/jkmod/">Jedi Knight Mod')
+    .replace(/<div class="level-3d-preview">[\s\S]*?<\/iframe>\s*<\/div>/, "")
+    .replace("226.0&nbsp;KiB", "2.9&nbsp;KiB");
+const MOD_GOB = makeGob([{ name: "cog\\kyle.cog", data: "# kyle" }, { name: "cog\\force_lightning.cog", data: "# lightning" },
+                         { name: "3do\\saberyellow.3do", data: "3DO" }]);
+const MOD_ZIP = makeZip([{ name: "Flame Saber/flame.gob", data: MOD_GOB, date: "1998-03-01" },
+                         { name: "Flame Saber/Resource/mat/saberyellow0.mat", data: "MAT ", date: "1998-03-02" },
+                         { name: "Flame Saber/readme.txt", data: "Flame saber by Vindicare. Put it in Resource.", date: "1998-03-02" },
+                         { name: "Flame Saber/install.bat", data: "copy *.* ..", date: "1998-03-02" }]);
+
+function fakeMods(extra) {
+    return fakeMassassi(Object.assign({
+        "/levels/jkmod/?num=9999": () => new Response(MOD_LIST),
+        "/levels/files/634.shtml": () => new Response(MOD_PAGE),
+        "/levels/download/634/": () => new Response(DL_PAGE(634)),
+        "/media/levels/files/jkmod/blackyellow.zip": () => new Response(MOD_ZIP),
+        "/media/levels/screenshots/634_1.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 3])),
+        "/media/levels/screenshots/634_2.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 4])),
+    }, extra || {}));
+}
+
+await check("mods: page, download page (once), zip and pictures, in an index of their own", async () => {
+    const seen = fakeMods();
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    const mine = seen.filter(p => /634|jkmod|blackyellow/.test(p));
+    assert.deepEqual(mine, ["/levels/jkmod/?num=9999", "/levels/files/634.shtml", "/levels/download/634/",
+                            "/media/levels/files/jkmod/blackyellow.zip",
+                            "/media/levels/screenshots/634_1.jpg", "/media/levels/screenshots/634_2.jpg"]);
+    // Never the 3D preview for a mod.
+    assert.ok(!seen.some(p => p.startsWith("pv:") && p.includes("blackyellow")));
+    // The levels' index has only levels.
+    const lv = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1.json").bytes));
+    assert.deepEqual(lv.levels.map(l => l.id), [323]);
+    assert.equal(lv.listed, 2);
+    const idx = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes));
+    assert.equal(idx.listed, 1);
+    assert.equal(idx.left, 0);
+    assert.equal(idx.mods.length, 1);
+    const m = idx.mods[0];
+    assert.deepEqual([m.id, m.k, m.t, m.a, m.sz, m.dl, m.sh, m.z, m.h, m.n, m.ep, m.x, m.gp],
+                     [634, "gameplay", "Black and Yellow Flame Saber", "Brian Lozier", MOD_ZIP.length, 9000, 2, "blackyellow.zip",
+                      sha(MOD_ZIP), 4, undefined, 1, undefined]);
+    assert.equal(m.gk, read.modGroup(m.t, m.a));
+    assert.deepEqual(m.g, [{ n: "Flame Saber/flame.gob", h: sha(MOD_GOB), b: MOD_GOB.length }]);
+    // The files' dates, as no readme gives one.
+    assert.equal(m.rel, "1998-03-02");
+    const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/634.json").bytes));
+    assert.deepEqual(d.mod.plan, { inner: null, episodes: [],
+                                   files: [["Flame Saber/flame.gob", "flame.gob"], ["Flame Saber/Resource/mat/saberyellow0.mat", "mat/saberyellow0.mat"]] });
+    assert.deepEqual(d.mod.inside["Flame Saber/flame.gob"], [["cog/kyle.cog", 6], ["cog/force_lightning.cog", 11], ["3do/saberyellow.3do", 3]]);
+    assert.deepEqual(d.mod.programs, ["Flame Saber/install.bat"]);
+    assert.equal(d.mod.kind, "gameplay");
+    assert.equal(d.texts[0].n, "Flame Saber/readme.txt");
+    const st = await job.status();
+    assert.equal(st.download_pages, 1);
+    assert.deepEqual(st.mod_kinds, [{ game: "jk1", kind: "gameplay", n: 1 }]);
+    assert.equal(st.by_list.find(b => b.cat === "jkmod").zips, 1);
+    // A day later, and when its page is read again: no download page again.
+    seen.length = 0;
+    const realNow = Date.now;
+    Date.now = () => realNow() + 100 * 24 * 3600 * 1000;
+    try {
+        await runUntilIdle(job, 80);
+    } finally {
+        Date.now = realNow;
+    }
+    assert.ok(seen.includes("/levels/files/634.shtml"));
+    assert.ok(!seen.includes("/levels/download/634/"));
+    assert.equal((await job.status()).download_pages, 1);
+});
+
+await check("mods: a zip of another size on its page is asked for again", async () => {
+    const seen = fakeMods();
+    const { job } = newJob();
+    await runUntilIdle(job, 80);
+    seen.length = 0;
+    fakeMods({ "/levels/files/634.shtml": () => new Response(MOD_PAGE.replace("2.9&nbsp;KiB", "3.1&nbsp;KiB")) });
+    const realNow = Date.now;
+    Date.now = () => realNow() + 100 * 24 * 3600 * 1000;
+    try {
+        await runUntilIdle(job, 80);
+    } finally {
+        Date.now = realNow;
+    }
+    assert.equal((await job.status()).download_pages, 2);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "ok");
+});
+
+await check("mods: one with nothing for the game, or no zip on its download page, stays out", async () => {
+    fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(makeZip([{ name: "setup.exe", data: "MZ" },
+                                                                                        { name: "readme.txt", data: "run setup" }])) });
+    let { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "nomod");
+    assert.equal(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods.length, 0);
+    fakeMods({ "/levels/download/634/": () => new Response("<p>Sorry.</p>") });
+    ({ job, env } = newJob());
+    await runUntilIdle(job, 80);
+    const row = job.sql.exec("SELECT zip_st, err FROM lv WHERE id = 634").toArray()[0];
+    assert.deepEqual([row.zip_st, row.err], ["none", "no zip address on its download page"]);
+});
+
+await check("mods: loose files only, and a zip inside the zip", async () => {
+    const loose = makeZip([{ name: "cog/weap_bryar.cog", data: "# b" }, { name: "cog/weap_rifle.cog", data: "# r" }]);
+    fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(makeZip([{ name: "readme.txt", data: "x" },
+                                                                                        { name: "mod.zip", data: loose, store: true }])) });
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    assert.deepEqual(job.sql.exec("SELECT zip_st, err FROM lv WHERE id = 634").toArray()[0], { zip_st: "ok", err: null });
+    const d = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/634.json").bytes));
+    assert.deepEqual(d.mod.plan, { inner: "mod.zip", episodes: [], files: [["cog/weap_bryar.cog", "cog/weap_bryar.cog"], ["cog/weap_rifle.cog", "cog/weap_rifle.cog"]] });
+    const m = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods[0];
+    assert.deepEqual([m.k, m.n], ["gameplay", 2]);
+});
+
+await check("mods: a graphics pack, and MotS's list", async () => {
+    const pack = makeZip([{ name: "JK HD Models.gob", data: makeGob([{ name: "3do\\ky.3do", data: "3DO" }]) }]);
+    const MOTS = MOD_LIST.replace(/634/g, "844");
+    fakeMods({
+        "/media/levels/files/jkmod/blackyellow.zip": () => new Response(pack),
+        "/levels/motsmod/?num=9999": () => new Response(MOTS),
+        "/levels/files/844.shtml": () => new Response(MOD_PAGE.replace(/634/g, "844")),
+        "/levels/download/844/": () => new Response(DL_PAGE(844).replace(/jkmod\/blackyellow/g, "motsmod/gold")),
+        "/media/levels/files/motsmod/gold.zip": () => new Response(makeZip([{ name: "gold.goo", data: makeGob([{ name: "cog\\a.cog", data: "a" }]) }])),
+    });
+    const { job, env } = newJob();
+    await runUntilIdle(job, 120);
+    const jk = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/jk1-mods.json").bytes)).mods[0];
+    assert.deepEqual([jk.k, jk.gp], ["graphics", "JK HD Models.gob"]);
+    const mots = JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("index/mots-mods.json").bytes)).mods[0];
+    assert.deepEqual([mots.id, mots.k, mots.n], [844, "gameplay", 1]);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(env.LEVELS.m.get("detail/844.json").bytes)).mod.plan.files, [["gold.goo", "gold.goo"]]);
+});
+
+await check("mods: a big GOB's file table, read as it streams by", async () => {
+    const gob = makeGob([{ name: "cog\\a.cog", data: "x".repeat(5000) }, { name: "3do\\b.3do", data: "y".repeat(7000) }]);
+    const t = gobTable();
+    const chunks = [];
+    for (let i = 0; i < gob.length; i += 1000)
+        chunks.push(gob.subarray(i, i + 1000));
+    await new Blob(chunks).stream().pipeThrough(t.stream).pipeTo(new WritableStream());
+    assert.deepEqual(t.files(), [{ name: "cog/a.cog", size: 5000 }, { name: "3do/b.3do", size: 7000 }]);
+    const notGob = gobTable();
+    await new Blob([enc("not a gob at all")]).stream().pipeThrough(notGob.stream).pipeTo(new WritableStream());
+    assert.equal(notGob.files(), null);
+});
+
+await check("mods: the route serves each game's mods", async () => {
+    fakeMods();
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    let r = await get("/levels/mods/jk1.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(JSON.parse(await r.text()).mods[0].id, 634);
+    r = await get("/levels/mods/mots.json");
+    assert.equal(r.status, 200);
+    assert.deepEqual(JSON.parse(await r.text()).mods, []);
+    assert.equal((await get("/levels/mods/df2.json")).status, 404);
+    // Its zip, details and pictures go by the levels' routes.
+    assert.equal(sha(new Uint8Array(await (await get("/levels/z/634.zip")).arrayBuffer())), sha(MOD_ZIP));
+    assert.equal(JSON.parse(await (await get("/levels/d/634.json")).text()).mod.kind, "gameplay");
+    assert.equal((await get("/levels/s/634-2.jpg")).status, 200);
+});
+
+// ---- jkdf2.net: the levels in its archive that Massassi doesn't have
+
+// A folder of jkdf2.net's archive (Directory Lister), as its page has it.
+function df2Folder(dir, files) {
+    const li = (name, href, size, date, icon) => `
+                                    <li data-name="${name}" data-href="${href}">
+                        <a href="${href}" class="clearfix" data-name="${name}">
+                            <div class="row">
+                                <span class="file-name col-md-7 col-sm-6 col-xs-9">
+                                    <i class="fa ${icon} fa-fw"></i>
+                                    ${name}                                </span>
+                                <span class="file-size col-md-2 col-sm-2 col-xs-3 text-right">
+                                    ${size}                                </span>
+                                <span class="file-modified col-md-3 col-sm-4 hidden-xs text-right">
+                                    ${date}                                </span>
+                            </div>
+                        </a>
+                    </li>`;
+    return `<ul id="directory-listing" class="nav nav-pills nav-stacked">` +
+        li("..", "https://www.jkdf2.net/JKBot/JKArchive/?dir=JKDF2%2FJKDF2%2FGame%20Files", "-", "2021-12-07 04:27:19", "fa-level-up") +
+        li("info", `?dir=JKDF2/JKDF2/Game%20Files/${dir}/info`, "-", "2021-12-07 04:27:19", "fa-folder") +
+        files.map(f => li(f.name.replace(/&/g, "&amp;"), `JKDF2/JKDF2/Game%20Files/${dir}/${encodeURIComponent(f.name)}`,
+                          f.size, f.date || "2011-05-28 17:41:37", "fa-file-archive-o")).join("") + "</ul>";
+}
+const kb = b => (b.length / 1024).toFixed(2) + "KB";
+const DF2_DIR = dir => `df2:/JKBot/JKArchive/?dir=JKDF2/JKDF2/Game%20Files/${dir}`;
+const DF2_FILE = (dir, name) => `df2:/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/${dir}/${encodeURIComponent(name)}`;
+
+const DIRGE_GOB = makeGob([{ name: "episode.jk", data: `"Square Dirge"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL dirge.jkl 0 0 -1 -1\n` },
+                           { name: "jkl\\dirge.jkl", data: "SECTION: JK\n" }]);
+const DIRGE_ZIP = makeZip([{ name: "DIRGE.gob", data: DIRGE_GOB, date: "2001-03-02" },
+                           { name: "DIRGE_Readme.txt", data: "Square Dirge\r\nAuthor: Some Body (some@body.example)\r\nDate of Release : March 3, 2001\r\n",
+                             date: "2001-03-03" }]);
+const QAT_GOB = makeGob([{ name: "episode.jk", data: `"Qat Crystac"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL qat.jkl 0 0 -1 -1\n` },
+                         { name: "jkl\\qat.jkl", data: "SECTION: JK\n" }]);
+const QAT_ZIP = makeZip([{ name: "Qat.goo", data: QAT_GOB, date: "2000-08-01" }]);
+// Massassi's 6000 Block under another name: the same GOB.
+const COPY_ZIP = makeZip([{ name: "six.gob", data: GOB, date: "1999-10-15" }]);
+
+function fakeDf2(extra) {
+    // Massassi's preview fetches a zip from jkdf2.net only when its page is
+    // opened: the map and textures aren't found before.
+    const dirge = encodeURIComponent(DIRGE_URL);
+    let opened = false;
+    const viewer = `<script>var maps = JSON.parse("[[\\"dirge\\", \\"?url=${DIRGE_URL}\\u0026episode=0\\"]]");</script>`;
+    const notYet = () => new Response("Not found", { status: 404 });
+    return fakeMassassi(Object.assign({
+        [`pv:/level/?url=${dirge}`]: () => (opened = true, new Response(viewer)),
+        [DF2_DIR("jkmp")]: () => new Response(df2Folder("jkmp", [
+            // Massassi's, and a second download of it: never asked for.
+            { name: "6000.zip", size: kb(ZIP) }, { name: "6000[1].zip", size: kb(ZIP) },
+            { name: "DIRGE.zip", size: kb(DIRGE_ZIP), date: "2014-12-01 10:13:09" },
+            // The same file again in the archive.
+            { name: "DIRGE (2).zip", size: kb(DIRGE_ZIP) },
+            { name: "copy6000.zip", size: kb(COPY_ZIP) },
+            { name: "huge & big.zip", size: "40.00MB" },
+            { name: "notes.txt", size: "1.00KB" },
+        ])),
+        [DF2_DIR("jkctf")]: () => new Response(df2Folder("jkctf", [])),
+        [DF2_DIR("motsmp")]: () => new Response(df2Folder("motsmp", [{ name: "qat.zip", size: kb(QAT_ZIP) }])),
+        [DF2_DIR("motskfy")]: () => new Response(df2Folder("motskfy", [])),
+        [DF2_FILE("jkmp", "DIRGE.zip")]: () => new Response(DIRGE_ZIP, { headers: { "Content-Length": String(DIRGE_ZIP.length) } }),
+        [DF2_FILE("jkmp", "copy6000.zip")]: () => new Response(COPY_ZIP),
+        [DF2_FILE("motsmp", "qat.zip")]: () => new Response(QAT_ZIP),
+        [pvUrl("map", dirge)]: () => opened ? new Response(PV_MAP) : notYet(),
+        [pvUrl("mat", dirge)]: () => opened ? new Response(PV_MAT) : notYet(),
+    }, extra || {}));
+}
+const idxOf = (env, key) => JSON.parse(new TextDecoder().decode(env.LEVELS.m.get(key).bytes));
+// Massassi's 3D preview reads jkdf2.net's zips as it reads Massassi's.
+const DIRGE_URL = "https://www.jkdf2.net/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/jkmp/DIRGE.zip";
+
+await check("jkdf2.net: a folder of its archive, names, sizes, readme authors and titles", async () => {
+    const files = read.parseArchive(df2Folder("motskfy", [{ name: "KFY.zip", size: "380.21KB" }, { name: "a & b.zip", size: "2.74MB", date: "-" }]));
+    assert.deepEqual(files, [
+        { name: "KFY.zip", href: "JKDF2/JKDF2/Game%20Files/motskfy/KFY.zip", size: "380.21KB", date: "2011-05-28 17:41:37" },
+        { name: "a & b.zip", href: "JKDF2/JKDF2/Game%20Files/motskfy/a%20%26%20b.zip", size: "2.74MB", date: null },
+    ]);
+    assert.equal(read.zipKey("DPclean[1].zip"), "dpclean.zip");
+    assert.equal(read.zipKey("Dirge (2).ZIP"), "dirge.zip");
+    assert.equal(read.zipKey("v2 (final).zip"), "v2 (final).zip");
+    assert.equal(read.sizeSlack("380.21KB"), 7);
+    assert.equal(read.sizeSlack("226.0 KiB"), 53);
+    assert.equal(read.sizeSlack(""), 0);
+    assert.equal(read.readmeAuthor([{ text: "Title: Foo\nAuthor(s) : Brian Lozier <brian@example.com>\n" }]), "Brian Lozier");
+    assert.equal(read.readmeAuthor([{ text: null }, { text: "A level\nCreated by: PSXPat\n" }]), "PSXPat");
+    assert.equal(read.readmeAuthor([{ text: "by the way, have fun" }]), null);
+    assert.equal(read.df2Title("  Square   Dirge ", "DIRGE.zip"), "Square Dirge");
+    assert.equal(read.df2Title(null, "nicks_bridge.zip"), "nicks bridge");
+});
+
+await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of their own", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    const df2 = seen.filter(p => p.startsWith("df2:"));
+    // Each folder, then the zips: never Massassi's (by name, or by a second
+    // download's name), nor the big one, nor a second copy.
+    assert.deepEqual(df2.slice(0, 4), ["jkmp", "jkctf", "motsmp", "motskfy"].map(DF2_DIR));
+    assert.deepEqual(df2.slice(4).sort(), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip"), DF2_FILE("motsmp", "qat.zip")].sort());
+    // Jedi Knight's only once Massassi's pages for it have all been read.
+    const lastPage = seen.indexOf("/levels/files/400.shtml");
+    assert.ok(lastPage > 0);
+    assert.ok(seen.indexOf(DF2_FILE("jkmp", "DIRGE.zip")) > lastPage);
+    assert.ok(seen.indexOf(DF2_FILE("jkmp", "copy6000.zip")) > lastPage);
+    // The levels' index is Massassi's alone, as before.
+    const jk = idxOf(env, "index/jk1.json");
+    assert.deepEqual(jk.levels.map(l => l.id), [323]);
+    assert.equal(jk.listed, 2);
+    // Both, in the other.
+    const all = idxOf(env, "index/jk1-all.json");
+    assert.deepEqual(all.sources, ["https://www.massassi.net", "https://www.jkdf2.net"]);
+    assert.deepEqual(all.levels.map(l => l.t), ["6000 Block", "Square Dirge"]);
+    const d = all.levels[1];
+    assert.ok(d.id > 1000000);
+    assert.deepEqual([d.o, d.k, d.a, d.rel, d.rp, d.src, d.z, d.h, d.sz, d.sh], ["jkdf2.net", "mp", "Some Body", "2001-03-03", "d", "r",
+                                                                              "DIRGE.zip", sha(DIRGE_ZIP), DIRGE_ZIP.length, 0]);
+    // No Massassi date, rating or downloads; its 3D view from Massassi's preview.
+    assert.deepEqual([d.add, d.r, d.v, d.dl], [undefined, undefined, undefined, undefined]);
+    assert.deepEqual(d.pv, ["dirge"]);
+    assert.equal(gunzip(env.LEVELS.m.get(`pv/${d.id}-0.map.json`).bytes), PV_MAP);
+    assert.ok(env.LEVELS.m.has(`pv/${d.id}.tex.json`));
+    // The preview's page first: a jkdf2.net zip is fetched by the preview only then.
+    const dirge = encodeURIComponent(DIRGE_URL);
+    assert.deepEqual(seen.filter(p => p.startsWith("pv:") && p.includes("DIRGE")),
+                     [`pv:/level/?url=${dirge}`, pvUrl("map", dirge), pvUrl("mat", dirge)]);
+    assert.deepEqual(d.g, [{ n: "DIRGE.gob", h: sha(DIRGE_GOB), b: DIRGE_GOB.length, ep: "Square Dirge", ty: 2, lv: ["dirge.jkl"] }]);
+    assert.equal(all.left, 0);
+    assert.deepEqual(all.from, { "jkdf2.net": 1 });
+    // 323, 400 (gone), DIRGE, and the big one waiting.
+    assert.equal(all.listed, 4);
+    const mots = idxOf(env, "index/mots-all.json");
+    assert.deepEqual(mots.levels.map(l => [l.t, l.o, l.z]), [["Qat Crystac", "jkdf2.net", "qat.zip"]]);
+    assert.deepEqual(idxOf(env, "index/mots.json").levels, []);
+    // Its detail says where it came from.
+    const det = idxOf(env, `detail/${d.id}.json`);
+    assert.deepEqual([det.from, det.url, det.massassi, det.title, det.author],
+                     ["jkdf2.net", "https://www.jkdf2.net/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/jkmp/DIRGE.zip", undefined,
+                      "Square Dirge", "Some Body"]);
+    // The copy of 6000 Block was read and let go.
+    const rows = job.sql.exec("SELECT name, zip_st, info FROM lv WHERE id > 1000000 ORDER BY name").toArray();
+    assert.deepEqual(rows.map(r => [r.name, r.zip_st]), [["6000.zip", "dupe"], ["DIRGE.zip", "ok"], ["copy6000.zip", "dupe"],
+                                                         ["huge & big.zip", "big"], ["qat.zip", "ok"]]);
+    assert.equal(JSON.parse(rows[0].info).mas, 323);
+    assert.equal(JSON.parse(rows[2].info).same, 323);
+    const copyId = job.sql.exec("SELECT id FROM lv WHERE name = 'copy6000.zip'").toArray()[0].id;
+    assert.ok(!env.LEVELS.m.has(`zip/${copyId}.zip`));
+    assert.ok(!env.LEVELS.m.has(`detail/${copyId}.json`));
+    const st = await job.status();
+    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 150, 32]);
+    assert.deepEqual([st.lists.df2jkmp.n, st.lists.df2jkmp.same_as_massassi, st.lists.df2jkmp.copies], [6, 0, 2]);
+    assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", by_name: 1, by_gobs: 1 }]);
+    // The next day's look at the folder knows 6000.zip by name now.
+    job.kv("list_at:df2jkmp", 0);
+    seen.length = 0;
+    await runUntilIdle(job, 20);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp")]);
+    assert.equal((await job.status()).lists.df2jkmp.same_as_massassi, 1);
+    // The routes.
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    let r = await get("/levels/all/jk1.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(JSON.parse(await r.text()).levels.length, 2);
+    assert.equal((await get("/levels/all/mots.json")).status, 200);
+    assert.equal((await get("/levels/all/df2.json")).status, 404);
+    r = await get(`/levels/z/${d.id}.zip?h=${d.h}`);
+    assert.equal(sha(new Uint8Array(await r.arrayBuffer())), sha(DIRGE_ZIP));
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+});
+
+await check("jkdf2.net: at most LEVELS_DF2_PER_DAY zips a day, smallest first, and the big ones once the cap is raised", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "1" });
+    await runUntilIdle(job, 80);
+    const zips = seen.filter(p => p.startsWith("df2:") && p.endsWith(".zip"));
+    // MotS's has no Massassi pages to wait for: its first.
+    assert.deepEqual(zips, [DF2_FILE("motsmp", "qat.zip")]);
+    const st = await job.status();
+    assert.equal(st.jkdf2.today, 1);
+    // 6000.zip (Massassi's, as it will find), DIRGE.zip and copy6000.zip; not the big one.
+    assert.equal(idxOf(env, "index/jk1-all.json").left, 3);
+    // A new day.
+    job.kv("df2_day", "2000-01-01");
+    env.LEVELS_DF2_PER_DAY = "5";
+    seen.length = 0;
+    await runUntilIdle(job, 40);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip")]);
+    // The big one waits for a higher cap, and comes at the folder's next look.
+    env.LEVELS_DF2_MAX_MB = "64";
+    const BIG = makeZip([{ name: "big.gob", data: makeGob([{ name: "episode.jk", data: `"Big One"\nTYPE 2\n10: 0 0 LEVEL big.jkl 0 0 -1 -1\n` }]) }]);
+    const seen2 = fakeDf2({ [DF2_FILE("jkmp", "huge & big.zip")]: () => new Response(BIG) });
+    job.kv("list_at:df2jkmp", 0);
+    await runUntilIdle(job, 40);
+    assert.deepEqual(seen2.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp"), DF2_FILE("jkmp", "huge & big.zip")]);
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Big One"));
+});
+
+await check("jkdf2.net busy: only its own work waits; LEVELS_DF2 = \"0\" asks it nothing", async () => {
+    const seen = fakeDf2({ [DF2_FILE("motsmp", "qat.zip")]: () => new Response("busy", { status: 503 }) });
+    const { job } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    assert.ok(Number(job.kv("df2_backoff_until")) > Date.now());
+    assert.ok(!job.kv("backoff_until") || Number(job.kv("backoff_until")) < Date.now());
+    assert.equal(job.sql.exec("SELECT tries, zip_st FROM lv WHERE name = 'qat.zip'").toArray()[0].zip_st, null);
+    // Massassi's levels went on.
+    assert.ok(seen.includes("/levels/files/400.shtml"));
+    const off = fakeDf2();
+    const { job: job2 } = newJob();
+    await runUntilIdle(job2, 80);
+    assert.ok(!off.some(p => p.startsWith("df2:")));
+    assert.equal((await job2.status()).jkdf2.on, false);
+});
+
+await check("jkdf2.net: one Massassi gets later, with the same GOBs, leaves the index of both", async () => {
+    const seen = fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 80);
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Square Dirge"));
+    // Massassi adds it, under another name.
+    const page = PAGE.replace(/323/g, "500").replace("6000 Block</h1>", "Square Dirge</h1>").replace(/jkmp\/6000\.zip/g, "jkmp/sqdirge.zip");
+    const list = LIST + `<div class="level-list-screenshot"></div><div class="level-list-item">
+    <strong><a href="/levels/files/500.shtml">Square Dirge</a></strong><br>
+    <span class="mute">By:</span> Some Body<br><span class="mute">Added:</span> 2026-11-20<br></div>
+    <div class="level-list-details"><span class="mute">Downloads:</span> 3</div>`;
+    const MAS_DIRGE = makeZip([{ name: "dirge.gob", data: DIRGE_GOB }]);
+    fakeDf2({
+        "/levels/jkmp/?num=9999": () => new Response(list),
+        "/levels/files/500.shtml": () => new Response(page),
+        "/media/levels/files/jkmp/sqdirge.zip": () => new Response(MAS_DIRGE),
+    });
+    job.kv("list_at:jkmp", 0);
+    await runUntilIdle(job, 80);
+    const all = idxOf(env, "index/jk1-all.json");
+    assert.deepEqual(all.levels.map(l => [l.id, l.o]), [[323, undefined], [500, undefined]]);
+    assert.deepEqual(all.from, { "jkdf2.net": 0 });
 });
 
 if (failed) {

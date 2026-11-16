@@ -10,6 +10,8 @@
 //   parseEpisode(text)     an episode.jk's title, type and levels
 //   decodeText(bytes)      a readme as text, as find_dates.py decodes it
 //   releaseDate(...)       a level's real release date (see below)
+//   parseArchive(html)     a folder of jkdf2.net's archive: its files
+//   readmeAuthor(texts)    who made a level, from its readmes (for jkdf2.net's)
 //
 // The release date is a port of find_dates.py (builds/level-library/
 // release-dates in the project files), tested there on 43 Massassi levels on
@@ -720,4 +722,249 @@ export function releaseDate(texts, fileDates, massassi, today) {
     out.sort = out.sort || out.date;
     out.massassiBulk = bulk;
     return out;
+}
+
+// ---- Mods (the Mod Library: Massassi's jkmod and motsmod lists)
+//
+// A mod's page has no 3D Preview, so no direct address for its zip: only the
+// Download link, /levels/download/<id>/, which Brian (who runs Massassi) said
+// the job may use, once for each mod (via Antonio, 2026-11-15). That address
+// adds one to the mod's download count and answers with a page that sends
+// the browser on to the zip (a Refresh to /media/levels/files/...).
+
+// The zip's address on a mod's download page, if it's one of Massassi's files.
+export function downloadZip(html) {
+    const body = html || "";
+    const refresh = /<meta\s+http-equiv=["']?refresh["']?\s+content=["']\s*\d+\s*;\s*url=([^"'>\s]+)["']/i.exec(body);
+    const link = /<a\s+href=["'](\/media\/levels\/files\/[^"'<>\s]+)["']/i.exec(body);
+    for (const m of [refresh, link]) {
+        if (!m)
+            continue;
+        const u = unescapeHtml(m[1]);
+        const zip = directZip(u.startsWith("/") ? MASSASSI + u : u);
+        if (zip)
+            return zip;
+    }
+    return null;
+}
+
+// The game's resource folders: what the engine reads from a mod's folder
+// besides its GOBs (jkRes_FileOpen, and the page's MOD_RESOURCE_DIRS).
+export const MOD_DIRS = ["3do", "mat", "cog", "misc", "sound", "ui", "jkl", "ai", "voice", "cmp", "key", "snd", "pup"];
+// Programs, which the browser can't run (Massassi's rules ban changes to the
+// game's own EXE, but some mods come with a launcher or an installer).
+const PROGRAM = /\.(exe|dll|com|bat|cmd|pif|scr|vbs|msi)$/i;
+// What's never part of a mod.
+function junk(name) {
+    const parts = name.toLowerCase().split("/");
+    const base = parts[parts.length - 1];
+    return parts.some(p => p === "__macosx" || p[0] === ".") || base === "thumbs.db" || base === "desktop.ini";
+}
+
+// How a mod's zip goes into the game, as the page does it (packaging/wasm/
+// modlibrary.js in OpenJKDF2): which files make up the mod's folder (loaded
+// ahead of the game's own files when the mod is ticked) and which GOBs are
+// episodes (written into episode/, which is the only place the engine looks
+// for them). entries are the zip's (openZip), ext the game's GOB extension
+// (gob or goo), episodes the names of its GOBs that hold an episode.jk.
+//
+// - a GOB that isn't an episode goes at the top of the mod's folder, under
+//   its own name (the first of two of the same name wins);
+// - a file inside one of the game's resource folders (cog/, 3do/ ...),
+//   wherever that folder is in the zip, goes under that folder: the first
+//   such folder in its path decides, so "Mod/Resource/cog/x.cog" is
+//   "cog/x.cog". When the zip has these folders in more than one place, the
+//   one with the most files wins and the others are left out (they're most
+//   often a second copy, or "optional" extras);
+// - everything else (readmes, pictures, programs, files outside those
+//   folders) is left out.
+//
+// Returns { files: [[entry name, path in the mod]], episodes: [entry name],
+// left: { programs, other, others: [up to 20 names] } }.
+export function modPlan(entries, ext, episodes) {
+    const gobRe = new RegExp("\\." + ext + "$", "i");
+    const isEp = new Set((episodes || []).map(n => n.toLowerCase()));
+    const files = [], eps = [], taken = new Set();
+    const left = { programs: [], other: 0, others: [] };
+    const roots = new Map();
+    const loose = [];
+    for (const e of entries) {
+        if (e.dir || junk(e.name))
+            continue;
+        const parts = e.name.split("/");
+        const base = parts[parts.length - 1];
+        if (gobRe.test(base)) {
+            if (isEp.has(e.name.toLowerCase())) {
+                eps.push(e.name);
+            } else if (!taken.has(base.toLowerCase())) {
+                taken.add(base.toLowerCase());
+                files.push([e.name, base]);
+            }
+            continue;
+        }
+        const at = parts.slice(0, -1).findIndex(p => MOD_DIRS.includes(p.toLowerCase()));
+        if (at >= 0) {
+            const root = parts.slice(0, at).join("/").toLowerCase();
+            roots.set(root, (roots.get(root) || 0) + 1);
+            loose.push({ e, root, rel: parts.slice(at).join("/") });
+            continue;
+        }
+        if (PROGRAM.test(base)) {
+            if (left.programs.length < 20)
+                left.programs.push(e.name);
+            continue;
+        }
+        if (!isText(e.name) && !/\.(jpe?g|png|gif|bmp|pcx|htm|html|url|pdf|zip|rar|7z|ico|ini)$/i.test(base)) {
+            left.other++;
+            if (left.others.length < 20)
+                left.others.push(e.name);
+        }
+    }
+    let best = null;
+    for (const [root, n] of roots)
+        if (best === null || n > roots.get(best) || (n === roots.get(best) && root.length < best.length))
+            best = root;
+    for (const l of loose) {
+        if (l.root !== best) {
+            left.other++;
+            if (left.others.length < 20)
+                left.others.push(l.e.name);
+            continue;
+        }
+        const key = l.rel.toLowerCase();
+        if (!taken.has(key)) {
+            taken.add(key);
+            files.push([l.e.name, l.rel]);
+        }
+    }
+    return { files, episodes: eps, left };
+}
+
+// What kind of mod it is, guessed from the names of its files (the loose
+// ones and those inside its GOBs) and its episodes ({ ty } each, TYPE 1 for
+// single player). For the library's filters, and said to be a guess there.
+//   campaign    it has single-player levels, and no multiplayer ones
+//   gameplay    scripts (cogs): weapons, Force powers, items, game modes
+//   characters  models, without scripts: player skins and the like
+//   graphics    textures, menus, colormaps, without models or scripts
+//   other       sounds, and anything else
+export function modKind(names, episodes, pack) {
+    if (pack)
+        return "graphics";
+    const eps = episodes || [];
+    if (eps.length && eps.every(e => e.ty === 1))
+        return "campaign";
+    let cog = 0, model = 0, look = 0;
+    for (const n of names) {
+        const x = n.toLowerCase();
+        if (x.endsWith(".cog"))
+            cog++;
+        else if (/\.(3do|key|pup)$/.test(x))
+            model++;
+        else if (/\.(mat|bm|cmp|sft)$/.test(x))
+            look++;
+    }
+    if (cog >= 2 || (cog && !model) || eps.length)
+        return "gameplay";
+    if (model)
+        return "characters";
+    if (look)
+        return "graphics";
+    return "other";
+}
+
+// Which versions of a mod go together in the library: its title without
+// version numbers and words like "beta", and its author. "SBX-JK v3.1" and
+// "SBX-JK v3.0" by the same people are one mod.
+export function modGroup(title, author) {
+    const t = String(title || "").toLowerCase()
+        .replace(/\(([^)]*)\)/g, " $1 ")
+        .replace(/\bv(?:ersion)?\s*\.?\s*\d+(?:\.\d+)*[a-z]?\b/g, " ")
+        .replace(/\b\d+(?:\.\d+)+[a-z]?\b/g, " ")
+        .replace(/\b(?:beta|alpha|final|demo|update[sd]?|patch(?:ed)?|fix(?:ed)?|release|preview|full|lite|test)\b/g, " ")
+        .replace(/[^a-z0-9]+/g, " ").trim();
+    const a = String(author || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    return (t || String(title || "").toLowerCase().trim()) + "|" + a;
+}
+
+// ---- jkdf2.net (www.jkdf2.net), the Level Library's second source: the
+// levels in its archive (/JKBot/JKArchive/, a Directory Lister site) that
+// Massassi doesn't have. Antonio has its owner's permission (JKLE_Cougar,
+// 2026-11-16).
+
+// A folder of jkdf2.net's archive (?dir=JKDF2/JKDF2/Game%20Files/<folder>):
+// its files, in the page's order, each with its name, its address as the
+// page gives it (relative to /JKBot/JKArchive/), its size as the page writes
+// it ("380.21KB", "2.74MB") and its date ("2011-05-28 17:41:37"). Folders
+// (their size is "-", their address a ?dir=) and ".." are left out.
+export function parseArchive(html) {
+    const out = [];
+    const re = /<li data-name="([^"]*)" data-href="([^"]*)">([\s\S]*?)<\/li>/g;
+    let m;
+    while ((m = re.exec(html || ""))) {
+        const size = /class="file-size[^"]*">\s*([^<]*?)\s*<\/span>/.exec(m[3]);
+        const date = /class="file-modified[^"]*">\s*([^<]*?)\s*<\/span>/.exec(m[3]);
+        const name = unescapeHtml(m[1]), href = unescapeHtml(m[2]);
+        if (name === ".." || !size || size[1] === "-" || href.startsWith("?") || /^[a-z]+:/i.test(href) || href.startsWith("/"))
+            continue;
+        out.push({ name, href, size: size[1], date: date && /^\d{4}-\d{2}-\d{2}/.test(date[1]) ? date[1] : null });
+    }
+    return out;
+}
+
+// A zip's name as the job compares them across the two sources: lower case,
+// without the " (2)" or "[1]" a browser adds to a second download.
+export function zipKey(name) {
+    return String(name || "").trim().toLowerCase().replace(/\s*(?:\[\d+\]|\(\d+\))(?=\.[a-z0-9]+$)/, "");
+}
+
+// How far a size as a page writes it ("380.21KB" on jkdf2.net, "226.0 KiB"
+// on Massassi) can be from the file's bytes: half its last digit, and a byte.
+export function sizeSlack(s) {
+    const m = /([\d.]+)\s*(B|KiB|MiB|GiB|KB|MB|GB)/i.exec(s || "");
+    if (!m)
+        return 0;
+    const unit = { b: 1, kib: 1024, kb: 1024, mib: 1048576, mb: 1048576, gib: 1073741824, gb: 1073741824 }[m[2].toLowerCase()];
+    const dec = (m[1].split(".")[1] || "").length;
+    return Math.ceil(unit * 0.5 * 10 ** -dec) + 1;
+}
+
+const AUTHOR_RES = [
+    /^\s*(?:level\s+|map\s+)?authors?(?:\s*\(s\))?\s*\.*\s*[:=]\s*(.+)$/i,
+    /^\s*(?:created|made|designed|built|level|map|edited)\s+by\s*[:\-]?\s*(.+)$/i,
+    /^\s*by\s*:\s*(.+)$/i,
+];
+
+// Who made a level, from its readmes: the first "Author: ..." line (or
+// "Created by", "Level by", "Made by", "By:"), without email addresses or
+// web addresses. Null when no readme says, or what it says doesn't look
+// like a name (empty, or longer than 60 letters).
+export function readmeAuthor(texts) {
+    for (const r of texts || []) {
+        if (r.text == null)
+            continue;
+        for (const line of String(r.text).split(/\r\n|\r|\n/).slice(0, 200)) {
+            for (const re of AUTHOR_RES) {
+                const m = re.exec(line);
+                if (!m)
+                    continue;
+                const v = m[1]
+                    .replace(/[<(\[]?\s*(?:mailto:)?[\w.+-]+@[\w-]+(?:\.[\w-]+)+\s*[>)\]]?/g, " ")
+                    .replace(/[<(\[]?\s*(?:https?:\/\/|www\.)\S+\s*[>)\]]?/gi, " ")
+                    .replace(/\s+/g, " ").replace(/^[\s:,;.\-]+|[\s:,;\-]+$/g, "").trim();
+                if (v && v.length <= 60 && /[a-z0-9]/i.test(v))
+                    return v;
+            }
+        }
+    }
+    return null;
+}
+
+// A level's title from jkdf2.net: its episode's title (episode.jk) when it
+// has one, else its zip's name without ".zip", "_" as spaces.
+export function df2Title(episode, zipName) {
+    const ep = String(episode || "").replace(/\s+/g, " ").trim();
+    if (ep && /[a-z0-9]/i.test(ep))
+        return ep.slice(0, 64);
+    return String(zipName || "").replace(/\.[a-z0-9]+$/i, "").replace(/_/g, " ").replace(/\s+/g, " ").trim() || "Untitled";
 }
