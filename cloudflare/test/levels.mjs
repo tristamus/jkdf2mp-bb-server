@@ -1489,7 +1489,7 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     assert.ok(!env.LEVELS.m.has(`zip/${copyId}.zip`));
     assert.ok(!env.LEVELS.m.has(`detail/${copyId}.json`));
     const st = await job.status();
-    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 150, 32]);
+    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, null, 32]);
     assert.deepEqual([st.lists.df2jkmp.n, st.lists.df2jkmp.same_as_massassi, st.lists.df2jkmp.copies], [6, 0, 2]);
     assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", mods: 0, by_name: 1, by_gobs: 1, by_zip: 0 }]);
     // The next day's look at the folder knows 6000.zip by name now.
@@ -1784,6 +1784,18 @@ await check("jkdf2.net mods: LEVELS_DF2_MODS = \"0\" leaves them alone; a folder
     assert.ok(!job2.kv("df2_backoff_until") || Number(job2.kv("df2_backoff_until")) < Date.now());
     assert.ok(!(await job2.status()).lists["df2jkmod/skins"]);
     assert.ok(seen2.includes(DF2_FILE("jkmod", "SABERS.ZIP")));
+});
+
+await check("jkdf2.net: no count a day unless LEVELS_DF2_PER_DAY is set", async () => {
+    const seen = fakeDf2();
+    const { job } = newJob({ LEVELS_DF2: "1" });
+    job.kv("df2_day", new Date().toISOString().slice(0, 10));
+    job.kv("df2_today", 100000);
+    await runUntilIdle(job, 80);
+    const st = await job.status();
+    assert.equal(st.jkdf2.per_day, null);
+    assert.ok(st.jkdf2.today > 100000);
+    assert.ok(seen.some(p => p.startsWith("df2:") && p.endsWith(".zip")));
 });
 
 if (failed) {
