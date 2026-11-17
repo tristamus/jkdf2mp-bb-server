@@ -200,11 +200,12 @@ IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
 MATCH_LINKS = "https://beta.jediknight.zone"
 # "0" stops the Level Library's job; LEVELS_MAX_GB is how much it copies
-# before it stops (6 when it isn't set).
+# before it stops (no cap when it isn't set).
 # LEVELS_FETCH = "0"
 # LEVELS_MAX_GB = "6"
 # jkdf2.net's levels (levels.js): "0" stops copying them; at most
-# LEVELS_DF2_PER_DAY zips a day (no such count when unset), none over LEVELS_DF2_MAX_MB (32).
+# LEVELS_DF2_PER_DAY zips a day (no such count when unset), none over
+# LEVELS_DF2_MAX_MB (1024, the most for any zip, when unset).
 # LEVELS_DF2 = "0"
 # LEVELS_DF2_PER_DAY = "150"
 # LEVELS_DF2_MAX_MB = "32"
