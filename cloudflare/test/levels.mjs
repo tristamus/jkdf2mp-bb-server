@@ -1126,6 +1126,26 @@ await check("mods: what goes into the mod's folder, and what's an episode", asyn
     assert.deepEqual(plan.files, [["mod.goo", "mod.goo"]]);
 });
 
+await check("mods: files loose outside the game's folders go by their kind", async () => {
+    const e = names => names.map(n => ({ name: n, dir: n.endsWith("/") }));
+    // A 1997 skin: the model, its textures and its sounds at the top of the zip.
+    let plan = read.modPlan(e(["predh2h.3do", "pred.snd", "sole.mat", "PRED.MAT", "growl.wav", "readme.txt", "kyle.key", "x.dat"]), "gob", []);
+    assert.deepEqual(plan.files, [["predh2h.3do", "3do/predh2h.3do"], ["pred.snd", "misc/snd/pred.snd"], ["sole.mat", "mat/sole.mat"],
+                                  ["PRED.MAT", "mat/PRED.MAT"], ["growl.wav", "sound/growl.wav"], ["kyle.key", "3do/key/kyle.key"]]);
+    assert.equal(plan.typed, true);
+    assert.deepEqual([plan.left.other, plan.left.others], [1, ["x.dat"]]);
+    // The folder with the most of them; a second of the same name is left out.
+    plan = read.modPlan(e(["Pack/a.cog", "Pack/b.cog", "Pack/Old/a.cog", "c.cog"]), "gob", []);
+    assert.deepEqual(plan.files, [["Pack/a.cog", "cog/a.cog"], ["Pack/b.cog", "cog/b.cog"]]);
+    // Not with a program (a tool, most likely), nor when it has a GOB or the game's folders.
+    plan = read.modPlan(e(["makebots.exe", "weapons/0.3do"]), "gob", []);
+    assert.deepEqual([plan.files, plan.typed], [[], false]);
+    plan = read.modPlan(e(["mod.gob", "extra.cog"]), "gob", []);
+    assert.deepEqual([plan.files, plan.typed], [[["mod.gob", "mod.gob"]], false]);
+    plan = read.modPlan(e(["Resource/cog/a.cog", "b.3do"]), "gob", []);
+    assert.deepEqual([plan.files, plan.typed], [[["Resource/cog/a.cog", "cog/a.cog"]], false]);
+});
+
 await check("mods: their kind, guessed from their files", async () => {
     assert.equal(read.modKind(["cog/force_lightning.cog", "cog/weap_bryar.cog", "3do/bryv.3do"], []), "gameplay");
     assert.equal(read.modKind(["3do/ky.3do", "3do/mat/kyhead.mat", "cog/kyle.cog"], []), "characters");
@@ -1378,6 +1398,9 @@ function fakeDf2(extra) {
         [DF2_DIR("jkctf")]: () => new Response(df2Folder("jkctf", [])),
         [DF2_DIR("motsmp")]: () => new Response(df2Folder("motsmp", [{ name: "qat.zip", size: kb(QAT_ZIP) }])),
         [DF2_DIR("motskfy")]: () => new Response(df2Folder("motskfy", [])),
+        // The mods' folders: none in these checks (an "info" folder inside).
+        [DF2_DIR("jkmod")]: () => new Response(df2Folder("jkmod", [])),
+        [DF2_DIR("motsmod")]: () => new Response(df2Folder("motsmod", [])),
         [DF2_FILE("jkmp", "DIRGE.zip")]: () => new Response(DIRGE_ZIP, { headers: { "Content-Length": String(DIRGE_ZIP.length) } }),
         [DF2_FILE("jkmp", "copy6000.zip")]: () => new Response(COPY_ZIP),
         [DF2_FILE("motsmp", "qat.zip")]: () => new Response(QAT_ZIP),
@@ -1415,8 +1438,8 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     const df2 = seen.filter(p => p.startsWith("df2:"));
     // Each folder, then the zips: never Massassi's (by name, or by a second
     // download's name), nor the big one, nor a second copy.
-    assert.deepEqual(df2.slice(0, 4), ["jkmp", "jkctf", "motsmp", "motskfy"].map(DF2_DIR));
-    assert.deepEqual(df2.slice(4).sort(), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip"), DF2_FILE("motsmp", "qat.zip")].sort());
+    assert.deepEqual(df2.slice(0, 6), ["jkmp", "jkctf", "motsmp", "motskfy", "jkmod", "motsmod"].map(DF2_DIR));
+    assert.deepEqual(df2.slice(6).sort(), [DF2_FILE("jkmp", "DIRGE.zip"), DF2_FILE("jkmp", "copy6000.zip"), DF2_FILE("motsmp", "qat.zip")].sort());
     // Jedi Knight's only once Massassi's pages for it have all been read.
     const lastPage = seen.indexOf("/levels/files/400.shtml");
     assert.ok(lastPage > 0);
@@ -1468,7 +1491,7 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     const st = await job.status();
     assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 150, 32]);
     assert.deepEqual([st.lists.df2jkmp.n, st.lists.df2jkmp.same_as_massassi, st.lists.df2jkmp.copies], [6, 0, 2]);
-    assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", by_name: 1, by_gobs: 1 }]);
+    assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", mods: 0, by_name: 1, by_gobs: 1, by_zip: 0 }]);
     // The next day's look at the folder knows 6000.zip by name now.
     job.kv("list_at:df2jkmp", 0);
     seen.length = 0;
@@ -1553,6 +1576,214 @@ await check("jkdf2.net: one Massassi gets later, with the same GOBs, leaves the 
     const all = idxOf(env, "index/jk1-all.json");
     assert.deepEqual(all.levels.map(l => [l.id, l.o]), [[323, undefined], [500, undefined]]);
     assert.deepEqual(all.from, { "jkdf2.net": 0 });
+});
+
+// ---- jkdf2.net: the mods in its archive that Massassi doesn't have
+
+const SABERS_GOB = makeGob([{ name: "cog\\force_saber.cog", data: "# saber" }, { name: "mat\\shiny.mat", data: "MAT " }]);
+const SABERS_ZIP = makeZip([{ name: "SABERS.GOB", data: SABERS_GOB, date: "1998-01-10" },
+                            { name: "SABERS.TXT", data: "Title           : Shiny Sabers\r\nAuthor          : A. Person\r\n", date: "1998-01-10" }]);
+const NINJA_ZIP = makeZip([{ name: "Resource/3do/ninja.3do", data: "3DO", date: "1998-02-01" },
+                           { name: "Resource/mat/ninja.mat", data: "MAT ", date: "1998-02-01" }]);
+const HEAL_GOO = makeGob([{ name: "cog\\force_heal.cog", data: "# heal" }]);
+const HEAL_ZIP = makeZip([{ name: "Force Heal All.goo", data: HEAL_GOO, date: "1999-01-01" },
+                          { name: "readme.txt", data: "Title                   : Force Heal All\n", date: "1999-01-01" }]);
+// A mods folder of jkdf2.net's, with folders inside it (subs).
+const df2ModFolder = (dir, files, subs) => df2Folder(dir, files).replace("</ul>", (subs || []).map(n =>
+    `<li data-name="${n}" data-href="?dir=JKDF2/JKDF2/Game%20Files/${dir}/${encodeURIComponent(n)}"><a href="?dir=x">${n}</a></li>`)
+    .join("") + "</ul>");
+
+function fakeDf2Mods(extra) {
+    return fakeDf2(Object.assign({
+        "/levels/jkmod/?num=9999": () => new Response(MOD_LIST),
+        "/levels/files/634.shtml": () => new Response(MOD_PAGE),
+        "/levels/download/634/": () => new Response(DL_PAGE(634)),
+        "/media/levels/files/jkmod/blackyellow.zip": () => new Response(MOD_ZIP),
+        "/media/levels/screenshots/634_1.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 3])),
+        "/media/levels/screenshots/634_2.jpg": () => new Response(new Uint8Array([0xff, 0xd8, 4])),
+        [DF2_DIR("jkmod")]: () => new Response(df2ModFolder("jkmod", [
+            // Massassi's by name; Massassi's under another name; a new one; one it can't open.
+            { name: "blackyellow.zip", size: kb(MOD_ZIP) }, { name: "renamed.zip", size: kb(MOD_ZIP) },
+            { name: "SABERS.ZIP", size: kb(SABERS_ZIP) }, { name: "pack.rar", size: "1.00KB" },
+        ], ["skins", "Old Mod (prior versions)"])),
+        [DF2_DIR("jkmod/skins")]: () => new Response(df2Folder("jkmod/skins", [{ name: "ninja.zip", size: kb(NINJA_ZIP) }])),
+        [DF2_DIR("motsmod")]: () => new Response(df2Folder("motsmod", [{ name: "Fhealmots.zip", size: kb(HEAL_ZIP) }])),
+        [DF2_FILE("jkmod", "renamed.zip")]: () => new Response(MOD_ZIP),
+        [DF2_FILE("jkmod", "SABERS.ZIP")]: () => new Response(SABERS_ZIP),
+        [DF2_FILE("jkmod/skins", "ninja.zip")]: () => new Response(NINJA_ZIP),
+        [DF2_FILE("motsmod", "Fhealmots.zip")]: () => new Response(HEAL_ZIP),
+    }, extra || {}));
+}
+
+await check("jkdf2.net mods: a readme's title, and the folders inside a folder", async () => {
+    assert.equal(read.readmeTitle([{ text: "Title\t\t: JediSaber\r\nAuthor\t\t: Chris James\r\n" }]), "JediSaber");
+    assert.equal(read.readmeTitle([{ text: null }, { text: "Mod Title: \"Force Push\"\n" }]), "Force Push");
+    assert.equal(read.readmeTitle([{ text: "Title                   : \nAuthor: x\n" }]), null);
+    assert.equal(read.readmeTitle([{ text: "The title of this mod is long" }]), null);
+    const html = df2ModFolder("jkmod", [], ["ai skins", "Killing Time (prior versions)"]);
+    assert.deepEqual(read.parseArchiveDirs(html, "jkmod"), [
+        { name: "info", dir: "jkmod/info" }, { name: "ai skins", dir: "jkmod/ai%20skins" },
+        { name: "Killing Time (prior versions)", dir: "jkmod/Killing%20Time%20(prior%20versions)" },
+    ]);
+    // Not a folder of another's, and not the one above.
+    assert.deepEqual(read.parseArchiveDirs(html, "motsmod"), []);
+});
+
+await check("jkdf2.net mods: a title, description and words from a readme or the zip's name", async () => {
+    assert.equal(read.readmeFirstLine([{ text: "11/17/98\r\n\r\nBIG FLUFFY PACK 2\r\nMOTSBFP2\r\n" }]), "BIG FLUFFY PACK 2");
+    assert.equal(read.readmeFirstLine([{ text: "Rbots - Make new character wizard\n----\n" }]), "Rbots - Make new character wizard");
+    assert.equal(read.readmeFirstLine([{ text: "File: anipod-1.zip\nAuthor: Zymotico\n" }]), null);
+    assert.equal(read.readmeFirstLine([{ text: "==JEDI KNIGHT ADDON MISSION====\nTitle      : \n" }]), null);
+    assert.equal(read.readmeFirstLine([{ text: "This file contains a GOB for you to see for yourself what the pod looks like.\n" }]), null);
+    assert.equal(read.nameTitle("SPYPACK.ZIP"), "Spypack");
+    assert.equal(read.nameTitle("BOBA_SP.ZIP"), "Boba Sp");
+    assert.equal(read.nameTitle("Obi Wan.ZIP"), "Obi Wan");
+    assert.equal(read.nameTitle("predh2h.zip"), "Predh2h");
+    assert.equal(read.nameTitle("homing_raildet.zip"), "Homing Raildet");
+    assert.equal(read.nameTitle("JK-Cars.zip"), "JK-Cars");
+    assert.deepEqual(read.modWords(["mat/a.mat", "cog/kyle.cog", "3do/skeletor.3do", "3do/heman.3do", "sound/yah.wav", "3do/HEMAN.3do"]),
+                     ["skeletor", "heman", "kyle", "yah"]);
+    assert.equal(read.readmeDesc([{ text: "Title : X\nDescription      : This patch adds several MP skins\n                   based on Episode II.\n\nCredits : me\n" }]),
+                 "This patch adds several MP skins based on Episode II.");
+    assert.equal(read.readmeDesc([{ text: "nothing here" }]), null);
+});
+
+await check("jkdf2.net mods: one of loose files, named by its zip and found by its files' names", async () => {
+    const MOTU_ZIP = makeZip([{ name: "skeletor.3do", data: "3DO", date: "1998-05-01" }, { name: "heman.3do", data: "3DO", date: "1998-05-01" },
+                              { name: "sktchest.mat", data: "MAT ", date: "1998-05-01" }]);
+    const seen = fakeDf2Mods({
+        [DF2_DIR("jkmod/skins")]: () => new Response(df2Folder("jkmod/skins", [{ name: "MASTERS.ZIP", size: kb(MOTU_ZIP) }])),
+        [DF2_FILE("jkmod/skins", "MASTERS.ZIP")]: () => new Response(MOTU_ZIP),
+    });
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 150);
+    assert.ok(seen.includes(DF2_FILE("jkmod/skins", "MASTERS.ZIP")));
+    const m = idxOf(env, "index/jk1-mods-all.json").mods.find(x => x.z === "MASTERS.ZIP");
+    assert.deepEqual([m.t, m.k, m.n, m.ty, m.f, m.o], ["Masters", "characters", 3, true, ["skeletor", "heman"], "jkdf2.net"]);
+    const det = idxOf(env, `detail/${m.id}.json`);
+    assert.deepEqual(det.mod.plan.files, [["skeletor.3do", "3do/skeletor.3do"], ["heman.3do", "3do/heman.3do"], ["sktchest.mat", "mat/sktchest.mat"]]);
+    assert.equal(det.mod.plan.typed, true);
+    // The one with a readme: its title, author and description from it.
+    const s2 = idxOf(env, "index/jk1-mods-all.json").mods.find(x => x.z === "SABERS.ZIP");
+    assert.deepEqual([s2.t, s2.a, s2.f], ["Shiny Sabers", "A. Person", ["force_saber"]]);
+});
+
+await check("mods: Massassi's with nothing for the game before are read again, once, for files loose in their zip", async () => {
+    const LOOSE = makeZip([{ name: "flame.cog", data: "# flame" }, { name: "readme.txt", data: "Put flame.cog in your cog folder." }]);
+    fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(LOOSE) });
+    const { job, env } = newJob();
+    await runUntilIdle(job, 80);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "ok");
+    // As a job from before modPlan placed them left it.
+    job.sql.exec("UPDATE lv SET zip_st = 'nomod' WHERE id = 634");
+    job.kv("typed_plan", 0);
+    const seen = fakeMods({ "/media/levels/files/jkmod/blackyellow.zip": () => new Response(LOOSE) });
+    const again = new LevelJob(job.ctx, env);
+    await runUntilIdle(again, 80);
+    assert.equal(again.sql.exec("SELECT zip_st FROM lv WHERE id = 634").toArray()[0].zip_st, "ok");
+    // The zip again (its address known: not its download page).
+    assert.deepEqual(seen.filter(p => /634|blackyellow/.test(p)), ["/media/levels/files/jkmod/blackyellow.zip"]);
+    assert.equal(again.kv("typed_plan"), "1");
+});
+
+await check("jkdf2.net mods: the ones Massassi doesn't have, in the levels' queue, in an index of their own", async () => {
+    const seen = fakeDf2Mods();
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 150);
+    const df2 = seen.filter(p => p.startsWith("df2:"));
+    // The mods' folders and the one inside (not its readmes, nor a mod's older versions).
+    assert.ok(df2.includes(DF2_DIR("jkmod")) && df2.includes(DF2_DIR("jkmod/skins")) && df2.includes(DF2_DIR("motsmod")));
+    assert.ok(!df2.some(p => /info|prior/.test(p)), df2.join(" "));
+    // Never Massassi's by name, nor one it can't open.
+    assert.ok(!df2.includes(DF2_FILE("jkmod", "blackyellow.zip")));
+    assert.ok(!df2.some(p => p.endsWith(".rar")));
+    // Jedi Knight's only once Massassi's mods have had their download page read.
+    const dl = seen.indexOf("/levels/download/634/");
+    assert.ok(dl > 0);
+    for (const f of [DF2_FILE("jkmod", "renamed.zip"), DF2_FILE("jkmod", "SABERS.ZIP"), DF2_FILE("jkmod/skins", "ninja.zip")])
+        assert.ok(seen.indexOf(f) > dl, f);
+    // Never the 3D preview for a mod.
+    assert.ok(!seen.some(p => p.startsWith("pv:") && /SABERS|ninja|Fheal|renamed/.test(p)));
+    // The mods' index is Massassi's alone, as before; the levels' have no mods.
+    assert.deepEqual(idxOf(env, "index/jk1-mods.json").mods.map(m => m.id), [634]);
+    assert.ok(!idxOf(env, "index/jk1-all.json").levels.some(l => /Sabers|ninja/.test(l.t)));
+    // Both, in the other: the renamed copy of 634 left out.
+    const all = idxOf(env, "index/jk1-mods-all.json");
+    assert.deepEqual(all.sources, ["https://www.massassi.net", "https://www.jkdf2.net"]);
+    assert.deepEqual(all.mods.map(m => [m.t, m.o]), [["Black and Yellow Flame Saber", undefined], ["Ninja", "jkdf2.net"],
+                                                     ["Shiny Sabers", "jkdf2.net"]]);
+    assert.deepEqual(all.from, { "jkdf2.net": 2 });
+    assert.equal(all.left, 0);
+    const m = all.mods[2];
+    assert.ok(m.id > 1000000);
+    // Its title and author from its readme; no Massassi date, rating or downloads.
+    assert.deepEqual([m.a, m.k, m.z, m.h, m.sz, m.n, m.rel], ["A. Person", "gameplay", "SABERS.ZIP", sha(SABERS_ZIP), SABERS_ZIP.length, 2,
+                                                              "1998-01-10"]);
+    assert.deepEqual([m.add, m.r, m.v, m.dl], [undefined, undefined, undefined, undefined]);
+    assert.equal(all.mods[1].k, "characters");
+    const det = idxOf(env, `detail/${m.id}.json`);
+    assert.deepEqual([det.from, det.url, det.massassi, det.title, det.author, det.mod.kind],
+                     ["jkdf2.net", "https://www.jkdf2.net/JKBot/JKArchive/JKDF2/JKDF2/Game%20Files/jkmod/SABERS.ZIP", undefined,
+                      "Shiny Sabers", "A. Person", "gameplay"]);
+    assert.deepEqual(det.mod.plan.files, [["SABERS.GOB", "SABERS.GOB"]]);
+    // The renamed copy: the very zip of Massassi's, so not kept (when it came
+    // after Massassi's), or left out of the index (when before).
+    const copy = job.sql.exec("SELECT id, zip_st, info FROM lv WHERE name = 'renamed.zip'").toArray()[0];
+    assert.ok(copy.zip_st === "dupe" ? JSON.parse(copy.info).same_zip === 634 : copy.zip_st === "ok", copy.zip_st);
+    // MotS's: no Massassi mods to wait for.
+    assert.deepEqual(idxOf(env, "index/mots-mods-all.json").mods.map(x => [x.t, x.o, x.k]), [["Force Heal All", "jkdf2.net", "gameplay"]]);
+    assert.deepEqual(idxOf(env, "index/mots-mods.json").mods, []);
+    const st = await job.status();
+    // One day's count for levels and mods: DIRGE, copy6000, qat, and the four mods.
+    assert.deepEqual([st.jkdf2.mods, st.jkdf2.today], [true, 7]);
+    // Massassi's zip wasn't known by name at the folder's first read: found
+    // to be Massassi's before it was asked for.
+    assert.deepEqual([st.lists.df2jkmod.n, st.lists.df2jkmod.same_as_massassi, st.lists["df2jkmod/skins"].n, st.lists.df2motsmod.n],
+                     [3, 0, 1, 1]);
+    const by = job.sql.exec("SELECT zip_st, info FROM lv WHERE name = 'blackyellow.zip'").toArray()[0];
+    assert.deepEqual([by.zip_st, JSON.parse(by.info).mas], ["dupe", 634]);
+    assert.ok(st.mod_kinds.some(k => k.game === "mots" && k.kind === "gameplay"));
+    // The routes.
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    const r = await get("/levels/mods/all/jk1.json");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Type"), "application/json; charset=utf-8");
+    assert.equal(JSON.parse(await r.text()).mods.length, 3);
+    assert.equal((await get("/levels/mods/all/mots.json")).status, 200);
+    assert.equal((await get("/levels/mods/all/df2.json")).status, 404);
+    assert.equal(sha(new Uint8Array(await (await get(`/levels/z/${m.id}.zip?h=${m.h}`)).arrayBuffer())), sha(SABERS_ZIP));
+});
+
+await check("jkdf2.net mods: the same day's count as its levels, smallest first", async () => {
+    const seen = fakeDf2Mods();
+    const { job } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "2" });
+    await runUntilIdle(job, 150);
+    const zips = () => seen.filter(p => p.startsWith("df2:") && !p.includes("?dir="));
+    // Two zips in all, levels and mods together.
+    assert.equal(zips().length, 2);
+    assert.equal((await job.status()).jkdf2.today, 2);
+    // The rest the next day.
+    job.kv("df2_day", "2000-01-01");
+    job.env.LEVELS_DF2_PER_DAY = "50";
+    await runUntilIdle(job, 150);
+    assert.equal(zips().length, 7);
+});
+
+await check("jkdf2.net mods: LEVELS_DF2_MODS = \"0\" leaves them alone; a folder inside that's gone isn't asked again", async () => {
+    const seen = fakeDf2Mods();
+    const { job } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_MODS: "0" });
+    await runUntilIdle(job, 150);
+    assert.ok(!seen.some(p => /jkmod|motsmod/.test(p) && p.startsWith("df2:")));
+    assert.ok(seen.includes(DF2_FILE("jkmp", "DIRGE.zip")));
+    assert.equal((await job.status()).jkdf2.mods, false);
+    // The skins folder goes away.
+    const seen2 = fakeDf2Mods({ [DF2_DIR("jkmod/skins")]: () => new Response("Not found", { status: 404 }) });
+    const { job: job2 } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job2, 150);
+    assert.equal(seen2.filter(p => p === DF2_DIR("jkmod/skins")).length, 1);
+    assert.ok(!job2.kv("df2_backoff_until") || Number(job2.kv("df2_backoff_until")) < Date.now());
+    assert.ok(!(await job2.status()).lists["df2jkmod/skins"]);
+    assert.ok(seen2.includes(DF2_FILE("jkmod", "SABERS.ZIP")));
 });
 
 if (failed) {

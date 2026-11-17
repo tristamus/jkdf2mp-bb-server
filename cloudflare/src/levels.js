@@ -35,6 +35,7 @@
 //
 //   GET /levels/jk1.json, /levels/mots.json
 //   GET /levels/all/jk1.json, /levels/all/mots.json   with jkdf2.net's too (below)
+//   GET /levels/mods/jk1.json, /levels/mods/all/jk1.json (and mots)   the mods (below)
 //   GET /levels/d/<id>.json
 //   GET /levels/z/<id>.zip[?h=<sha>]   immutable when h is the zip's SHA-256
 //   GET /levels/s/<id>-<n>.jpg
@@ -106,6 +107,26 @@
 // Each of its jkdf2.net levels has o: "jkdf2.net", and its detail says
 // from: "jkdf2.net" and the zip's address there (url) in place of massassi.
 //
+// jkdf2.net's mods come the same way (Antonio, 2026-11-16: "We have cougar's
+// permission to take anything from jkdf2.net, but we should still do it in a
+// way that doesn't crash his site"): its jkmod and motsmod folders, and the
+// folders inside them (skins, weapons ...; not "info", its readmes, nor the
+// "prior versions" of a mod), each read once a day. They're rows like its
+// levels', in the same queue (smallest first) and under the same day's count
+// of zips (LEVELS_DF2_PER_DAY is for both, not each), with no 3D data. A mod
+// is left out when Massassi has a zip of its name and size, when its zip is
+// the same file (SHA-256) as one in the library, or when its GOBs all are
+// one's. For each game they wait until Massassi's mods for it have all had
+// their page and download page read, so that their zips' names are known.
+// Their title is the one their readme gives ("Title: ..."), else their
+// episode's or their zip's name. LEVELS_DF2_MODS = "0" stops only them. Their
+// index has Massassi's mods in it too, so a game that reads <game>-mods.json
+// sees only Massassi's, as before:
+//
+//   index/<game>-mods-all.json   both sources' mods of jk1 or mots that are ready
+//
+//   GET /levels/mods/all/jk1.json, /levels/mods/all/mots.json
+//
 // Variables (wrangler.toml): LEVELS_FETCH = "0" stops the job (what it has
 // stays served); LEVELS_PREVIEW = "0" stops it getting 3D data, and
 // LEVELS_PREVIEW_GB (3 when it isn't set) once it has that much of it;
@@ -118,7 +139,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { parseList, parsePage, previewMaps, gobTextures, sizeBytes, openZip, readEntry, dataStart, memReader, parseGob, parseEpisode,
          decodeText, releaseDate, isText, isLevelFile, downloadZip, modPlan, modKind, modGroup, MOD_DIRS,
-         parseArchive, zipKey, sizeSlack, readmeAuthor, df2Title } from "./levels-read.js";
+         parseArchive, parseArchiveDirs, zipKey, sizeSlack, readmeAuthor, readmeTitle, readmeFirstLine, readmeDesc, nameTitle,
+         modWords, df2Title } from "./levels-read.js";
 import { levelParts, gobFinder } from "./levels-parts.js";
 import { OFFICIAL_3DO } from "./levels-official.js";
 
@@ -136,7 +158,8 @@ export const LISTS = [
     { cat: "motssp", game: "mots", kind: "sp", prio: 1 },
 ];
 // jkdf2.net's archive: its folders of multiplayer levels (not its "ai maps",
-// bots for levels Massassi has), each a list of its own.
+// bots for levels Massassi has), each a list of its own, and of mods, each
+// with the folders inside it (subs) read as part of the list.
 const DF2 = "https://www.jkdf2.net";
 const DF2_ARCHIVE = DF2 + "/JKBot/JKArchive/";
 export const DF2_LISTS = [
@@ -144,15 +167,25 @@ export const DF2_LISTS = [
     { cat: "df2jkctf", dir: "jkctf", game: "jk1", kind: "ctf", prio: 0 },
     { cat: "df2motsmp", dir: "motsmp", game: "mots", kind: "mp", prio: 0 },
     { cat: "df2motskfy", dir: "motskfy", game: "mots", kind: "kfy", prio: 0 },
+    { cat: "df2jkmod", dir: "jkmod", game: "jk1", kind: "mod", prio: 0, mod: true, subs: true },
+    { cat: "df2motsmod", dir: "motsmod", game: "mots", kind: "mod", prio: 0, mod: true, subs: true },
 ];
+// The folders inside a mods folder that aren't mods: its readmes, and older
+// versions of one mod.
+const DF2_SKIP_DIR = /^info$|prior versions/i;
 // Its levels' ids start after this one.
 export const DF2_ID = 1000000;
 const isDf2 = row => row.id > DF2_ID;
 const BY_CAT = Object.fromEntries(LISTS.concat(DF2_LISTS).map(l => [l.cat, l]));
 const MOD_CATS = LISTS.filter(l => l.mod).map(l => l.cat);
-// For SQL: the mods' lists, as a quoted list ('jkmod', 'motsmod').
-const MOD_SQL = MOD_CATS.map(c => `'${c}'`).join(", ");
-const isMod = row => MOD_CATS.includes(row.cat);
+const DF2_MOD_CATS = DF2_LISTS.filter(l => l.mod).map(l => l.cat);
+const sqlList = cats => cats.map(c => `'${c}'`).join(", ");
+// For SQL: Massassi's mods' lists, as a quoted list ('jkmod', 'motsmod'),
+// jkdf2.net's, and both.
+const MOD_SQL = sqlList(MOD_CATS);
+const DF2_MOD_SQL = sqlList(DF2_MOD_CATS);
+const ALL_MOD_SQL = sqlList(MOD_CATS.concat(DF2_MOD_CATS));
+const isMod = row => MOD_CATS.includes(row.cat) || DF2_MOD_CATS.includes(row.cat);
 const GOB_EXT = { jk1: "gob", mots: "goo" };
 // The page's graphics packs (index.html, OPTIONAL_PACKS): each player's own.
 const GRAPHICS_PACKS = ["jke.gob", "jkr.gob", "jk hd models.gob"];
@@ -237,11 +270,13 @@ function nameOf(url) {
 }
 
 // The id of the Massassi level whose zip is this one of jkdf2.net (the same
-// name, and the same size as far as both say), or null (massassiZips).
-function onMassassi(mas, name, sizeTxt) {
+// name, and the same size as far as both say), or null (massassiZips). For
+// one of its mods (of, a list or a row's list), only a Massassi mod of the
+// same game.
+function onMassassi(mas, name, sizeTxt, of) {
     const b = sizeBytes(sizeTxt), s = sizeSlack(sizeTxt);
     for (const m of mas.get(zipKey(name)) || [])
-        if (!b || !m.b || Math.abs(m.b - b) <= s + m.s)
+        if ((!of || !of.mod || (m.mod && m.game === of.game)) && (!b || !m.b || Math.abs(m.b - b) <= s + m.s))
             return m.id;
     return null;
 }
@@ -393,11 +428,23 @@ export class LevelJob extends DurableObject {
         if (this.kv("pv_again") !== "1") {
             try {
                 this.sql.exec(`UPDATE lv SET pv_st = NULL, pv_at = NULL, pv_maps = NULL, pv_got = 0, pv_size = 0
-                               WHERE pv_st = 'none' AND zip_st = 'ok' AND cat NOT IN (${MOD_SQL})`);
+                               WHERE pv_st = 'none' AND zip_st = 'ok' AND cat NOT IN (${ALL_MOD_SQL})`);
             } catch {
                 // A table too old to have them (only in tests).
             }
             this.kv("pv_again", 1);
+        }
+        // Once: Massassi's mods that had nothing for the game (files loose
+        // in their zip, outside the game's folders) read again, now that
+        // modPlan places such files by their kind (typed).
+        if (this.kv("typed_plan") !== "1") {
+            try {
+                this.sql.exec(`UPDATE lv SET zip_st = NULL, tries = 0, retry_at = NULL, err = NULL
+                               WHERE zip_st = 'nomod' AND id <= ${DF2_ID} AND zip_url IS NOT NULL`);
+            } catch {
+                // A table too old to have them (only in tests).
+            }
+            this.kv("typed_plan", 1);
         }
     }
 
@@ -532,9 +579,9 @@ export class LevelJob extends DurableObject {
             return true;
         }
         const df2 = this.df2On() && Number(this.kv("df2_backoff_until") || 0) <= now;
-        const df2List = df2 && DF2_LISTS.find(l => Number(this.kv("list_at:" + l.cat) || 0) + DF2_LIST_MS <= now);
-        if (df2List) {
-            await this.guard(() => this.readDf2List(df2List, now), null, true);
+        const df2Folder = df2 && this.df2Folders().find(f => Number(this.kv("list_at:" + f.key) || 0) + DF2_LIST_MS <= now);
+        if (df2Folder) {
+            await this.guard(() => this.readDf2List(df2Folder.list, now, df2Folder), null, true);
             return true;
         }
         const full = await this.full();
@@ -572,22 +619,51 @@ export class LevelJob extends DurableObject {
         return false;
     }
 
-    // jkdf2.net's next zip, if it's due: under the day's count, and for a game
-    // whose Massassi level pages have all been read, so that the zips it
-    // already has from Massassi are known by name.
+    // jkdf2.net's next zip, if it's due: under the day's count (levels and
+    // mods together), and for a game whose Massassi levels have all had their
+    // page read (a level), or whose Massassi mods have all had their page and
+    // download page read (a mod), so that the zips it already has from
+    // Massassi are known by name.
     df2Next(now) {
         if (this.df2Today() >= this.df2PerDay())
             return null;
-        const waiting = this.sql.exec(
-            `SELECT DISTINCT game FROM lv WHERE id <= ${DF2_ID} AND prio = 0 AND cat NOT IN (${MOD_SQL}) AND page_at IS NULL`)
-            .toArray().map(r => r.game);
-        const games = GAMES.filter(g => !waiting.includes(g));
-        if (!games.length)
+        const waiting = sql => this.sql.exec(`SELECT DISTINCT game FROM lv WHERE id <= ${DF2_ID} AND ${sql}`).toArray().map(r => r.game);
+        const levelGames = GAMES.filter(g => !waiting(`prio = 0 AND cat NOT IN (${MOD_SQL}) AND page_at IS NULL`).includes(g));
+        const modGames = this.df2ModsOn() ? GAMES.filter(g => !waiting(
+            `cat IN (${MOD_SQL}) AND (page_at IS NULL OR (page_st = 'ok' AND zip_st IS NULL AND zip_url IS NULL))`).includes(g)) : [];
+        const games = list => list.map(g => `'${g}'`).join(", ");
+        const which = [];
+        if (levelGames.length)
+            which.push(`(cat NOT IN (${DF2_MOD_SQL}) AND game IN (${games(levelGames)}))`);
+        if (modGames.length)
+            which.push(`(cat IN (${DF2_MOD_SQL}) AND game IN (${games(modGames)}))`);
+        if (!which.length)
             return null;
         return this.sql.exec(
             `SELECT * FROM lv WHERE id > ${DF2_ID} AND page_st = 'ok' AND zip_st IS NULL AND zip_url IS NOT NULL
-                 AND (retry_at IS NULL OR retry_at <= ?) AND game IN (${games.map(g => `'${g}'`).join(", ")})
+                 AND (retry_at IS NULL OR retry_at <= ?) AND (${which.join(" OR ")})
              ORDER BY rk, id LIMIT 1`, now).toArray()[0] || null;
+    }
+
+    // jkdf2.net's folders the job reads, each once a day: each list's own,
+    // and for a mods list the folders found inside it (kept from its last
+    // read), each { list, dir, key }, key naming it in the kv.
+    df2Folders() {
+        const out = [];
+        for (const list of DF2_LISTS) {
+            if (list.mod && !this.df2ModsOn())
+                continue;
+            out.push({ list, dir: list.dir, key: list.cat });
+            if (!list.subs)
+                continue;
+            for (const d of this.df2Subs(list))
+                out.push({ list, dir: d.dir, key: list.cat + "/" + d.name, sub: d.name });
+        }
+        return out;
+    }
+
+    df2ModsOn() {
+        return this.env.LEVELS_DF2_MODS !== "0";
     }
 
     df2On() {
@@ -736,24 +812,35 @@ export class LevelJob extends DurableObject {
         this.dirty();
     }
 
-    // One of jkdf2.net's folders (DF2_LISTS): a row for each zip in it that
-    // Massassi doesn't have (by name and size, massassiZips), and that isn't
-    // a second copy in jkdf2.net's archive ("x[1].zip", or another folder).
-    // A zip of another size than before is read again; one that has since
-    // turned out to be Massassi's is left ("dupe").
-    async readDf2List(list, now) {
-        const url = `${DF2_ARCHIVE}?dir=JKDF2/JKDF2/Game%20Files/${list.dir}`;
+    // One of jkdf2.net's folders (DF2_LISTS, df2Folders): a row for each zip
+    // in it that Massassi doesn't have (by name and size, massassiZips), and
+    // that isn't a second copy in jkdf2.net's archive ("x[1].zip", or another
+    // folder). A zip of another size than before is read again; one that has
+    // since turned out to be Massassi's is left ("dupe"). A mods list's own
+    // folder also says which folders are inside it.
+    async readDf2List(list, now, folder) {
+        const f0 = folder || { list, dir: list.dir, key: list.cat };
+        const key = f0.key;
+        const url = `${DF2_ARCHIVE}?dir=JKDF2/JKDF2/Game%20Files/${f0.dir}`;
         let html;
         try {
             html = await (await this.get(url, MAX_PAGE * 8)).text();
         } catch (e) {
-            this.kv("list_at:" + list.cat, now - DF2_LIST_MS + HOUR);
+            // A folder inside one that's gone from the archive: not asked for again.
+            if (f0.sub && e instanceof HttpError && (e.status === 404 || e.status === 410)) {
+                this.setDf2Subs(list, this.df2Subs(list).filter(d => d.dir !== f0.dir));
+                return;
+            }
+            this.kv("list_at:" + key, now - DF2_LIST_MS + HOUR);
             throw e;
         }
         const files = parseArchive(html).filter(f => /\.zip$/i.test(f.name));
-        this.kv("list_at:" + list.cat, now);
-        this.kv("list_n:" + list.cat, files.length);
-        if (!files.length)
+        this.kv("list_at:" + key, now);
+        this.kv("list_n:" + key, files.length);
+        if (list.subs && !f0.sub)
+            this.setDf2Subs(list, parseArchiveDirs(html, list.dir).filter(d => !DF2_SKIP_DIR.test(d.name)));
+        // A folder inside may hold no zips at all; the list's own shouldn't.
+        if (!files.length && !f0.sub)
             this.kv("last_error", `${new Date().toISOString()} no zips in jkdf2.net's ${list.dir} folder (has its page changed?)`);
         const mas = this.massassiZips();
         const rows = this.sql.exec(`SELECT id, zip_url, size_txt, zip_st FROM lv WHERE id > ${DF2_ID}`).toArray();
@@ -764,7 +851,7 @@ export class LevelJob extends DurableObject {
         const max = this.df2MaxBytes();
         for (const f of files) {
             const zip = DF2_ARCHIVE + f.href;
-            const onMas = onMassassi(mas, f.name, f.size);
+            const onMas = onMassassi(mas, f.name, f.size, list);
             const row = have.get(zip);
             if (row) {
                 // A new file there, or one that waited for the size cap.
@@ -794,10 +881,23 @@ export class LevelJob extends DurableObject {
                 next++, list.cat, list.game, list.prio, df2Title(null, f.name), now, now, f.name, f.size,
                 f.date && f.date.slice(0, 10), zip);
         }
-        this.kv("list_same:" + list.cat, same);
-        this.kv("list_twice:" + list.cat, twice);
+        this.kv("list_same:" + key, same);
+        this.kv("list_twice:" + key, twice);
         this.rank();
         this.dirty();
+    }
+
+    // The folders inside a mods list's folder, as its last read found them.
+    df2Subs(list) {
+        try {
+            return JSON.parse(this.kv("df2_subs:" + list.cat) || "[]");
+        } catch {
+            return [];
+        }
+    }
+
+    setDf2Subs(list, subs) {
+        this.kv("df2_subs:" + list.cat, JSON.stringify(subs.map(d => ({ name: d.name, dir: d.dir }))));
     }
 
     // The zips of Massassi's levels and mods, by name (zipKey): [{ id, b, s }]
@@ -806,7 +906,7 @@ export class LevelJob extends DurableObject {
     massassiZips() {
         const out = new Map();
         const rows = this.sql.exec(
-            `SELECT id, zip_url, zip_size, zip_st, size_txt, json_extract(info, '$.name') AS n FROM lv
+            `SELECT id, cat, game, zip_url, zip_size, zip_st, size_txt, json_extract(info, '$.name') AS n FROM lv
              WHERE id <= ${DF2_ID} AND zip_url IS NOT NULL AND COALESCE(zip_st, '') NOT IN (${MAS_LOST.map(s => `'${s}'`).join(", ")})`)
             .toArray();
         for (const r of rows) {
@@ -814,7 +914,8 @@ export class LevelJob extends DurableObject {
             if (!k)
                 continue;
             const got = r.zip_size != null && r.zip_st != null;
-            const m = { id: r.id, b: got ? r.zip_size : sizeBytes(r.size_txt), s: got ? 0 : sizeSlack(r.size_txt) };
+            const m = { id: r.id, b: got ? r.zip_size : sizeBytes(r.size_txt), s: got ? 0 : sizeSlack(r.size_txt),
+                        game: r.game, mod: isMod(r) };
             if (!out.has(k))
                 out.set(k, []);
             out.get(k).push(m);
@@ -940,7 +1041,7 @@ export class LevelJob extends DurableObject {
         }
         if (df2) {
             // Massassi's, by name, since its list was read: not asked for.
-            const onMas = onMassassi(this.massassiZips(), row.name, row.size_txt);
+            const onMas = onMassassi(this.massassiZips(), row.name, row.size_txt, BY_CAT[row.cat]);
             if (onMas) {
                 this.sql.exec("UPDATE lv SET zip_st = 'dupe', zip_at = ?, info = ? WHERE id = ?",
                               now, JSON.stringify({ name: row.name, mas: onMas }), row.id);
@@ -999,15 +1100,30 @@ export class LevelJob extends DurableObject {
             zip.stream = async (at, n) => new Blob([bytes.subarray(at, at + n)]).stream();
             zip.bytes = bytes;
         }
+        // jkdf2.net's: not kept when it's the very zip (SHA-256) of one the
+        // library has under another name.
+        const sameZip = df2 ? this.sql.exec("SELECT id FROM lv WHERE zip_st = 'ok' AND zip_sha = ? AND id != ? ORDER BY id LIMIT 1",
+                                            sha, row.id).toArray()[0] : null;
+        if (sameZip) {
+            if (!zip.bytes)
+                await this.env.LEVELS.delete(key);
+            this.sql.exec(
+                `UPDATE lv SET zip_st = 'dupe', zip_at = ?, zip_size = ?, zip_sha = ?, info = ?, pv_st = 'none', pv_at = ?,
+                     tries = 0, retry_at = NULL, err = NULL WHERE id = ?`,
+                now, size, sha, JSON.stringify({ name, same_zip: sameZip.id }), now, row.id);
+            this.dirty();
+            return;
+        }
         let found;
         try {
             found = await this.lookInside(zip, row);
         } catch (e) {
             found = { bad: String(e && e.message || e) };
         }
-        // jkdf2.net's: not kept when its GOBs are all a level the library
-        // already has (Massassi's, or an earlier copy on jkdf2.net).
-        const same = df2 && !found.bad ? this.sameGobs(row.id, found.gobs) : null;
+        // jkdf2.net's: not kept when its GOBs are all a level (or for a mod, a
+        // mod) the library already has (Massassi's, or an earlier copy on
+        // jkdf2.net).
+        const same = df2 && !found.bad ? this.sameGobs(row.id, found.gobs, isMod(row)) : null;
         if (same) {
             if (!zip.bytes)
                 await this.env.LEVELS.delete(key);
@@ -1020,11 +1136,25 @@ export class LevelJob extends DurableObject {
             return;
         }
         if (df2 && !found.bad) {
-            // Its own title (its episode's) and author (its readme's).
+            // Its own title (its episode's) and author (its readme's). A mod's
+            // title is its readme's "Title:", else its episode's (when it's
+            // only that one episode), else its
+            // readme's first line when that looks like a title, else its
+            // zip's name; its description is its readme's "Description:".
+            const texts = found.texts.map(t => ({ text: t.t }));
             const ep = found.gobs.find(g => g.ep);
-            row.title = df2Title(ep && ep.ep, name);
-            row.author = readmeAuthor(found.texts.map(t => ({ text: t.t }))) || "";
-            this.sql.exec("UPDATE lv SET title = ?, author = ? WHERE id = ?", row.title, row.author, row.id);
+            if (isMod(row)) {
+                // An episode's title names the mod only when it's all the mod is.
+                const one = found.gobs.length === 1 && ep;
+                const t = readmeTitle(texts), e = one && df2Title(ep.ep, ""), l = readmeFirstLine(texts);
+                row.title = t || (e && e !== "Untitled" ? e : null) || l || nameTitle(name);
+                found.mod.titleFrom = t ? "readme" : e && e !== "Untitled" ? "episode" : l ? "line" : "zip";
+                row.descr = readmeDesc(texts) || "";
+            } else {
+                row.title = df2Title(ep && ep.ep, name);
+            }
+            row.author = readmeAuthor(texts) || "";
+            this.sql.exec("UPDATE lv SET title = ?, author = ?, descr = ? WHERE id = ?", row.title, row.author, row.descr || "", row.id);
         }
         if (zip.bytes)
             await this.env.LEVELS.put(key, zip.bytes, { httpMetadata: { contentType: "application/zip" },
@@ -1042,7 +1172,11 @@ export class LevelJob extends DurableObject {
         info.name = name;
         if (!found.bad && mod)
             info.mod = { k: found.mod.kind, n: found.mod.files, ep: found.mod.eps.length, x: found.mod.programs.length,
-                         gp: found.mod.pack || undefined, in: found.plan.inner || undefined };
+                         gp: found.mod.pack || undefined, in: found.plan.inner || undefined,
+                         // Placed by the kind of each file (modPlan's typed).
+                         ty: found.plan.typed || undefined,
+                         // jkdf2.net's: what names it, and its files' names, to find it by.
+                         tf: df2 ? found.mod.titleFrom : undefined, f: df2 ? found.mod.words : undefined };
         if (!found.bad) {
             const detail = {
                 id: row.id, title: row.title, author: row.author, desc: row.descr || "",
@@ -1056,7 +1190,8 @@ export class LevelJob extends DurableObject {
                     // How the page puts it into the game (modPlan): the zip's
                     // entries for the mod's folder, with their place there,
                     // and the episode GOBs, in the inner zip when there's one.
-                    plan: { inner: found.plan.inner, files: found.plan.files, episodes: found.plan.episodes },
+                    plan: { inner: found.plan.inner, files: found.plan.files, episodes: found.plan.episodes,
+                            typed: found.plan.typed || undefined },
                     left: found.plan.left,
                     // What's inside its GOBs: [name, size] for each file.
                     inside: found.inside,
@@ -1074,12 +1209,14 @@ export class LevelJob extends DurableObject {
     }
 
     // The level in the library (not id) that has every one of these GOBs
-    // (by SHA-256), or null: Massassi's levels, and jkdf2.net's kept so far.
-    sameGobs(id, gobs) {
+    // (by SHA-256), or null: Massassi's levels, and jkdf2.net's kept so far;
+    // for a mod (mod), the mods.
+    sameGobs(id, gobs, mod) {
         const want = gobs.map(g => g.sha);
         if (!want.length || want.some(h => !h))
             return null;
-        const rows = this.sql.exec("SELECT id, info FROM lv WHERE zip_st = 'ok' AND id != ? ORDER BY id", id).toArray();
+        const rows = this.sql.exec(`SELECT id, info FROM lv WHERE zip_st = 'ok' AND id != ? AND cat ${mod ? "" : "NOT "}IN (${ALL_MOD_SQL})
+                                    ORDER BY id`, id).toArray();
         for (const r of rows) {
             let have;
             try {
@@ -1190,7 +1327,7 @@ export class LevelJob extends DurableObject {
             const pack = plan.files.length === 1 && planGobs.size === 1 && !eps.length &&
                          GRAPHICS_PACKS.includes(plan.files[0][1].toLowerCase()) ? plan.files[0][1] : null;
             modInfo = {
-                kind: modKind(names, eps, pack), pack, eps,
+                kind: modKind(names, eps, pack), pack, eps, words: modWords(names, 12),
                 files: plan.files.length - planGobs.size + gobs.filter(g => planGobs.has(g.name)).reduce((n, g) => n + (g.files || 1), 0),
                 programs: plan.left.programs,
             };
@@ -1402,13 +1539,13 @@ export class LevelJob extends DurableObject {
         for (const game of GAMES) {
             const all = this.sql.exec("SELECT * FROM lv WHERE game = ? ORDER BY title COLLATE NOCASE", game).toArray();
             const rows = all.filter(r => !isMod(r) && !isDf2(r));
-            await this.indexMods(game, built, all.filter(isMod));
+            await this.indexMods(game, built, all.filter(r => isMod(r) && !isDf2(r)), all.filter(r => isMod(r) && isDf2(r)));
             const levels = rows.filter(r => r.page_st === "ok" && r.zip_st === "ok").map(r => indexEntry(r, JSON.parse(r.info || "{}")));
             const listed = rows.length;
             const left = rows.filter(r => r.page_at == null || (r.page_st === "ok" && r.zip_url && r.zip_st == null)).length;
             const body = JSON.stringify({ v: 1, game, built, source: MASSASSI, listed, left, levels });
             await this.env.LEVELS.put(`index/${game}.json`, body, { httpMetadata: { contentType: "application/json" } });
-            await this.indexAll(game, built, levels, listed, left, all.filter(isDf2));
+            await this.indexAll(game, built, levels, listed, left, all.filter(r => isDf2(r) && !isMod(r)));
         }
         this.kv("index_at", Date.now());
         this.kv("dirty", 0);
@@ -1448,31 +1585,69 @@ export class LevelJob extends DurableObject {
         await this.env.LEVELS.put(`index/${game}-all.json`, body, { httpMetadata: { contentType: "application/json" } });
     }
 
-    // index/<game>-mods.json: the mods that are ready. Each has what a level
-    // has in the levels' index (the zip, its GOBs, dates, downloads), and k
-    // its kind (modKind), n how many files it has, ep how many episodes,
-    // x how many programs the page leaves out, gp the graphics pack's name
-    // when it's one, and gk which of the others are versions of it (modGroup).
-    async indexMods(game, built, rows) {
-        const mods = [];
-        for (const r of rows) {
-            if (r.page_st !== "ok" || r.zip_st !== "ok")
-                continue;
+    // index/<game>-mods.json: Massassi's mods (rows) that are ready. Each has
+    // what a level has in the levels' index (the zip, its GOBs, dates,
+    // downloads), and k its kind (modKind), n how many files it has, ep how
+    // many episodes, x how many programs the page leaves out, gp the graphics
+    // pack's name when it's one, and gk which of the others are versions of
+    // it (modGroup). index/<game>-mods-all.json: those, and jkdf2.net's
+    // (df2Rows) that are ready, each with o: "jkdf2.net" and no Massassi date,
+    // rating or downloads. One of jkdf2.net's that turned out to be one the
+    // library already has (the same zip, or all the same GOBs) since it was
+    // copied is left out.
+    async indexMods(game, built, rows, df2Rows) {
+        const entry = r => {
             const info = JSON.parse(r.info || "{}");
             const d = info.date || {}, m = info.mod || {};
-            mods.push({
+            const df2 = isDf2(r);
+            return {
                 id: r.id, k: m.k || "other", t: r.title, a: r.author,
                 rel: d.d || null, rp: d.p ? d.p[0] : null, sd: d.sort && d.sort !== d.d ? d.sort : undefined,
-                src: d.src ? d.src[0] : null, add: r.mdate || r.added, sz: r.zip_size, r: r.rating, v: r.votes, dl: r.dl,
+                src: d.src ? d.src[0] : null, add: df2 ? undefined : r.mdate || r.added, sz: r.zip_size,
+                r: df2 ? undefined : r.rating, v: df2 ? undefined : r.votes, dl: df2 ? undefined : r.dl,
                 sh: r.shots_got, z: info.name, h: r.zip_sha, gk: modGroup(r.title, r.author),
                 n: m.n || 0, ep: m.ep || undefined, x: m.x || undefined, gp: m.gp || undefined,
+                // Its files placed by their kind; the names of its files (jkdf2.net's).
+                ty: m.ty || undefined, f: m.f && m.f.length ? m.f : undefined,
                 g: (info.gobs || []).map(g => ({ n: g.n, h: g.h, b: g.b, ep: g.ep || undefined, ty: g.ty || undefined,
                                                   in: g.in || undefined })),
-            });
-        }
+            };
+        };
+        const ready = r => r.page_st === "ok" && r.zip_st === "ok";
+        const mods = rows.filter(ready).map(entry);
         const left = rows.filter(r => r.page_at == null || (r.page_st === "ok" && r.zip_st == null)).length;
         const body = JSON.stringify({ v: 1, game, built, source: MASSASSI, listed: rows.length, left, mods });
         await this.env.LEVELS.put(`index/${game}-mods.json`, body, { httpMetadata: { contentType: "application/json" } });
+        const zips = new Set(mods.map(m => m.h).filter(Boolean));
+        const gobs = new Set();
+        for (const m of mods)
+            for (const g of m.g)
+                if (g.h)
+                    gobs.add(g.h);
+        const df2 = [];
+        for (const r of (df2Rows || []).slice().sort((a, b) => a.id - b.id)) {
+            if (!ready(r))
+                continue;
+            const e = entry(r);
+            const hs = e.g.map(g => g.h);
+            if ((e.h && zips.has(e.h)) || (hs.length && hs.every(h => h && gobs.has(h))))
+                continue;
+            zips.add(e.h);
+            for (const h of hs)
+                if (h)
+                    gobs.add(h);
+            e.o = "jkdf2.net";
+            df2.push(e);
+        }
+        const cap = this.df2MaxBytes();
+        const pending = (df2Rows || []).filter(r => r.page_st === "ok" && r.zip_url && r.zip_st == null &&
+                                                    !(sizeBytes(r.size_txt) > cap)).length;
+        const name = m => String(m.t || "").toLowerCase();
+        const both = mods.concat(df2).sort((a, b) => name(a) < name(b) ? -1 : name(a) > name(b) ? 1 : a.id - b.id);
+        const allBody = JSON.stringify({ v: 1, game, built, source: MASSASSI, sources: [MASSASSI, DF2],
+                                         listed: rows.length + (df2Rows || []).filter(r => r.zip_st !== "dupe").length,
+                                         left: left + pending, from: { "jkdf2.net": df2.length }, mods: both });
+        await this.env.LEVELS.put(`index/${game}-mods-all.json`, allBody, { httpMetadata: { contentType: "application/json" } });
     }
 
     async status() {
@@ -1495,18 +1670,19 @@ export class LevelJob extends DurableObject {
              WHERE json_array_length(json_extract(info, '$.date.flags')) > 0 LIMIT 50`).toArray();
         const kinds = this.sql.exec(
             `SELECT game, json_extract(info, '$.mod.k') AS kind, COUNT(*) AS n FROM lv
-             WHERE cat IN (${MOD_SQL}) AND zip_st = 'ok' GROUP BY game, kind`).toArray();
+             WHERE cat IN (${ALL_MOD_SQL}) AND zip_st = 'ok' GROUP BY game, kind`).toArray();
         const lists = {};
         for (const l of LISTS)
             lists[l.cat] = { at: Number(this.kv("list_at:" + l.cat) || 0) || null, n: Number(this.kv("list_n:" + l.cat) || 0) };
-        for (const l of DF2_LISTS)
-            lists[l.cat] = { at: Number(this.kv("list_at:" + l.cat) || 0) || null, n: Number(this.kv("list_n:" + l.cat) || 0),
+        for (const f of this.df2Folders())
+            lists[f.key] = { at: Number(this.kv("list_at:" + f.key) || 0) || null, n: Number(this.kv("list_n:" + f.key) || 0),
                              // Zips left out: Massassi's (by name), and second copies on jkdf2.net.
-                             same_as_massassi: Number(this.kv("list_same:" + l.cat) || 0),
-                             copies: Number(this.kv("list_twice:" + l.cat) || 0) };
+                             same_as_massassi: Number(this.kv("list_same:" + f.key) || 0),
+                             copies: Number(this.kv("list_twice:" + f.key) || 0) };
         const dupes = this.sql.exec(
-            `SELECT game, SUM(json_extract(info, '$.mas') IS NOT NULL) AS by_name, SUM(json_extract(info, '$.same') IS NOT NULL) AS by_gobs
-             FROM lv WHERE id > ${DF2_ID} AND zip_st = 'dupe' GROUP BY game`).toArray();
+            `SELECT game, cat IN (${DF2_MOD_SQL}) AS mods, SUM(json_extract(info, '$.mas') IS NOT NULL) AS by_name,
+                    SUM(json_extract(info, '$.same') IS NOT NULL) AS by_gobs, SUM(json_extract(info, '$.same_zip') IS NOT NULL) AS by_zip
+             FROM lv WHERE id > ${DF2_ID} AND zip_st = 'dupe' GROUP BY game, mods`).toArray();
         return {
             on: this.on(), alarm: await this.ctx.storage.getAlarm(), pace_ms: this.pace(),
             backoff_until: Number(this.kv("backoff_until") || 0) || null, fails: Number(this.kv("fails") || 0),
@@ -1518,7 +1694,7 @@ export class LevelJob extends DurableObject {
             // jkdf2.net: its zips asked for today and in all, the day's cap,
             // and those found to be Massassi's after all.
             jkdf2: {
-                on: this.df2On(), per_day: this.df2PerDay(), max_mb: this.df2MaxBytes() / 1048576,
+                on: this.df2On(), mods: this.df2ModsOn(), per_day: this.df2PerDay(), max_mb: this.df2MaxBytes() / 1048576,
                 today: this.df2Today(), total: Number(this.kv("df2_total") || 0),
                 backoff_until: Number(this.kv("df2_backoff_until") || 0) || null, fails: Number(this.kv("df2_fails") || 0),
                 dupes,
@@ -1622,6 +1798,8 @@ export async function levelsRoute(request, env, url) {
         return serve(request, env, `index/${m[1]}.json`, "public, max-age=300", "application/json; charset=utf-8");
     if ((m = /^\/levels\/mods\/(jk1|mots)\.json$/.exec(path)))
         return serve(request, env, `index/${m[1]}-mods.json`, "public, max-age=300", "application/json; charset=utf-8");
+    if ((m = /^\/levels\/mods\/all\/(jk1|mots)\.json$/.exec(path)))
+        return serve(request, env, `index/${m[1]}-mods-all.json`, "public, max-age=300", "application/json; charset=utf-8");
     if ((m = /^\/levels\/all\/(jk1|mots)\.json$/.exec(path)))
         return serve(request, env, `index/${m[1]}-all.json`, "public, max-age=300", "application/json; charset=utf-8");
     if ((m = /^\/levels\/d\/(\d{1,7})\.json$/.exec(path)))
