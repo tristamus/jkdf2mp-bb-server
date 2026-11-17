@@ -41,7 +41,15 @@
 //   GET /levels/s/<id>-<n>.jpg
 //   GET /levels/p/<id>-<m>.map.json, .mat.json, .parts.json   the 3D data (sent gzip)
 //   GET /levels/p/<id>.tex.json
+//   GET /levels/demo/<name>.<12 hex>.gob   the free multiplayer demo's files (sent gzip)
 //   GET /levels/status                  the job's progress, for checking on it
+//
+// The demo's files: the Jedi Knight multiplayer demo's two GOBs, which the
+// page loads for a player without the game (its Free Demo Room). Each is in
+// the bucket gzipped, at demo/<name>.<first 12 hex digits of the SHA-256 of
+// the file itself>.gob, put there by hand (wrangler r2 object put), not by the
+// job. The name changes with the file, so each is kept for good, and the
+// browser unpacks it (Content-Encoding: gzip). The page checks the whole hash.
 //
 // A level's real release date comes from its readme or the dates of its
 // files (levels-read.js, releaseDate), not Massassi's "Added", which is
@@ -1935,6 +1943,8 @@ export async function levelsRoute(request, env, url) {
         return serve(request, env, `pv/${m[1]}.tex.json`, "public, max-age=3600", "application/json; charset=utf-8");
     if ((m = /^\/levels\/p\/(\d{1,7})-(\d)\.(map|mat|parts)\.json$/.exec(path)))
         return serve(request, env, `pv/${m[1]}-${m[2]}.${m[3]}.json`, "public, max-age=86400", "application/json; charset=utf-8", "gzip");
+    if ((m = /^\/levels\/demo\/([a-z0-9_]{1,32}\.[0-9a-f]{12}\.gob)$/.exec(path)))
+        return serve(request, env, `demo/${m[1]}`, "public, max-age=31536000, immutable", "application/octet-stream", "gzip");
     if ((m = /^\/levels\/s\/(\d{1,7})-(\d)\.jpg$/.exec(path)))
         return serve(request, env, `shot/${m[1]}-${m[2]}`, "public, max-age=604800");
     if (path === "/levels/status") {

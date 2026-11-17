@@ -582,6 +582,28 @@ await check("the routes serve the index, details, zips and pictures", async () =
     assert.equal(await levelsRoute(new Request("https://b/levels/jk1.json"), {}, new URL("https://b/levels/jk1.json")), null);
 });
 
+await check("the free demo's files: gzipped, kept for good, only by a hashed name", async () => {
+    const { env } = newJob();
+    const gob = enc("GOB demo bytes");
+    const { gzipSync } = await import("node:zlib");
+    await env.LEVELS.put("demo/res1demo.9708ac558b00.gob", gzipSync(gob));
+    const get = p => levelsRoute(new Request("https://beta.example" + p), env, new URL("https://beta.example" + p));
+    let r = await get("/levels/demo/res1demo.9708ac558b00.gob");
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("Content-Encoding"), "gzip");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
+    assert.equal(r.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assert.deepEqual(gunzipSync(new Uint8Array(await r.arrayBuffer())), Buffer.from(gob));
+    r = await levelsRoute(new Request("https://beta.example/levels/demo/res1demo.9708ac558b00.gob", { method: "HEAD" }), env,
+                          new URL("https://beta.example/levels/demo/res1demo.9708ac558b00.gob"));
+    assert.equal(r.status, 200);
+    assert.equal((await get("/levels/demo/res1demo.000000000000.gob")).status, 404);
+    // Only a name with its hash, so nothing else in the bucket can be asked for.
+    assert.equal((await get("/levels/demo/res1demo.gob")).status, 404);
+    assert.equal((await get("/levels/demo/../zip/323.zip")).status, 404);
+    assert.equal((await get("/levels/demo/RES1DEMO.9708ac558b00.gob")).status, 404);
+});
+
 // A zip with two GOBs: two maps, which the preview's own page lists.
 const GOB2 = makeGob([{ name: "episode.jk", data: EPISODE.replace(/6000/g, "7000") }, { name: "jkl\\7000.jkl", data: "SECTION: JK\n" }]);
 const ZIP2 = makeZip([{ name: "6000.gob", data: GOB, date: "1999-10-15" }, { name: "7000.gob", data: GOB2, date: "1999-10-15" },
