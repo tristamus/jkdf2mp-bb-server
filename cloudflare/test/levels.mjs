@@ -1489,7 +1489,7 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
     assert.ok(!env.LEVELS.m.has(`zip/${copyId}.zip`));
     assert.ok(!env.LEVELS.m.has(`detail/${copyId}.json`));
     const st = await job.status();
-    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 150, 32]);
+    assert.deepEqual([st.jkdf2.on, st.jkdf2.today, st.jkdf2.total, st.jkdf2.per_day, st.jkdf2.max_mb], [true, 3, 3, 300, 32]);
     assert.deepEqual([st.lists.df2jkmp.n, st.lists.df2jkmp.same_as_massassi, st.lists.df2jkmp.copies], [6, 0, 2]);
     assert.deepEqual(st.jkdf2.dupes, [{ game: "jk1", mods: 0, by_name: 1, by_gobs: 1, by_zip: 0 }]);
     // The next day's look at the folder knows 6000.zip by name now.

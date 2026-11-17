@@ -231,7 +231,8 @@ const PREVIEW_VERSION = 14;
 const MAX_PREVIEW = 64 * 1024 * 1024;
 const MAX_MAPS = 4;
 const DF2_LIST_MS = DAY;
-const DF2_PER_DAY = 150;
+// 300 since 2026-11-17 (Antonio chose it over 150, to finish JK sooner).
+const DF2_PER_DAY = 300;
 const DF2_MAX_MB = 32;
 // A Massassi level whose zip is in one of these states has none in the
 // library, so a zip of the same name on jkdf2.net is still worth having.
