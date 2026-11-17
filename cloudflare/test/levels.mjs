@@ -28,7 +28,7 @@ const { FakeStorage } = await import("./cfstub.mjs");
 globalThis.Response = realResponse;
 const read = await import("../src/levels-read.js");
 const parts = await import("../src/levels-parts.js");
-const { LevelJob, levelsRoute, gobTable } = await import("../src/levels.js");
+const { LevelJob, levelsRoute, gobTable, gobRange } = await import("../src/levels.js");
 const { JkUnzip } = await import("../src/vendor/jkunzip.js");
 
 let failed = 0;
@@ -1433,7 +1433,7 @@ await check("jkdf2.net: a folder of its archive, names, sizes, readme authors an
 
 await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of their own", async () => {
     const seen = fakeDf2();
-    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_MAX_MB: "32" });
     await runUntilIdle(job, 80);
     const df2 = seen.filter(p => p.startsWith("df2:"));
     // Each folder, then the zips: never Massassi's (by name, or by a second
@@ -1513,7 +1513,7 @@ await check("jkdf2.net: the zips Massassi doesn't have, slowly, in an index of t
 
 await check("jkdf2.net: at most LEVELS_DF2_PER_DAY zips a day, smallest first, and the big ones once the cap is raised", async () => {
     const seen = fakeDf2();
-    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "1" });
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "1", LEVELS_DF2_MAX_MB: "32" });
     await runUntilIdle(job, 80);
     const zips = seen.filter(p => p.startsWith("df2:") && p.endsWith(".zip"));
     // MotS's has no Massassi pages to wait for: its first.
@@ -1536,6 +1536,86 @@ await check("jkdf2.net: at most LEVELS_DF2_PER_DAY zips a day, smallest first, a
     await runUntilIdle(job, 40);
     assert.deepEqual(seen2.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp"), DF2_FILE("jkmp", "huge & big.zip")]);
     assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Big One"));
+});
+
+await check("caps lifted: no 32 MB cap on jkdf2.net nor 6 GB on the bucket; what was too big comes, once", async () => {
+    // As a job from before the caps were lifted left it: "huge & big.zip" too big.
+    fakeDf2();
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_MAX_MB: "32" });
+    await runUntilIdle(job, 80);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE name = 'huge & big.zip'").toArray()[0].zip_st, "big");
+    const before = job.sql.exec("SELECT page_at FROM lv WHERE id = 323").toArray()[0].page_at;
+    assert.ok(before > 1);
+    // The new code: no cap unless set, and the one-time look again.
+    delete env.LEVELS_DF2_MAX_MB;
+    job.kv("caps_lifted", 0);
+    const BIG = makeZip([{ name: "big.gob", data: makeGob([{ name: "episode.jk", data: `"Big One"\nTYPE 2\n10: 0 0 LEVEL big.jkl 0 0 -1 -1\n` }]) }]);
+    const seen = fakeDf2({ [DF2_FILE("jkmp", "huge & big.zip")]: () => new Response(BIG) });
+    const again = new LevelJob(job.ctx, env);
+    // Massassi's pages with fewer than six pictures: read again when there's nothing else.
+    assert.equal(again.sql.exec("SELECT page_at FROM lv WHERE id = 323").toArray()[0].page_at, 1);
+    await runUntilIdle(again, 120);
+    assert.equal(again.sql.exec("SELECT zip_st FROM lv WHERE name = 'huge & big.zip'").toArray()[0].zip_st, "ok");
+    assert.ok(seen.includes(DF2_FILE("jkmp", "huge & big.zip")));
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Big One"));
+    assert.ok(again.sql.exec("SELECT page_at FROM lv WHERE id = 323").toArray()[0].page_at > 1);
+    assert.ok(seen.includes("/levels/files/323.shtml"));
+    const st = await again.status();
+    assert.equal(st.jkdf2.max_mb, 1024);
+    assert.equal(await again.full(), false);
+    assert.equal(again.maxBytes(), Infinity);
+    // A cap can still be set.
+    env.LEVELS_MAX_GB = "0.000001";
+    assert.equal(await again.full(), true);
+    assert.equal(again.kv("caps_lifted"), "1");
+});
+
+await check("levels: a GOB too big to unpack has its episode.jk read as it streams, before or after the table", async () => {
+    const EP = `"Huge One"\nTYPE 2\n10: 0 0 LEVEL huge.jkl 0 0 -1 -1\n`;
+    const filler = new Uint8Array(41 * 1024 * 1024).fill(120);
+    // makeGob puts its table after the files: episode.jk is read in a second pass.
+    const after = makeGob([{ name: "episode.jk", data: EP }, { name: "mat\\big.mat", data: filler }]);
+    const t1 = gobTable("episode.jk");
+    const parts = [];
+    for (let i = 0; i < after.length; i += 65536)
+        parts.push(after.subarray(i, i + 65536));
+    await new Blob(parts).stream().pipeThrough(t1.stream).pipeTo(new WritableStream());
+    assert.equal(t1.got(), null);
+    const ef = t1.entry();
+    assert.deepEqual([ef.name, ef.size], ["episode.jk", EP.length]);
+    const bytes = await gobRange(new Blob([after]).stream(), ef.offset, ef.size);
+    assert.equal(new TextDecoder().decode(bytes), EP);
+    // A table before the files (as JK's own GOBs): read as it goes by.
+    const files = [{ name: "episode.jk", data: enc(EP) }, { name: "mat\\big.mat", data: filler.subarray(0, 5000) }];
+    const tableLen = 4 + files.length * 136;
+    const head = new Uint8Array(12);
+    head.set(enc("GOB "));
+    new DataView(head.buffer).setUint32(4, 20, true);
+    new DataView(head.buffer).setUint32(8, 12, true);
+    const table = new Uint8Array(tableLen);
+    const tv = new DataView(table.buffer);
+    tv.setUint32(0, files.length, true);
+    let at = 12 + tableLen;
+    files.forEach((f, i) => {
+        tv.setUint32(4 + i * 136, at, true);
+        tv.setUint32(8 + i * 136, f.data.length, true);
+        table.set(enc(f.name), 12 + i * 136);
+        at += f.data.length;
+    });
+    const before = new Uint8Array(Buffer.concat([head, table, ...files.map(f => f.data)]));
+    const t2 = gobTable("episode.jk");
+    const chunks = [];
+    for (let i = 0; i < before.length; i += 100)
+        chunks.push(before.subarray(i, i + 100));
+    await new Blob(chunks).stream().pipeThrough(t2.stream).pipeTo(new WritableStream());
+    assert.equal(new TextDecoder().decode(t2.got()), EP);
+    // The whole way: a jkdf2.net level whose GOB is over 40 MB is a level.
+    const HUGE = makeZip([{ name: "huge.gob", data: after }]);
+    fakeDf2({ [DF2_FILE("jkmp", "huge & big.zip")]: () => new Response(HUGE, { headers: { "Content-Length": String(HUGE.length) } }) });
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 120);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE name = 'huge & big.zip'").toArray()[0].zip_st, "ok");
+    assert.ok(idxOf(env, "index/jk1-all.json").levels.some(l => l.t === "Huge One"));
 });
 
 await check("jkdf2.net busy: only its own work waits; LEVELS_DF2 = \"0\" asks it nothing", async () => {
@@ -1688,7 +1768,7 @@ await check("mods: Massassi's with nothing for the game before are read again, o
 
 await check("jkdf2.net mods: the ones Massassi doesn't have, in the levels' queue, in an index of their own", async () => {
     const seen = fakeDf2Mods();
-    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    const { job, env } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_MAX_MB: "32" });
     await runUntilIdle(job, 150);
     const df2 = seen.filter(p => p.startsWith("df2:"));
     // The mods' folders and the one inside (not its readmes, nor a mod's older versions).
@@ -1756,7 +1836,7 @@ await check("jkdf2.net mods: the ones Massassi doesn't have, in the levels' queu
 
 await check("jkdf2.net mods: the same day's count as its levels, smallest first", async () => {
     const seen = fakeDf2Mods();
-    const { job } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "2" });
+    const { job } = newJob({ LEVELS_DF2: "1", LEVELS_DF2_PER_DAY: "2", LEVELS_DF2_MAX_MB: "32" });
     await runUntilIdle(job, 150);
     const zips = () => seen.filter(p => p.startsWith("df2:") && !p.includes("?dir="));
     // Two zips in all, levels and mods together.

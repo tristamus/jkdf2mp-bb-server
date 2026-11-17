@@ -94,7 +94,8 @@
 // Slowly, as Antonio asked: in turns with Massassi's work, one request at a
 // time (PACE_MS apart), at most LEVELS_DF2_PER_DAY zips a day when it's set
 // (none by default since 2026-11-17, DF2_PER_DAY), none over
-// LEVELS_DF2_MAX_MB (DF2_MAX_MB: bigger ones wait as "big" until it's raised),
+// LEVELS_DF2_MAX_MB when it's set (DF2_MAX_MB: bigger ones wait as "big"
+// until it's raised; none but MAX_ZIP by default since 2026-11-17),
 // smallest first, and for each game only once Massassi's lists' pages for it
 // have all been read (so its zips' names are known). LEVELS_DF2 = "0" stops
 // it, and LEVELS_DF2_SOURCE is for tests. Their index is a list of its own,
@@ -132,8 +133,9 @@
 // stays served); LEVELS_PREVIEW = "0" stops it getting 3D data, and
 // LEVELS_PREVIEW_GB (3 when it isn't set) once it has that much of it;
 // LEVELS_MAX_GB stops copying zips and pictures once the
-// bucket holds that much (6 when it isn't set: the account's 10 GB a month
-// of R2 without charge is shared with the screenshots); LEVELS_PACE_MS and
+// bucket holds that much (no such cap when it isn't set, since 2026-11-17,
+// when Antonio lifted the 6 GB that kept it inside R2's free 10 GB a month,
+// for about 6 cents a month more); LEVELS_PACE_MS and
 // LEVELS_SOURCE are for tests (a local stand-in for Massassi), and so is
 // LEVELS_MEM_ZIP (the size from which a zip is read from the bucket in parts).
 
@@ -206,10 +208,11 @@ const BACKOFF_MS = 10 * MIN, BACKOFF_MAX_MS = 6 * HOUR;
 // A level whose fetch failed (not a 404) is tried again after 1, 2, 4 h, and
 // is left as "error" after MAX_TRIES, until its page is read again.
 const MAX_TRIES = 4;
-const MAX_GB = 6;
+// No cap on the bucket's levels and pictures since 2026-11-17 (Antonio: "Lift
+// both caps"); LEVELS_MAX_GB sets one. It was 6.
+const MAX_GB = null;
 // The 3D data's own cap (LEVELS_PREVIEW_GB): about 2 MB a level, so most of
-// the library, and with the levels' 6 still inside the account's 10 GB of R2
-// without charge.
+// the library.
 const PREVIEW_GB = 3;
 // Zips up to MEM_ZIP are read in memory, bigger ones from the bucket in
 // parts (a Durable Object has 128 MB). Over MAX_ZIP they aren't copied.
@@ -220,7 +223,8 @@ const MAX_ZIP = 1024 * 1024 * 1024;
 const MEM_GOB = 40 * 1024 * 1024;
 // A step that made no request (step(), work()).
 const LOCAL = "local";
-const MAX_SHOTS = 6, MAX_SHOT = 3 * 1024 * 1024;
+// A picture is held in memory: up to 32 MB (3 until 2026-11-17).
+const MAX_SHOTS = 6, MAX_SHOT = 32 * 1024 * 1024;
 const MAX_PAGE = 2 * 1024 * 1024;
 // Readmes kept for the library's Readme tab.
 const MAX_TEXTS = 4, MAX_TEXT_IN = 1024 * 1024, MAX_TEXT_OUT = 64 * 1024;
@@ -235,7 +239,9 @@ const DF2_LIST_MS = DAY;
 // No count a day since 2026-11-17 (Antonio: "limit it to 1 every 30 seconds but not
 // limit the amount per day"): PACE_MS alone sets the pace. It was 150.
 const DF2_PER_DAY = null;
-const DF2_MAX_MB = 32;
+// jkdf2.net's zips have Massassi's MAX_ZIP since 2026-11-17 (Antonio: "Lift both
+// caps"); LEVELS_DF2_MAX_MB sets a lower one. It was 32.
+const DF2_MAX_MB = null;
 // A Massassi level whose zip is in one of these states has none in the
 // library, so a zip of the same name on jkdf2.net is still worth having.
 const MAS_LOST = ["gone", "none", "error", "bad"];
@@ -337,9 +343,35 @@ function hashing() {
 
 // A GOB's file table as the GOB streams by, for one too big to hold: its
 // header says where the table starts, and the table runs to the end.
-export function gobTable() {
-    let at = 0, head = new Uint8Array(0), start = -1;
+// want: a file's name (lower case) whose bytes to keep as they go by, when the
+// table comes before them (got()); otherwise read them in a second pass
+// (gobRange).
+export function gobTable(want) {
+    let at = 0, head = new Uint8Array(0), start = -1, kept = 0, ent = null, buf = null, filled = 0;
     const parts = [];
+    const table = () => {
+        const t = new Uint8Array(kept);
+        let o = 0;
+        for (const p of parts) {
+            t.set(p, o);
+            o += p.length;
+        }
+        return t;
+    };
+    const entries = t => {
+        const count = t.length >= 4 ? (t[0] | (t[1] << 8) | (t[2] << 16)) + t[3] * 0x1000000 : 0;
+        const out = [];
+        for (let i = 0; i < count && 4 + (i + 1) * 136 <= t.length; i++) {
+            const e = 4 + i * 136;
+            const offset = (t[e] | (t[e + 1] << 8) | (t[e + 2] << 16)) + t[e + 3] * 0x1000000;
+            const size = (t[e + 4] | (t[e + 5] << 8) | (t[e + 6] << 16)) + t[e + 7] * 0x1000000;
+            let name = "";
+            for (let j = 0; j < 128 && t[e + 8 + j]; j++)
+                name += String.fromCharCode(t[e + 8 + j]);
+            out.push({ name: name.replace(/\\/g, "/"), offset, size });
+        }
+        return { count, list: out };
+    };
     const join = (a, b) => {
         const c = new Uint8Array(a.length + b.length);
         c.set(a);
@@ -355,37 +387,73 @@ export function gobTable() {
                 start = ok ? (head[8] | (head[9] << 8) | (head[10] << 16)) + head[11] * 0x1000000 : Infinity;
             }
             const end = at + chunk.length;
-            if (start >= 0 && end > start && parts.reduce((n, p) => n + p.length, 0) < 8 * 1024 * 1024)
-                parts.push(chunk.slice(Math.max(0, start - at)));
+            if (start >= 0 && end > start && kept < 8 * 1024 * 1024) {
+                const p = chunk.slice(Math.max(0, start - at));
+                parts.push(p);
+                kept += p.length;
+            }
+            // The wanted file, once the whole table has gone by.
+            if (want && !ent && start >= 12 && kept >= 4) {
+                const t = table();
+                const { count, list } = entries(t);
+                if (t.length >= 4 + count * 136) {
+                    ent = list.find(f => f.name.toLowerCase() === want && f.size <= 4 * 1024 * 1024) || { none: true };
+                    if (!ent.none)
+                        buf = new Uint8Array(ent.size);
+                }
+            }
+            if (buf && filled < ent.size) {
+                const from = Math.max(ent.offset, at), to = Math.min(ent.offset + ent.size, end);
+                if (to > from) {
+                    buf.set(chunk.subarray(from - at, to - at), from - ent.offset);
+                    filled += to - from;
+                }
+            }
             at = end;
             ctl.enqueue(chunk);
         },
     });
     return {
         stream,
+        // The table: a count, then 136 bytes a file (offset, size, name).
         files() {
             if (!(start >= 12) || !parts.length)
                 return null;
-            const t = new Uint8Array(new Blob(parts).size);
-            let o = 0;
-            for (const p of parts) {
-                t.set(p, o);
-                o += p.length;
-            }
-            // The table: a count, then 136 bytes a file (offset, size, name).
-            const count = t.length >= 4 ? (t[0] | (t[1] << 8) | (t[2] << 16)) + t[3] * 0x1000000 : 0;
-            const files = [];
-            for (let i = 0; i < count && 4 + (i + 1) * 136 <= t.length; i++) {
-                const e = 4 + i * 136;
-                const size = (t[e + 4] | (t[e + 5] << 8) | (t[e + 6] << 16)) + t[e + 7] * 0x1000000;
-                let name = "";
-                for (let j = 0; j < 128 && t[e + 8 + j]; j++)
-                    name += String.fromCharCode(t[e + 8 + j]);
-                files.push({ name: name.replace(/\\/g, "/"), size });
-            }
-            return files;
+            return entries(table()).list.map(f => ({ name: f.name, size: f.size }));
+        },
+        // The wanted file's place in the GOB, or null when it has none.
+        entry() {
+            if (!(start >= 12) || !parts.length)
+                return null;
+            const f = entries(table()).list.find(f => f.name.toLowerCase() === want);
+            return f && f.size <= 4 * 1024 * 1024 ? f : null;
+        },
+        // The wanted file's bytes, when they came after the table.
+        got() {
+            return buf && filled === ent.size ? buf : null;
         },
     };
+}
+
+// Bytes [offset, offset + size) of a stream, the rest let go by.
+export async function gobRange(stream, offset, size) {
+    const out = new Uint8Array(size);
+    let at = 0, filled = 0;
+    const r = stream.getReader();
+    while (filled < size) {
+        const { done, value } = await r.read();
+        if (done)
+            break;
+        const end = at + value.length;
+        const from = Math.max(offset, at), to = Math.min(offset + size, end);
+        if (to > from) {
+            out.set(value.subarray(from - at, to - at), from - offset);
+            filled += to - from;
+        }
+        at = end;
+    }
+    await r.cancel().catch(() => {});
+    return filled === size ? out : null;
 }
 
 class HttpError extends Error {
@@ -448,6 +516,26 @@ export class LevelJob extends DurableObject {
                 // A table too old to have them (only in tests).
             }
             this.kv("typed_plan", 1);
+        }
+        // Once, when the caps were lifted (2026-11-17, Antonio: "Lift both caps
+        // and let's make sure we fetch everything we skipped previously that we
+        // deemed too large"): zips left as too big or as over the bucket's cap
+        // are asked for again, so are zips that had no level (one in a GOB
+        // too big to unpack, whose episode.jk is now read as it streams), and
+        // each Massassi page with fewer than MAX_SHOTS pictures is read again
+        // when there's nothing else to do, which brings back a picture that
+        // was left out as too big.
+        if (this.kv("caps_lifted") !== "1") {
+            try {
+                this.sql.exec(`UPDATE lv SET zip_st = NULL, tries = 0, retry_at = NULL, err = NULL
+                               WHERE zip_st IN ('big', 'full', 'nolevel') AND zip_url IS NOT NULL`);
+                this.sql.exec(`UPDATE lv SET page_at = 1 WHERE id <= ${DF2_ID} AND page_st = 'ok' AND page_at IS NOT NULL
+                               AND json_array_length(COALESCE(shots, '[]')) < ${MAX_SHOTS}`);
+            } catch {
+                // A table too old to have them (only in tests).
+            }
+            this.kv("caps_lifted", 1);
+            this.dirty();
         }
     }
 
@@ -681,7 +769,8 @@ export class LevelJob extends DurableObject {
     }
 
     df2MaxBytes() {
-        return (Number(this.env.LEVELS_DF2_MAX_MB) || DF2_MAX_MB) * 1024 * 1024;
+        const mb = Number(this.env.LEVELS_DF2_MAX_MB) || DF2_MAX_MB;
+        return mb ? Math.min(MAX_ZIP, mb * 1024 * 1024) : MAX_ZIP;
     }
 
     // jkdf2.net's zips asked for today (UTC).
@@ -974,7 +1063,7 @@ export class LevelJob extends DurableObject {
             this.sql.exec("UPDATE lv SET zip_st = 'big', zip_at = ? WHERE id = ?", now, row.id);
             return;
         }
-        const max = (Number(this.env.LEVELS_MAX_GB) || MAX_GB) * 1e9;
+        const max = this.maxBytes();
         if (declared && this.stored() + declared > max) {
             this.sql.exec("UPDATE lv SET zip_st = 'full', zip_at = ? WHERE id = ?", now, row.id);
             return;
@@ -1026,9 +1115,14 @@ export class LevelJob extends DurableObject {
         return this.previewBytes() >= (Number(this.env.LEVELS_PREVIEW_GB) || PREVIEW_GB) * 1e9;
     }
 
+    // The most the levels and pictures may take (LEVELS_MAX_GB), or Infinity.
+    maxBytes() {
+        const gb = Number(this.env.LEVELS_MAX_GB) || MAX_GB;
+        return gb ? gb * 1e9 : Infinity;
+    }
+
     async full() {
-        const max = Number(this.env.LEVELS_MAX_GB) || MAX_GB;
-        return this.stored() >= max * 1e9;
+        return this.stored() >= this.maxBytes();
     }
 
     async readZip(row, now) {
@@ -1039,7 +1133,7 @@ export class LevelJob extends DurableObject {
             this.sql.exec("UPDATE lv SET zip_st = 'big', zip_at = ? WHERE id = ?", now, row.id);
             return df2 ? LOCAL : undefined;
         }
-        const max = (Number(this.env.LEVELS_MAX_GB) || MAX_GB) * 1e9;
+        const max = this.maxBytes();
         if (declared && this.stored() + declared > max) {
             this.sql.exec("UPDATE lv SET zip_st = 'full', zip_at = ? WHERE id = ?", now, row.id);
             return df2 ? LOCAL : undefined;
@@ -1291,16 +1385,32 @@ export class LevelJob extends DurableObject {
                 let s = await z.reader.stream(start, e.csize);
                 if (e.method === 8)
                     s = s.pipeThrough(new DecompressionStream("deflate-raw"));
-                // A mod's GOB too big to hold: its file table, as it goes by.
-                const table = mod ? gobTable() : null;
-                if (table)
-                    s = s.pipeThrough(table.stream);
+                // A GOB too big to hold: its file table, as it goes by (a
+                // mod's, for what it changes), and a level's episode.jk, then
+                // or in a second pass when it comes before the table.
+                const table = gobTable(mod ? null : "episode.jk");
+                s = s.pipeThrough(table.stream);
                 await s.pipeThrough(h.stream).pipeTo(new WritableStream());
                 if (h.size() !== e.size)
                     throw new Error(`bad size for ${e.name}`);
                 g.sha = await h.sha();
-                if (table)
-                    keepInside(g, table.files());
+                keepInside(g, table.files());
+                if (!mod) {
+                    let epb = table.got();
+                    const ef = epb ? null : table.entry();
+                    if (ef) {
+                        let s2 = await z.reader.stream(start, e.csize);
+                        if (e.method === 8)
+                            s2 = s2.pipeThrough(new DecompressionStream("deflate-raw"));
+                        epb = await gobRange(s2, ef.offset, ef.size);
+                    }
+                    if (epb) {
+                        const ep = parseEpisode(decodeText(epb));
+                        g.ep = ep.title;
+                        g.ty = ep.type;
+                        g.lv = ep.levels.slice(0, 32);
+                    }
+                }
             }
             gobs.push(g);
         }
