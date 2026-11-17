@@ -91,8 +91,9 @@
 // permission."). Their title is their episode's, their author from a readme
 // ("Author: ..."), their date from the readmes and files, never jkdf2.net's
 // (the day it was uploaded there).
-// Slowly, as Antonio asked: in turns with Massassi's work, at most
-// LEVELS_DF2_PER_DAY zips a day (DF2_PER_DAY when it isn't set), none over
+// Slowly, as Antonio asked: in turns with Massassi's work, one request at a
+// time (PACE_MS apart), at most LEVELS_DF2_PER_DAY zips a day when it's set
+// (none by default since 2026-11-17, DF2_PER_DAY), none over
 // LEVELS_DF2_MAX_MB (DF2_MAX_MB: bigger ones wait as "big" until it's raised),
 // smallest first, and for each game only once Massassi's lists' pages for it
 // have all been read (so its zips' names are known). LEVELS_DF2 = "0" stops
@@ -113,7 +114,7 @@
 // folders inside them (skins, weapons ...; not "info", its readmes, nor the
 // "prior versions" of a mod), each read once a day. They're rows like its
 // levels', in the same queue (smallest first) and under the same day's count
-// of zips (LEVELS_DF2_PER_DAY is for both, not each), with no 3D data. A mod
+// of zips when there is one (LEVELS_DF2_PER_DAY is for both, not each), with no 3D data. A mod
 // is left out when Massassi has a zip of its name and size, when its zip is
 // the same file (SHA-256) as one in the library, or when its GOBs all are
 // one's. For each game they wait until Massassi's mods for it have all had
@@ -231,8 +232,9 @@ const PREVIEW_VERSION = 14;
 const MAX_PREVIEW = 64 * 1024 * 1024;
 const MAX_MAPS = 4;
 const DF2_LIST_MS = DAY;
-// 300 since 2026-11-17 (Antonio chose it over 150, to finish JK sooner).
-const DF2_PER_DAY = 300;
+// No count a day since 2026-11-17 (Antonio: "limit it to 1 every 30 seconds but not
+// limit the amount per day"): PACE_MS alone sets the pace. It was 150.
+const DF2_PER_DAY = null;
 const DF2_MAX_MB = 32;
 // A Massassi level whose zip is in one of these states has none in the
 // library, so a zip of the same name on jkdf2.net is still worth having.
@@ -626,7 +628,8 @@ export class LevelJob extends DurableObject {
     // download page read (a mod), so that the zips it already has from
     // Massassi are known by name.
     df2Next(now) {
-        if (this.df2Today() >= this.df2PerDay())
+        const cap = this.df2PerDay();
+        if (cap != null && this.df2Today() >= cap)
             return null;
         const waiting = sql => this.sql.exec(`SELECT DISTINCT game FROM lv WHERE id <= ${DF2_ID} AND ${sql}`).toArray().map(r => r.game);
         const levelGames = GAMES.filter(g => !waiting(`prio = 0 AND cat NOT IN (${MOD_SQL}) AND page_at IS NULL`).includes(g));
@@ -671,6 +674,7 @@ export class LevelJob extends DurableObject {
         return this.env.LEVELS_DF2 !== "0";
     }
 
+    // The most zips a day from jkdf2.net, or null for no such count.
     df2PerDay() {
         const v = this.env.LEVELS_DF2_PER_DAY;
         return v != null && v !== "" && Number(v) >= 0 ? Number(v) : DF2_PER_DAY;
