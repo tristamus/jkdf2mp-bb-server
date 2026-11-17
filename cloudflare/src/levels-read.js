@@ -754,6 +754,13 @@ export const MOD_DIRS = ["3do", "mat", "cog", "misc", "sound", "ui", "jkl", "ai"
 // Programs, which the browser can't run (Massassi's rules ban changes to the
 // game's own EXE, but some mods come with a launcher or an installer).
 const PROGRAM = /\.(exe|dll|com|bat|cmd|pif|scr|vbs|msi)$/i;
+// Where the game looks for each kind of file (sithModel, sithMaterial's
+// "mat;3do\\mat", sithCog, sithSound's "sound;voice", sithKeyFrame,
+// sithSoundClass, sithAnimClass, sithAIClass, sithSprite, sithParticle,
+// sithWorld's colormaps, jkMain's levels): for a mod whose files aren't in
+// any of the game's folders (modPlan).
+const TYPE_DIRS = { "3do": "3do", mat: "mat", cog: "cog", wav: "sound", key: "3do/key", snd: "misc/snd", pup: "misc/pup",
+                    ai: "misc/ai", spr: "misc/spr", par: "misc/par", cmp: "misc/cmp", jkl: "jkl" };
 // What's never part of a mod.
 function junk(name) {
     const parts = name.toLowerCase().split("/");
@@ -777,10 +784,15 @@ function junk(name) {
 //   one with the most files wins and the others are left out (they're most
 //   often a second copy, or "optional" extras);
 // - everything else (readmes, pictures, programs, files outside those
-//   folders) is left out.
+//   folders) is left out;
+// - but a zip with nothing of the above, and no program, whose files are
+//   loose (as many mods of 1997 and 1998 are: "put the .3do in your
+//   resource\3do folder"), has them placed by their kind (TYPE_DIRS): a
+//   .3do in 3do/, a .mat in mat/, a .cog in cog/, a .wav in sound/ ...,
+//   those of the folder in the zip that has the most of them (typed).
 //
 // Returns { files: [[entry name, path in the mod]], episodes: [entry name],
-// left: { programs, other, others: [up to 20 names] } }.
+// typed, left: { programs, other, others: [up to 20 names] } }.
 export function modPlan(entries, ext, episodes) {
     const gobRe = new RegExp("\\." + ext + "$", "i");
     const isEp = new Set((episodes || []).map(n => n.toLowerCase()));
@@ -788,6 +800,8 @@ export function modPlan(entries, ext, episodes) {
     const left = { programs: [], other: 0, others: [] };
     const roots = new Map();
     const loose = [];
+    // Files of a kind the game reads, outside its folders: { e, dir, rel }.
+    const typed = [];
     for (const e of entries) {
         if (e.dir || junk(e.name))
             continue;
@@ -814,6 +828,9 @@ export function modPlan(entries, ext, episodes) {
                 left.programs.push(e.name);
             continue;
         }
+        const kind = TYPE_DIRS[(/\.([a-z0-9]+)$/i.exec(base) || [])[1]?.toLowerCase()];
+        if (kind)
+            typed.push({ e, dir: parts.slice(0, -1).join("/").toLowerCase(), rel: kind + "/" + base });
         if (!isText(e.name) && !/\.(jpe?g|png|gif|bmp|pcx|htm|html|url|pdf|zip|rar|7z|ico|ini)$/i.test(base)) {
             left.other++;
             if (left.others.length < 20)
@@ -837,7 +854,29 @@ export function modPlan(entries, ext, episodes) {
             files.push([l.e.name, l.rel]);
         }
     }
-    return { files, episodes: eps, left };
+    let byType = false;
+    if (!files.length && !eps.length && !left.programs.length && typed.length) {
+        const dirs = new Map();
+        for (const t of typed)
+            dirs.set(t.dir, (dirs.get(t.dir) || 0) + 1);
+        let top = null;
+        for (const [dir, n] of dirs)
+            if (top === null || n > dirs.get(top) || (n === dirs.get(top) && dir.length < top.length))
+                top = dir;
+        const placed = new Set();
+        for (const t of typed) {
+            if (t.dir !== top || taken.has(t.rel.toLowerCase()))
+                continue;
+            taken.add(t.rel.toLowerCase());
+            placed.add(t.e.name);
+            files.push([t.e.name, t.rel]);
+        }
+        // What was counted as left out is in the mod now.
+        left.others = left.others.filter(n => !placed.has(n));
+        left.other -= placed.size;
+        byType = true;
+    }
+    return { files, episodes: eps, typed: byType, left };
 }
 
 // What kind of mod it is, guessed from the names of its files (the loose
@@ -958,6 +997,126 @@ export function readmeAuthor(texts) {
         }
     }
     return null;
+}
+
+const TITLE_RES = [
+    /^\s*(?:(?:mod|patch|level|skin|pack)\s+)?title\s*\.*\s*[:=]\s*(.+)$/i,
+    /^\s*(?:mod|patch|skin|pack)\s+name\s*\.*\s*[:=]\s*(.+)$/i,
+    /^\s*name\s+of\s+(?:the\s+)?(?:mod|patch|skin|pack)\s*\.*\s*[:=]\s*(.+)$/i,
+];
+
+// What a mod is called, from its readmes: the first "Title: ..." line (or
+// "Mod title", "Mod name", "Name of mod"). Null when no readme says, or what
+// it says is empty or longer than 80 letters. For jkdf2.net's mods, which
+// have no page to name them.
+export function readmeTitle(texts) {
+    for (const r of texts || []) {
+        if (r.text == null)
+            continue;
+        for (const line of String(r.text).split(/\r\n|\r|\n/).slice(0, 200)) {
+            for (const re of TITLE_RES) {
+                const m = re.exec(line);
+                if (!m)
+                    continue;
+                const v = m[1].replace(/\s+/g, " ").trim().replace(/^["'\u201c]+|["'\u201d]+$/g, "").trim();
+                if (v && v.length <= 80 && /[a-z0-9]/i.test(v))
+                    return v;
+            }
+        }
+    }
+    return null;
+}
+
+// A mod's title from the first line of its first readme, when that line
+// looks like one: short, with letters, not a label ("File: x.zip"), a
+// comment, a date, or the readme template's own heading ("Jedi Knight addon
+// mission"). Null otherwise. For jkdf2.net's mods whose readme has no
+// "Title:" line.
+export function readmeFirstLine(texts) {
+    const r = (texts || []).find(t => t.text != null);
+    if (!r)
+        return null;
+    for (const raw of String(r.text).split(/\r\n|\r|\n/).slice(0, 5)) {
+        const line = raw.replace(/^[\s=*\-_~#|"'.]+|[\s=*\-_~#|"'.]+$/g, "").replace(/\s+/g, " ");
+        // Nothing, a date, or the template's heading: the next line.
+        if (!line || /^\d{1,4}[\/.\-]\d{1,2}[\/.\-]\d{1,4}$/.test(line) ||
+            /^(?:readme|read me|jedi knight add-?on|mysteries of the sith add-?on)/i.test(line))
+            continue;
+        if (line.length > 60 || !/[a-z]/i.test(line) || /^[^:]{1,30}\s*:/.test(line) ||
+            /^(?:by|from|for|to|this|the following|hi|hello)\b/i.test(line))
+            return null;
+        return line;
+    }
+    return null;
+}
+
+// A mod's description from its readmes: what follows a "Description:"
+// label, to a blank line or the next label, at most 600 letters. Null when
+// none says.
+export function readmeDesc(texts) {
+    for (const r of texts || []) {
+        if (r.text == null)
+            continue;
+        const lines = String(r.text).split(/\r\n|\r|\n/).slice(0, 300);
+        for (let i = 0; i < lines.length; i++) {
+            const m = /^\s*(?:mod\s+|patch\s+)?description\s*\.*\s*[:=]\s*(.*)$/i.exec(lines[i]);
+            if (!m)
+                continue;
+            const out = [m[1].trim()];
+            for (let j = i + 1; j < lines.length && j < i + 12; j++) {
+                const l = lines[j].trim();
+                if (!l || /^[A-Za-z][A-Za-z ()\/-]{1,30}\s*\.*\s*:/.test(l) || /^[=*\-_~#]{3,}/.test(l))
+                    break;
+                out.push(l);
+            }
+            const v = out.join(" ").replace(/\s+/g, " ").trim();
+            if (v && /[a-z]/i.test(v))
+                return v.length > 600 ? v.slice(0, 597).replace(/\s+\S*$/, "") + "..." : v;
+        }
+    }
+    return null;
+}
+
+// A mod's title from its zip's name, when nothing better names it: without
+// ".zip", "_" as spaces, and a name all in capitals ("SPYPACK.ZIP", as names
+// were in 1997) or all in small letters ("masters.zip") with a capital to
+// each word ("Spypack", "Masters").
+export function nameTitle(zipName) {
+    const t = df2Title(null, zipName);
+    return /[a-z]/.test(t) && /[A-Z]/.test(t) ? t : t.toLowerCase().replace(/(^|[\s\-])([a-z])/g, (m, a, b) => a + b.toUpperCase());
+}
+
+// What a mod's files are called, for finding it by them: the names (without
+// their extension) of its models, then its scripts, then its sounds, at most
+// max, from the paths of its files (in its folder, or inside its GOBs).
+export function modWords(names, max) {
+    const by = { "3do": [], cog: [], wav: [] };
+    const seen = new Set();
+    for (const n of names || []) {
+        const m = /([^\/\\]+)\.(3do|cog|wav)$/i.exec(n);
+        if (!m || seen.has(m[1].toLowerCase()))
+            continue;
+        seen.add(m[1].toLowerCase());
+        by[m[2].toLowerCase()].push(m[1]);
+    }
+    return by["3do"].concat(by.cog, by.wav).slice(0, max || 12);
+}
+
+// The folders right inside one of jkdf2.net's archive folders, from its page:
+// [{ name, dir }], dir as the archive's address writes it after "Game Files/"
+// ("jkmod/ai%20skins").
+export function parseArchiveDirs(html, parent) {
+    const out = [];
+    const re = /<li data-name="([^"]*)" data-href="\?dir=JKDF2\/JKDF2\/Game%20Files\/([^"]*)">/g;
+    let m;
+    while ((m = re.exec(html || ""))) {
+        const name = unescapeHtml(m[1]), dir = unescapeHtml(m[2]);
+        if (name === ".." || !dir.startsWith(parent + "/") || dir.slice(parent.length + 1).includes("/"))
+            continue;
+        if (!out.some(d => d.dir === dir))
+            out.push({ name, dir });
+    }
+    return out;
 }
 
 // A level's title from jkdf2.net: its episode's title (episode.jk) when it
