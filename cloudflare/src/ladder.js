@@ -42,6 +42,12 @@
 //     scr: 2,                the host's: what the level's script has set of a
 //                            player's by itself, 1 score, 2 kills, 4 deaths,
 //                            8 suicides added up (below)
+//     gt: 61000,             the host's: its game's clock in the level (ms),
+//                            which its time limit goes by
+//     pl: { i, n, loop, next },  the host's, hosting a playlist: this level's
+//                            place in it from 0, how many levels it has,
+//                            whether it starts over after the last, and the
+//                            next level's name ("" after the last)
 //     end: "level" | "left"  its level is over, or its player left }
 //
 // when its level starts, within a couple of seconds of a kill, every 30 s
@@ -150,6 +156,15 @@ const SCAN = 256;
 const CLOSE_MS = 15 * 1000;
 // A match nobody has reported on for this long is over.
 const IDLE_MS = 5 * 60 * 1000;
+// How far the host's game clock may be from the one the lobby keeps for it
+// before that one is moved (take).
+const CLOCK_SLACK_MS = 1500;
+// How long after its level ends a match's last scoreboard is still in the
+// room windows (Ladder.live): the score screen, and a playlist's wait for
+// players still getting the next level.
+const LAST_SHOWN_MS = 2 * 60 * 1000;
+// The room windows show a run of kills from this many on.
+const LIVE_STREAK = 3;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
 export const COUNT_AGREE = 0.9;
@@ -249,6 +264,8 @@ const ENDS = ["level", "left"];
 // The game's multiplayer mode flags (types_enums.h in the OpenJKDF2 fork).
 export const MODE_TEAMS = 0x1;
 export const MODE_COG_SCORES = 0x4;
+export const MODE_TIME_LIMIT = 0x8;
+export const MODE_SCORE_LIMIT = 0x10;
 // What a level's script set of a player's by itself, in a report's scr
 // (STDCOMM_WSRELAY_SCRIPTED_* in the OpenJKDF2 fork).
 const SCR_SCORE = 1;
@@ -448,8 +465,14 @@ export function cleanReport(b64) {
         build: typeof r.build === "string" && BUILD_RE.test(r.build) ? r.build : "",
         end: ENDS.includes(r.end) ? r.end : "",
         scr: whole(r.scr, SCR_SCORE | SCR_COUNTS) ?? 0,
-        rules: null, ev: [], sb: null, teams: null,
+        gt: whole(r.gt, DAY_MS),
+        rules: null, ev: [], sb: null, teams: null, pl: null,
     };
+    if (isObject(r.pl)) {
+        const n = whole(r.pl.n, 99), i = whole(r.pl.i, 99);
+        if (n && i !== null && i < n)
+            out.pl = { i, n, loop: r.pl.loop === 1 ? 1 : 0, next: typeof r.pl.next === "string" ? cleanText(r.pl.next, 48) : "" };
+    }
     if (isObject(r.rules)) {
         out.rules = { mode: whole(r.rules.mode, 0xffffff) ?? 0, sl: whole(r.rules.sl, 99999) ?? 0,
                       tl: whole(r.rules.tl, 99999) ?? 0 };
@@ -505,6 +528,82 @@ export function cookieKey(request) {
 export async function hashKey(key) {
     const bytes = new TextEncoder().encode("jkdf2mp-ladder:" + key);
     return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+}
+
+// The level's file as a match keeps it, from a room's entry's: as the
+// fork's ladder.js names it (mapName), in lowercase as cleanReport has it.
+function mapFile(map) {
+    return map.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 32).toLowerCase();
+}
+
+// A match as the landing page's room windows show it while it's played
+// (Ladder.live, in Lobby.status's games):
+//
+//   { mode, sl, tl,          the host's rules: its mode flags, and its score
+//                            limit and time limit (minutes) when they're on
+//     at,                    when the host's game clock read 0, in ms since
+//                            1970 by the lobby's clock (its level's time
+//                            limit is up tl minutes after that)
+//     over,                  when its level ended, once it has
+//     pl: { i, n, loop, next },   the host's playlist, when it hosts one
+//     nocount: "password" | "coop",   why it won't count for standings, or
+//     count: 120,            how long it has to run to (what else it takes
+//                            is only known at its end: buildRecord)
+//     sb: [[name, score, kills, deaths, team], ...],
+//                            the host's scoreboard as it last sent it, the
+//                            best first
+//     teams: [5 scores],     the host's team scores, in a team game
+//     last: [killer, victim, kind, at],
+//                            its latest kill that counts (killer "" when
+//                            nobody did it: a fall, the level, a suicide)
+//     streak: [name, n] }    the longest run of kills going, from
+//                            LIVE_STREAK on, of a player on the scoreboard
+//
+// over: when its level ended (the time it shows as it ended), 0 while it's
+// played.
+export function liveView(m, over = 0) {
+    const r = m.rules || { mode: 0, sl: 0, tl: 0 };
+    const out = {
+        mode: r.mode, sl: r.mode & MODE_SCORE_LIMIT ? r.sl : 0, tl: r.mode & MODE_TIME_LIMIT ? r.tl : 0,
+        at: Math.round(m.clock || m.startedAt),
+    };
+    if (over)
+        out.over = Math.round(over);
+    if (m.pl)
+        out.pl = { ...m.pl };
+    if (m.locked)
+        out.nocount = "password";
+    else if (coopLevel(m.game, m.map, m.mod, m.episode))
+        out.nocount = "coop";
+    else
+        out.count = COUNT_SECS;
+    const name = i => (m.players[i] && m.players[i].name) || "";
+    const cur = Array.isArray(m.cur) ? m.cur.filter(i => m.rows[i]) : [];
+    out.sb = cur.map(i => [name(i), m.rows[i][0], m.rows[i][1], m.rows[i][2], m.rows[i][4]])
+                .sort((a, b) => b[1] - a[1] || b[2] - a[2] || a[3] - b[3]);
+    if ((r.mode & MODE_TEAMS) && m.teams)
+        out.teams = m.teams.slice();
+    // The kills that count (buildRecord), in the order they happened.
+    const kills = m.kills.filter(c => c.own || c.by.length >= 2 || !m.players[c.v].reports)
+                         .sort((a, b) => a.ts - b.ts);
+    const last = kills.at(-1);
+    if (last)
+        out.last = [last.k < 0 || last.k === last.v ? "" : name(last.k), name(last.v), last.kind, Math.round(last.ts)];
+    const run = new Map();
+    for (const c of kills) {
+        run.set(c.v, 0);
+        if (c.k >= 0 && c.k !== c.v)
+            run.set(c.k, (run.get(c.k) || 0) + 1);
+    }
+    let best = null;
+    for (const i of cur) {
+        const n = run.get(i) || 0;
+        if (n >= LIVE_STREAK && (!best || n > best[1]))
+            best = [name(i), n];
+    }
+    if (best)
+        out.streak = best;
+    return out;
 }
 
 function newPlayer(seat, key, now) {
@@ -1065,10 +1164,38 @@ export class Ladder {
         const m = this.matches.get(roomId);
         if (!m || !m.title || typeof map !== "string")
             return "";
-        const file = map.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 32).toLowerCase();
+        const file = mapFile(map);
         if (m.map !== file || m.title.toLowerCase() === file.replace(/\.jkl$/, ""))
             return "";
         return m.title;
+    }
+
+    // A room's match as the landing page's room windows show it (Lobby.
+    // status, liveView): from the host's first report of the level on the
+    // room's map (map, its entry's) until LAST_SHOWN_MS after it ended; null
+    // otherwise, and for a host whose game doesn't report. locked: the room
+    // has a password now, which leaves the scores out, as its match's page
+    // is in no list.
+    live(roomId, map, locked, now = Date.now()) {
+        const m = this.matches.get(roomId);
+        if (!m || typeof map !== "string" || m.map !== mapFile(map))
+            return null;
+        let v;
+        if (m.done) {
+            if (!m.last || now - (m.doneAt || 0) > LAST_SHOWN_MS)
+                return null;
+            v = { ...m.last };
+        } else {
+            if (!m.rules)
+                return null;
+            v = liveView(m, m.ended ? m.overAt || now : 0);
+        }
+        if (locked || v.nocount === "password") {
+            for (const k of ["sb", "teams", "last", "streak", "count"])
+                delete v[k];
+            v.nocount = "password";
+        }
+        return v;
     }
 
     later(fn) {
@@ -1205,13 +1332,24 @@ export class Ladder {
             m.rules = r.rules;
         if (isHost && r.scr)
             m.scr = (m.scr || 0) | r.scr;
+        // When the host's game clock read 0, for the time left (live): only
+        // while its level is on, and moved only when it's a second and more
+        // off, so the status doesn't change with every report.
+        if (isHost && r.gt !== null && !r.end && !(Math.abs(now - r.gt - (m.clock || 0)) < CLOCK_SLACK_MS))
+            m.clock = now - r.gt;
+        if (isHost && r.pl)
+            m.pl = r.pl;
         for (const e of r.ev)
             this.kill(m, pi, e, now);
         if (isHost && r.sb) {
+            // Who's on the host's scoreboard now, for the live one.
+            m.cur = [];
             for (const [id, score, kills, deaths, suicides, team] of r.sb) {
                 const who = this.who(m, id, now);
-                if (who >= 0)
+                if (who >= 0) {
                     m.rows[who] = [score, kills, deaths, suicides, team];
+                    m.cur.push(who);
+                }
             }
             m.teams = r.teams;
         }
@@ -1235,6 +1373,8 @@ export class Ladder {
             m.closing = now;
         this.lobby.ctx.storage.put("match:" + roomId, m);
         this.wake();
+        // The room windows' live view of it (live).
+        this.lobby.statusChanged();
     }
 
     // Whether every game that reported the match has sent its end. The
@@ -1375,10 +1515,21 @@ export class Ladder {
         for (const m of this.matches.values()) {
             if (m.done)
                 continue;
+            // The room windows' live view of it says it's over (live).
             if (m.closing && m.closing <= now)
-                this.later(() => { if (!m.done) this.finish(m, m.roomGone ? "room closed" : "level over", now); });
+                this.later(() => {
+                    if (!m.done) {
+                        this.finish(m, m.roomGone ? "room closed" : "level over", now);
+                        this.lobby.statusChanged();
+                    }
+                });
             else if (m.lastAt + IDLE_MS <= now)
-                this.later(() => { if (!m.done) this.finish(m, "went quiet", now); });
+                this.later(() => {
+                    if (!m.done) {
+                        this.finish(m, "went quiet", now);
+                        this.lobby.statusChanged();
+                    }
+                });
         }
         if (this.unsaved.some(u => u.at <= now))
             this.later(() => this.saveAll());
@@ -1410,7 +1561,10 @@ export class Ladder {
         } else {
             // What's left says it's over, for a late report from its host,
             // and what its level is called while the room stays on it.
-            const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map, title: m.title || "" };
+            // And how it stood as it ended, for the room windows between
+            // levels (live).
+            const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map, title: m.title || "",
+                           last: m.rules ? liveView(m, m.overAt || now) : null, doneAt: now };
             this.matches.set(m.room, done);
             storage.put("match:" + m.room, done);
         }

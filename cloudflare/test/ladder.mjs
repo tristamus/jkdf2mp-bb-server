@@ -1947,6 +1947,138 @@ await check("the page's status names the level a room is on, from its host's rep
     assert.equal("title" in (await w3.status()).games[0], false);
 });
 
+await check("the page's status has a room's match as it's played: its rules, clock, scores, last kill and streak", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const page = await w.connect();
+    await w.say(page, "watch");
+    const heard = () => page.take().filter(l => l.startsWith("status "))
+        .map(l => JSON.parse(Buffer.from(l.slice(7), "base64").toString()));
+    const H = await w.host("Maw", { map: "m10.jkl", title: "Canyon Oasis", maxRank: 8 });
+    const K = await w.join("Kyle_K", H);
+    heard();
+    assert.equal("live" in (await w.status()).games[0], false, "nothing before its host's game has reported");
+    assert.equal((await w.status()).games[0].rank, 8, "the highest Force rank, from the room's entry");
+    const rules = { mode: 0x8 | 0x10, sl: 20, tl: 15 };
+    H.since = K.since = Date.now();
+    const t0 = Date.now();
+    await H.report({ rules, gt: 4000, sb: [[1, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0]] });
+    await K.report();
+    await w.settle();
+    let s = heard().pop();
+    assert.ok(Math.abs(s.now - Date.now()) < 1000, "the lobby's clock as the status went");
+    let live = s.games[0].live;
+    assert.deepEqual([live.mode, live.sl, live.tl, live.count, live.nocount, live.over],
+                     [0x18, 20, 15, 120, undefined, undefined]);
+    assert.ok(Math.abs(live.at - (t0 - 4000)) < 200, "the clock goes by the host's game's: " + (live.at - t0));
+    assert.deepEqual(live.sb, [["Maw", 0, 0, 0, 0], ["Kyle_K", 0, 0, 0, 0]]);
+    assert.equal("last" in live || "streak" in live || "teams" in live, false);
+    // Kyle kills Maw three times, then Maw kills Kyle once and Kyle again.
+    skew += 30 * SEC;
+    for (let i = 0; i < 3; i++)
+        await killAll([H, K], 1, 2, 1);
+    await H.report({ gt: 34000 + 700, sb: [[1, 0, 0, 3, 0, 0], [2, 3, 3, 0, 0, 0]] });
+    await w.settle();
+    live = (await w.status()).games[0].live;
+    assert.ok(Math.abs(live.at - (t0 - 4000)) < 200, "a clock a moment off isn't moved");
+    assert.deepEqual(live.sb, [["Kyle_K", 3, 3, 0, 0], ["Maw", 0, 0, 3, 0]], "the best first");
+    assert.deepEqual(live.last.slice(0, 3), ["Kyle_K", "Maw", 1]);
+    assert.ok(Math.abs(live.last[3] - Date.now()) < 1000, "when it was");
+    assert.deepEqual(live.streak, ["Kyle_K", 3]);
+    await killAll([H, K], 2, 1, 2);
+    live = (await w.status()).games[0].live;
+    assert.deepEqual(live.last.slice(0, 3), ["Maw", "Kyle_K", 2]);
+    assert.equal("streak" in live, false, "a run ends with its player's death");
+    await killAll([H, K], 1, 0, 5);
+    assert.deepEqual((await w.status()).games[0].live.last.slice(0, 3), ["", "Maw", 5], "nobody's kill");
+    // The host's game fell behind (a stall): its clock goes by the game's.
+    await H.report({ gt: 30000 });
+    await w.settle();
+    live = (await w.status()).games[0].live;
+    assert.ok(Math.abs(live.at - (Date.now() - 30000)) < 200, "moved to the game's clock");
+    // A report that changes nothing shown sends no new status.
+    heard();
+    await K.report();
+    await w.settle();
+    assert.deepEqual(heard(), []);
+    // Only the host's word counts for the rules, scoreboard and clock.
+    await K.report({ rules: { mode: 1, sl: 1, tl: 1 }, gt: 1, sb: [[2, 99, 99, 0, 0, 0]] });
+    await w.settle();
+    live = (await w.status()).games[0].live;
+    assert.deepEqual([live.mode, live.sb[0][1]], [0x18, 3], "not 99");
+    // A playlist, as the host says.
+    await H.report({ pl: { i: 1, n: 3, loop: 1, next: "Bespin Mining Station" } });
+    await w.settle();
+    assert.deepEqual((await w.status()).games[0].live.pl, { i: 1, n: 3, loop: 1, next: "Bespin Mining Station" });
+    // Its level ends: the page has how it stood, until the next level or
+    // LAST_SHOWN_MS later.
+    const endAt = Date.now();
+    await H.report({ end: "level" });
+    await w.settle();
+    assert.ok(Math.abs((await w.status()).games[0].live.over - endAt) < 200, "over as soon as its host says");
+    await K.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    assert.equal(w.lobby.ladder.matches.get(H.room).done, true);
+    s = heard().pop();
+    live = s.games[0].live;
+    assert.ok(live.over && live.sb.length === 2 && live.pl.n === 3, "the page was told it's over, with its last scores");
+    const w2 = await new World(env, w.storage).start(w.ctx.sockets);
+    assert.ok((await w2.status()).games[0].live.over, "also after a restart");
+    skew += 2 * MIN + SEC;
+    assert.equal("live" in (await w2.status()).games[0], false, "gone a while after");
+    for (const g of [K, H])
+        await w2.say(g.ws, "leave");
+    await w2.settle();
+
+    // A team game: the team scores. A password: the rules and the clock, no
+    // scores, and it doesn't count.
+    const T = await w2.host("Boc", { map: "c3.jkl", episode: "JK1CTF", password: "sesame" });
+    const J = await w2.join("Jan", T, { password: "sesame" });
+    T.since = J.since = Date.now();
+    await T.report({ rules: { mode: 0x1, sl: 0, tl: 0 }, gt: 0, sb: [[1, 1, 1, 0, 0, 1], [2, 0, 0, 1, 0, 2]],
+                     teams: [0, 1, 0, 0, 0] });
+    await killAll([T, J], 2, 1, 1);
+    live = (await w2.status()).games[0].live;
+    assert.deepEqual(Object.keys(live).sort(), ["at", "mode", "nocount", "sl", "tl"]);
+    assert.deepEqual([live.mode, live.nocount, live.sl, live.tl], [1, "password", 0, 0]);
+    // Its password taken off: still a password match, which never counts.
+    await w2.say(T.ws, "update " + entry({ map: "c3.jkl", episode: "JK1CTF" }));
+    w2.lobby.rooms.get(T.room).pw = "";
+    assert.deepEqual((await w2.status()).games[0].live.nocount, "password");
+    for (const g of [J, T])
+        await w2.say(g.ws, "leave");
+    await w2.settle();
+    const U = await w2.host("Boc", { map: "c3.jkl", episode: "JK1CTF" });
+    U.since = Date.now();
+    await U.report({ rules: { mode: 0x1 | 0x10, sl: 10, tl: 0 }, sb: [[1, 4, 4, 0, 0, 1]], teams: [0, 4, 6, 0, 0] });
+    await w2.settle();
+    live = (await w2.status()).games[0].live;
+    assert.deepEqual([live.teams, live.sl, live.count], [[0, 4, 6, 0, 0], 10, 120]);
+    assert.ok(Math.abs(live.at - Date.now()) < 200, "a game that doesn't say its clock: from when its level began");
+    await w2.say(U.ws, "leave");
+    await w2.settle();
+    // A co-op level doesn't count.
+    const C = await w2.host("Boc", { map: "thief.jkl", episode: "thief" });
+    await C.report({ rules: { mode: 0, sl: 0, tl: 0 } });
+    await w2.settle();
+    assert.equal((await w2.status()).games[0].live.nocount, "coop");
+});
+
+await check("a report's playlist and clock are taken as they should be, and nothing else", () => {
+    const rep = o => cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, ...o })));
+    assert.deepEqual(rep({ gt: 61000, pl: { i: 2, n: 3, loop: 1, next: " Canyon\u0007 Oasis " } }).pl,
+                     { i: 2, n: 3, loop: 1, next: "Canyon Oasis" });
+    assert.equal(rep({ gt: 61000 }).gt, 61000);
+    assert.equal(rep({}).gt, null);
+    assert.equal(rep({ gt: -1 }).gt, null);
+    assert.equal(rep({ gt: "1" }).gt, null);
+    assert.equal(rep({ pl: { i: 3, n: 3 } }).pl, null, "a place past its end");
+    assert.equal(rep({ pl: { i: 0, n: 0 } }).pl, null);
+    assert.equal(rep({ pl: [1, 2] }).pl, null);
+    assert.deepEqual(rep({ pl: { i: 0, n: 2, loop: true, next: 5 } }).pl, { i: 0, n: 2, loop: 0, next: "" });
+});
+
 // ---- Screenshots on match pages (src/ladder-shots.js).
 
 // final: true for a final scoreboard, "left" for one of a level its player left.

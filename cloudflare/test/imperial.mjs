@@ -70,6 +70,7 @@ test("the real relay's reply", () => {
     assert.equal(g.max, 32);
     assert.equal(g.cur, 1);
     assert.equal(g.tail, "");
+    assert.equal(g.mode, 0x18, "its mode: time limit and score limit on");
 });
 
 test("Coruscant is pinned first, its own slot off the counts", () => {
@@ -78,7 +79,7 @@ test("Coruscant is pinned first, its own slot off the counts", () => {
         state: "live", server: SERVER, checked: "2026-10-31T19:00:00.000Z",
         games: [{ key: "13e5dd93743f59055bbf297508845b2b", name: "Coruscant", game: "jk1", map: "c3.jkl",
                   episode: "JK1CTF", mod: "", locked: false, players: 0, max: 31, dedicated: true, pinned: true,
-                  listed: true, joinable: true, why: "" }],
+                  listed: true, joinable: true, why: "", mode: 0x18 }],
     });
 });
 
