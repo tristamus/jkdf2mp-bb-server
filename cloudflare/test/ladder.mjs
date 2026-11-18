@@ -714,6 +714,57 @@ await check("one browser in two seats doesn't count, and a game's next level isn
                      [["Kyle_K", 0], ["Boc", 0]]);
 });
 
+await check("one who leaves and comes back from the same browser is one player, and the match still counts", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    const H = await w.host("Maw", { pk: KEYS.maw });
+    const K = await w.join("Kyle_K", H, { pk: KEYS.kyle });
+    const T = await w.join("Trent", H, { pk: KEYS.boc });
+    for (const g of [H, K, T]) {
+        g.since = Date.now();
+        await g.report();
+    }
+    skew += 2 * MIN;
+    await killAll([H, K, T], T.id, K.id);
+    await killAll([H, K, T], K.id, T.id);
+    await H.report({ sb: [[H.id, 0, 0, 0, 0, 0], [K.id, 1, 1, 1, 0, 0], [T.id, 1, 1, 1, 0, 0]] });
+    // Trent's tab reloads: its socket goes without a word (its seat is held
+    // a while), and the page comes back in a new seat, as a new game.
+    skew += 10 * SEC;
+    await w.close(T.ws);
+    skew += 20 * SEC;
+    const T2 = await w.join("Trent", H, { pk: KEYS.boc });
+    assert.notEqual(T2.id, T.id);
+    T2.since = Date.now();
+    await T2.report();
+    skew += 2 * MIN;
+    await killAll([H, K, T2], K.id, T2.id);
+    await killAll([H, K, T2], T2.id, T2.id);
+    await H.report({ end: "level", sb: [[H.id, 0, 0, 0, 0, 0], [K.id, 1, 1, 2, 0, 0], [T2.id, 0, 1, 1, 1, 0]] });
+    for (const g of [K, T2])
+        await g.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.alarm();
+    const m = env.LADDER.rows("SELECT * FROM matches")[0];
+    assert.deepEqual([m.players, m.reporters, m.kills, m.confirmed, m.counted], [3, 3, 4, 4, 1]);
+    const d = JSON.parse(m.detail);
+    assert.equal(d.sharedKey, false);
+    assert.deepEqual(d.agree, { reported: 4, kept: 4, confirmed: 4, sbRows: 3, sbSame: 3 });
+    const rows = env.LADDER.rows("SELECT slot, name, score, kills, deaths, suicides, secs, place FROM match_players ORDER BY slot");
+    assert.deepEqual(rows.map(r => [r.slot, r.name, r.score, r.kills, r.deaths, r.suicides, r.place]),
+                     [[0, "Maw", 0, 0, 0, 0, 3], [1, "Kyle_K", 1, 1, 2, 0, 1], [2, "Trent", 1, 2, 2, 1, 1]]);
+    assert.ok(rows[2].secs >= 240 && rows[2].secs < 260, `both of Trent's times: ${rows[2].secs}`);
+    assert.deepEqual(d.back, [2]);
+    assert.deepEqual(d.sb.map(r => r.slice(0, 5)), [[0, 0, 0, 0, 0], [1, 1, 1, 2, 0], [2, 1, 2, 2, 1]]);
+    // Who killed whom: Trent's line has both times.
+    assert.deepEqual(d.kills.map(k => [k[1], k[2]]), [[2, 1], [1, 2], [1, 2], [2, 2]]);
+    assert.equal(env.LADDER.rows("SELECT COUNT(DISTINCT player_id) AS n FROM match_players")[0].n, 3);
+    const text = textOf((await w.page(`/match/${m.id}`)).body);
+    assert.ok(text.includes("Confirmed by 3 of 3 players"), text);
+    assert.ok(text.includes("Trent left and came back from the same browser: their line has both times together."));
+    assert.ok(!text.includes("same browser."));
+});
+
 await check("a level closes as soon as every game has said it's over, and waits only so long for one that doesn't", async () => {
     const rules = { mode: 0, sl: 0, tl: 0 };
     const env = newEnv();

@@ -273,6 +273,13 @@ kills were seen by two games, it had no password, no two of its players had the 
 its level's script didn't keep the score, and its level isn't a co-op level (both below). The
 standings add up only the matches that are `counted`.
 
+A player who leaves a match and comes back to it from the same browser (a reload, a lost
+connection, leaving and joining again) gets a new seat, so the lobby first has them as two players
+with one key. When their games were never in the match at the same time, going by when each
+reported, the match is saved with them once: one line with what both games did, and a sentence on
+its page that says so. Two games from one browser that were in it at the same time stay two players,
+and the match doesn't count.
+
 What that's worth: a kill two games reported was announced in the match, not made up afterwards by
 one of them. It says no more. The victim's own game is the one that announces a kill, a changed game
 can announce what it likes, and two players can agree to feed each other kills.

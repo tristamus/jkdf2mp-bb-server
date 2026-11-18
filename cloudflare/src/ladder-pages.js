@@ -612,11 +612,14 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
         }).join("")}</tr>`).join("")}</tbody></table>`;
 
     const agree = isObject(detail.agree) ? detail.agree : {};
+    const back = (Array.isArray(detail.back) ? detail.back : []).map(s => bySlot.get(s)).filter(n => typeof n === "string");
     const how = `Each player's game reports the kills it sees to the lobby. ${count(m.reporters, "game")} of ${m.players} reported this match, and ` +
                 `${m.confirmed} of its ${count(m.kills, "kill")} ${m.confirmed === 1 ? "was" : "were"} seen by two games or more.` +
                 (scripted ? " The level's own points are the host's game's word alone: no other game sees them."
                  : agree.sbRows ? ` The host's scoreboard matched for ${agree.sbSame} of ${count(agree.sbRows, "player")}.` : "") +
-                (detail.sharedKey ? " Two of its players played from the same browser." : "");
+                (detail.sharedKey ? " Two of its players played from the same browser." : "") +
+                (back.length ? ` ${back.map(esc).join(" and ")} left and came back from the same browser: ` +
+                               `${back.length === 1 ? "their line has" : "each one's line has"} both times together.` : "");
 
     const title = `${m.title}${result ? ": " + (winner.name !== null ? (winner.name || "Anonymous") + " wins" : TEAMS[winner.team] + " team wins") : ""}`;
     const top = rows.slice(0, 8).map((r, i) => {

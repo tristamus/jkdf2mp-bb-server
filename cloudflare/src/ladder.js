@@ -509,12 +509,81 @@ export async function hashKey(key) {
 
 function newPlayer(seat, key, now) {
     return { seat, key, name: "", pk: "", anon: false, idle: false, build: "", reports: 0, lv: 0, lastN: 0, t: 0, addr: -1,
-             joined: now, seen: now, left: 0 };
+             joined: now, seen: now, left: 0, heard: 0, heardLast: 0 };
+}
+
+// A player who left a match and came back to it from the same browser (a
+// reload, a lost connection, leaving and joining again) sits down in a new
+// seat, so the match has them twice: two of its players with one browser
+// key. If their games were never in it at the same time, going by when each
+// reported (heard .. heardLast), that's one player who came back, and the
+// match is given them once, with what each of their games did added up: in
+// their first seat, with the name, team and the rest from their last. Games
+// of one key that were in it at once stay apart: one browser played it twice
+// (sharedKey, in buildRecord). The match as it was when nobody came back.
+export function cameBack(m) {
+    const byKey = new Map();
+    m.players.forEach((p, i) => {
+        if (p.pk && !p.anon && p.reports && p.heard)
+            byKey.set(p.pk, [...(byKey.get(p.pk) || []), i]);
+    });
+    const runs = [];
+    for (const all of byKey.values()) {
+        const run = all.sort((a, b) => m.players[a].heard - m.players[b].heard);
+        if (run.length > 1 && run.every((i, j) => !j || m.players[run[j - 1]].heardLast < m.players[i].heard))
+            runs.push(run);
+    }
+    if (!runs.length)
+        return m;
+    // Each player's index in the match given back: a run's, its first's.
+    const first = m.players.map((p, i) => i);
+    for (const run of runs)
+        for (const i of run)
+            first[i] = run[0];
+    const at = [];
+    const players = [];
+    m.players.forEach((p, i) => {
+        if (first[i] === i) {
+            at[i] = players.length;
+            players.push(p);
+        }
+    });
+    const to = (i) => at[first[i]];
+    const rows = {};
+    for (const [i, row] of Object.entries(m.rows || {}))
+        if (first[i] === Number(i))
+            rows[at[i]] = row;
+    for (const run of runs) {
+        const ps = run.map(i => m.players[i]), last = ps.at(-1);
+        players[to(run[0])] = {
+            ...last,
+            seat: ps.some(p => p.seat === 1) ? 1 : ps[0].seat, key: ps[0].key,
+            name: ps.map(p => p.name).filter(Boolean).at(-1) || "",
+            build: ps.map(p => p.build).filter(Boolean).at(-1) || "",
+            idle: ps.every(p => p.idle),
+            reports: ps.reduce((a, p) => a + p.reports, 0),
+            t: ps.reduce((a, p) => a + p.t, 0),
+            joined: Math.min(...ps.map(p => p.joined)), seen: Math.max(...ps.map(p => p.seen)),
+            heard: ps[0].heard, heardLast: last.heardLast,
+            back: run.length,
+        };
+        // The host's scoreboard has a row for each of their games: added up,
+        // in their last team. Only when it has all of them, else none, so
+        // what it says is never only part of what they did.
+        const sb = run.map(i => m.rows && m.rows[i]);
+        if (sb.every(Boolean))
+            rows[to(run[0])] = [0, 1, 2, 3].map(k => sb.reduce((a, r) => a + r[k], 0)).concat(sb.at(-1)[4]);
+        else
+            delete rows[to(run[0])];
+    }
+    const kills = m.kills.map(c => ({ ...c, v: to(c.v), k: c.k < 0 ? c.k : to(c.k), by: [...new Set(c.by.map(to))] }));
+    return { ...m, players, kills, rows };
 }
 
 // A finished match as D1 gets it: its row, its players' rows and its detail.
 // null for one that isn't kept. why: how the lobby came to close it.
 export function buildRecord(m, why, now) {
+    m = cameBack(m);
     const n = m.players.length;
     const stats = m.players.map(() => ({ kills: 0, deaths: 0, suicides: 0, streak: 0, run: 0,
                                          kinds: [0, 0, 0, 0, 0, 0], involved: false }));
@@ -652,6 +721,10 @@ export function buildRecord(m, why, now) {
         detail.scored = "script";
     if (coop)
         detail.coop = 1;
+    // Its players who left it and came back (cameBack): their slots.
+    const back = kept.map((i, slot) => m.players[i].back ? slot : -1).filter(s => s >= 0);
+    if (back.length)
+        detail.back = back;
     return {
         uid: crypto.randomUUID(),
         game: m.game, map: m.map, title: m.title || m.map, episode: m.episode, roomName: m.name,
@@ -1116,6 +1189,9 @@ export class Ladder {
             return;
         p.lv = r.lv;
         p.reports++;
+        // When its game was in the match, for one who comes back (cameBack).
+        p.heard = p.heard || now;
+        p.heardLast = now;
         p.t = Math.max(p.t, r.t);
         p.anon = r.anon;
         p.idle = r.idle;
