@@ -273,6 +273,17 @@ kills were seen by two games, it had no password, no two of its players had the 
 its level's script didn't keep the score, and its level isn't a co-op level (both below). The
 standings add up only the matches that are `counted`.
 
+The same reports show a match while it's played. Each game in the status the landing page watches
+has `live` (`liveView` in `src/ladder.js`) from its host's first report of the level until two
+minutes after it ended: the host's rules (mode, score limit, time limit), when its game's clock
+started (the host's game says its clock in its reports, `gt`, so the time left goes by the game's
+own, which falls behind when the game stalls), its scoreboard as the host's game last sent it (a
+couple of seconds after each kill, every 30 seconds otherwise), team scores, its latest kill, the
+longest run of kills going, the host's playlist (which level of how many, and the next one's
+name), and whether it can count for the standings. A game with a password has the rules and the
+clock only. The status carries the lobby's clock as it's sent (`now`), for the page to show times
+by. The room windows show it in a game's Info and as a line on its table.
+
 A player who leaves a match and comes back to it from the same browser (a reload, a lost
 connection, leaving and joining again) gets a new seat, so the lobby first has them as two players
 with one key. When their games were never in the match at the same time, going by when each

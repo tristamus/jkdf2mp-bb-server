@@ -27,7 +27,12 @@
 // The answer:
 //   { state: "live" | "down", server, checked,
 //     games: [{ key, name, game, map, episode, mod, locked, players, max,
-//               dedicated, pinned, listed, joinable, why }] }
+//               dedicated, pinned, listed, joinable, why, mode }] }
+// mode is the game's multiplayer mode flags, as its host's game puts them in
+// the session's user data (stdComm_Imperial.c in the fork); a pinned server
+// that isn't listed has none. (The Force rank next to them isn't passed on:
+// the relay's own server has 0 there.) The relay has no match record: no
+// scores, limits or clock.
 // key is the game's session id (32 hex digits; "" for a pinned server that
 // isn't listed), which the page hands the engine to select on its Join
 // screen. why says why a game can't be joined from a browser: "desktop" (its
@@ -276,6 +281,8 @@ export function parseListReply(p) {
             flags: v.getUint32(at + 16, true),
             max: v.getUint32(at + 20, true),
             cur: v.getUint32(at + 24, true),
+            // user[1]: the mode flags.
+            mode: v.getUint32(at + 32, true),
             name: "",
             addr: "",
             laFlags: 0,
@@ -401,6 +408,7 @@ export function gamesAnswer(listing, server, pinned, now) {
             listed: true,
             joinable: wire && !closed,
             why: !wire ? "desktop" : closed ? "closed" : "",
+            mode: (g.mode || 0) & 0xffffff,
             addr: g.addr,
         });
     }

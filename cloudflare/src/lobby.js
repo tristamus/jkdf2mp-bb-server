@@ -1307,24 +1307,35 @@ export class Lobby extends DurableObject {
             // report has said (src/ladder.js); the page names the retail
             // levels itself before that.
             const title = this.ladder.title(room.id, info.map);
+            const locked = info.locked || !!room.pw;
+            // Its match as it's played: the rules, the clock and the scores
+            // (src/ladder.js, liveView), once its host's game has reported.
+            const live = this.ladder.on() ? this.ladder.live(room.id, info.map, locked) : null;
             games.push({
                 id: room.id, name: info.name, game,
                 map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
-                locked: info.locked || !!room.pw,
-                players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
-                net: this.roomNet(room),
+                locked, players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
+                net: this.roomNet(room), rank: info.maxRank, ...(live ? { live } : {}),
             });
         }
         for (const g of Object.values(byGame)) {
             g.online += g.lobby.length;
             g.lobby = g.lobby.sort(byName).slice(0, MAX_STATUS_NAMES);
         }
-        return "status " + base64Utf8(JSON.stringify({
+        return JSON.stringify({
             online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
             // The last match recorded, for the page to know when to get its
             // lists again (/ladder/recent); not there without the record.
             ...(this.ladder.on() ? { match: this.ladder.latest } : {}),
-        }));
+        });
+    }
+
+    // The status line as it goes to a page: status() with the lobby's clock
+    // as it's sent (now), which the page sets the times in it by (a match's
+    // clock, its last kill). The clock isn't part of what's compared to see
+    // whether the watchers have this status already.
+    statusLine(status) {
+        return "status " + base64Utf8(status.slice(0, -1) + `,"now":${Date.now()}}`);
     }
 
     // What the match record keeps of a room (src/ladder.js).
@@ -1354,21 +1365,23 @@ export class Lobby extends DurableObject {
         if (status === this.lastStatus)
             return;
         this.lastStatus = status;
+        const line = this.statusLine(status);
         for (const w of watchers)
-            this.send(w, status);
+            this.send(w, line);
     }
 
     watch(ws) {
         const status = this.status();
+        const line = this.statusLine(status);
         if (status === this.lastStatus) {
-            this.send(ws, status);
+            this.send(ws, line);
             return;
         }
         // A new status here means the lobby just woke up or this is the first
         // page watching: any others may not have it either.
         this.lastStatus = status;
         for (const w of this.watchers())
-            this.send(w, status);
+            this.send(w, line);
     }
 
     // The netcode a room's games speak: its host's, also while the host's
