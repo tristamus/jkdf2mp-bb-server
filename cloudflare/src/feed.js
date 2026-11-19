@@ -25,7 +25,8 @@
 //   when the chunk came, u8 kind, u8 seat (1 the host, 2.. players), packets
 // starting at a keyframe once there is one at least the delay old, and every
 // chunk after it in order as each comes of age. "feed waiting" says there is
-// none yet, and "feed ended <why>" comes before the feed closes the socket.
+// none yet, and "feed ended <why>" comes before the feed closes the socket:
+// when the room ended, once the page has had the match's last delay seconds.
 // The host's game sends a keyframe once its feed opens, at each new level and
 // every minute; a page that comes when the feed holds none (it was evicted, or
 // has just started) has the feed ask the host's game for one ("key"), at
@@ -81,6 +82,7 @@ export class Feed extends DurableObject {
         this.timer = null;
         this.lastUp = 0;          // when a game last sent, or the feed was armed
         this.keyAsked = 0;        // when the host's game was last asked for a keyframe
+        this.ending = null;       // why, while pages get the match's last seconds (end)
         ctx.blockConcurrencyWhile(async () => {
             this.cfg = (await ctx.storage.get("cfg")) || null;
             for (const ws of ctx.getWebSockets())
@@ -103,6 +105,7 @@ export class Feed extends DurableObject {
         }
         const began = this.cfg && this.cfg.room === room ? this.cfg.began : Date.now();
         this.cfg = { room, delay: Math.max(0, Number(delay) || 0), tokens: clean, began };
+        this.ending = null;
         this.lastUp = Date.now();
         await this.ctx.storage.put("cfg", this.cfg);
         if (!(await this.ctx.storage.getAlarm()))
@@ -116,24 +119,58 @@ export class Feed extends DurableObject {
         return true;
     }
 
-    // From the Lobby: the room ended, or watching it did.
+    // From the Lobby: the room ended, or watching it did. Nothing more comes
+    // from the games, and nothing is kept. When the room ended, the pages
+    // watching first get the match's last delay seconds as they come of age,
+    // as they would have, then "feed ended"; otherwise that comes at once.
     async end(why) {
+        why = why || "over";
+        for (const [ws, s] of [...this.socks]) {
+            if ("seat" in s)
+                this.closeWs(ws, 1000, why);
+        }
+        this.rate.clear();
+        await this.ctx.storage.deleteAll();
+        if (this.cfg && why === "room ended" && this.unsent()) {
+            this.cfg = { ...this.cfg, tokens: {} };
+            this.ending = why;
+            this.flush();
+        } else {
+            this.finish(why);
+        }
+        return true;
+    }
+
+    // Whether a page watching hasn't had all there is for it yet.
+    unsent() {
+        const key = this.chunks.some(c => c.kind === KIND_KEY);
+        for (const s of this.socks.values()) {
+            if (!("next" in s))
+                continue;
+            if (s.next >= 0 ? s.next < this.nextSeq : key)
+                return true;
+        }
+        return false;
+    }
+
+    // Tells the pages it's over, closes everything and forgets the match.
+    finish(why) {
         for (const [ws, s] of [...this.socks]) {
             if ("next" in s)
-                this.sendTo(ws, "feed ended " + (why || "over"));
-            this.closeWs(ws, 1000, why || "over");
+                this.sendTo(ws, "feed ended " + why);
+            this.closeWs(ws, 1000, why);
         }
         this.socks.clear();
         this.rate.clear();
         this.chunks = [];
         this.bytes = 0;
+        this.base = this.nextSeq;
         this.cfg = null;
+        this.ending = null;
         if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
         }
-        await this.ctx.storage.deleteAll();
-        return true;
     }
 
     async alarm() {
@@ -226,11 +263,19 @@ export class Feed extends DurableObject {
         this.socks.delete(ws);
         this.rate.delete(ws);
         try { ws.close(1000, "bye"); } catch (e) {}
+        this.endIfDone();
     }
 
     async webSocketError(ws) {
         this.socks.delete(ws);
         this.rate.delete(ws);
+        this.endIfDone();
+    }
+
+    // Ending, with no page left that has anything to get: over.
+    endIfDone() {
+        if (this.ending && !this.unsent())
+            this.finish(this.ending);
     }
 
     // A page waits with no keyframe here to start from, not even one still
@@ -306,6 +351,11 @@ export class Feed extends DurableObject {
             for (const c of this.chunks.splice(0, drop))
                 this.bytes -= c.rec.length;
             this.base = this.chunks.length ? this.chunks[0].seq : this.nextSeq;
+        }
+        // Ending: once every page has had the last of it, over.
+        if (this.ending && !this.unsent()) {
+            this.finish(this.ending);
+            return;
         }
         this.later(wait);
     }

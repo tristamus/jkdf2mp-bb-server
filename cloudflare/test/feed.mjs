@@ -239,19 +239,75 @@ await check("a game that reconnects takes its seat's place, and one the lobby dr
     assert.equal((await feed.fetch(req("/feed/7?up=" + T2))).status, 403);
 });
 
-await check("ending a feed tells its pages, closes everything and keeps nothing", async () => {
+await check("ending a feed (watching off) tells its pages at once, closes everything and keeps nothing", async () => {
     const feed = await newFeed();
     await feed.arm(7, 30, { [T1]: 1 });
     const g = await game(feed, T1);
     const p = await page(feed);
     p.take();
     await feed.webSocketMessage(g, chunk(1, 1));
-    await feed.end("room ended");
-    assert.deepEqual(p.take(), ["feed ended room ended"]);
+    await feed.end("watching off");
+    assert.deepEqual(p.take(), ["feed ended watching off"]);
     assert.ok(p.closed && g.closed);
     assert.equal(feed.ctx.storage.m.size, 0);
     assert.equal(feed.ctx.storage.alarm, null);
     assert.equal((await feed.fetch(req("/feed/7"))).status, 404);
+});
+
+await check("when the room ends, pages get the match's last seconds as they come of age, then it ends", async () => {
+    clock = 5_000_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const host = await game(feed, T1), other = await game(feed, T2);
+    const p = await page(feed);
+    p.take();
+    await feed.webSocketMessage(host, chunk(1, 1));
+    clock += 10_000;
+    await feed.webSocketMessage(other, chunk(0, 2));
+    clock += 10_000;
+    await feed.end("room ended");
+    assert.ok(host.closed && other.closed, "the games are done sending");
+    assert.equal(feed.ctx.storage.m.size, 0, "nothing kept");
+    assert.equal(feed.ctx.storage.alarm, null);
+    assert.equal((await feed.fetch(req("/feed/7?up=" + T1))).status, 403, "nor can a game send again");
+    assert.deepEqual(p.take(), [], "not yet");
+    assert.equal(p.closed, null);
+    clock += 10_000;
+    feed.flush();
+    assert.deepEqual(records(p.take()).map(r => r.packets), [[1]], "the keyframe, 30 s on");
+    assert.equal(p.closed, null);
+    // A page that comes now starts at that keyframe too.
+    const late = await page(feed);
+    assert.deepEqual(late.take().slice(0, 1), ["feed 30"]);
+    clock += 10_000;
+    feed.flush();
+    assert.deepEqual(p.take().map(m => typeof m === "string" ? m : records([m]).map(r => r.packets)),
+                     [[[2]], "feed ended room ended"]);
+    assert.ok(p.closed && late.closed);
+    assert.equal(feed.cfg, null);
+    assert.equal((await feed.fetch(req("/feed/7"))).status, 404);
+});
+
+await check("a room that ends with nothing left for its pages ends the feed at once; the last page leaving ends it too", async () => {
+    clock = 6_000_000;
+    let feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1 });
+    let g = await game(feed, T1);
+    let p = await page(feed);
+    p.take();
+    await feed.end("room ended");
+    assert.deepEqual(p.take(), ["feed ended room ended"], "no keyframe: nothing it could get");
+    assert.equal(feed.cfg, null);
+
+    feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1 });
+    g = await game(feed, T1);
+    p = await page(feed);
+    await feed.webSocketMessage(g, chunk(1, 1));
+    await feed.end("room ended");
+    assert.ok(feed.cfg, "a keyframe on its way");
+    await feed.webSocketClose(p);
+    assert.equal(feed.cfg, null, "nobody left to get it");
 });
 
 await check("a feed nothing is sent to ends itself after 10 minutes", async () => {
