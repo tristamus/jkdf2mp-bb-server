@@ -57,9 +57,9 @@ const T1 = "11111111111111111111111111111111";
 const T2 = "22222222222222222222222222222222";
 const ws101 = r => assert.equal(r.status, 101, `status ${r.status}`);
 
-async function newFeed() {
+async function newFeed(env = {}) {
     const ctx = new FakeCtx(new FakeStorage());
-    const feed = new Feed(ctx, {});
+    const feed = new Feed(ctx, env);
     await ctx.ready;
     feed.ctx = ctx;
     return feed;
@@ -342,6 +342,47 @@ await check("an armed feed survives being evicted; what it held doesn't", async 
     assert.equal((await again.info()).chunks, 0);
 });
 
+await check("the feed tells the lobby how many pages watch, 2 s after one comes or goes", async () => {
+    const told = [];
+    const LOBBY = { idFromName: n => n, get: n => ({ feedPages: async (room, count) => { told.push([n, room, count]); return true; } }) };
+    const feed = await newFeed({ LOBBY });
+    await feed.arm(7, 30, { [T1]: 1 });
+    const g = await game(feed, T1);
+    assert.equal(feed.pagesTimer, null, "a game isn't a page");
+    const p1 = await page(feed);
+    const timer = feed.pagesTimer;
+    assert.equal(timer.ms, 2000);
+    await page(feed);
+    assert.equal(feed.pagesTimer, timer, "one wait for a crowd");
+    timer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told, [["lobby", 7, 2]]);
+    assert.equal(feed.pagesTimer, null);
+    await feed.webSocketClose(p1);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told.at(-1), ["lobby", 7, 1]);
+    // A page that comes and goes in the wait: nothing new to say.
+    const p3 = await page(feed);
+    await feed.webSocketError(p3);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.equal(told.length, 2);
+    await feed.webSocketClose(g);
+    assert.equal(feed.pagesTimer, null, "nor a game leaving");
+    // A lobby that doesn't answer is told again the next time.
+    const failing = await newFeed({ LOBBY: { idFromName: n => n, get: () => ({ feedPages: async () => { throw new Error("away"); } }) } });
+    await failing.arm(7, 30, {});
+    await page(failing);
+    await failing.pagesSay();
+    assert.equal(failing.pagesTold, -1);
+    // Without the LOBBY binding, nobody is told.
+    const alone = await newFeed();
+    await alone.arm(7, 30, {});
+    await page(alone);
+    assert.equal(alone.pagesTimer, null);
+});
+
 // ---- The lobby's part.
 
 function entry({ name = "t_Room", episode = "JK1MP", map = "m2.jkl", password = "" } = {}) {
@@ -362,12 +403,12 @@ const statusOf = line => JSON.parse(Buffer.from(line.slice(7), "base64").toStrin
 
 // FEED as the Worker has it: one Feed per name, run here.
 class Feeds {
-    constructor() { this.byName = new Map(); }
+    constructor(env = {}) { this.byName = new Map(); this.env = env; }
     idFromName(n) { return n; }
     get(n) {
         if (!this.byName.has(n)) {
             const ctx = new FakeCtx(new FakeStorage());
-            const f = new Feed(ctx, {});
+            const f = new Feed(ctx, this.env);
             f.ctx = ctx;
             this.byName.set(n, f);
         }
@@ -592,6 +633,44 @@ await check("a room that ends ends its feed; a lobby restart keeps the tokens", 
     await w2.say(H, "leave");
     assert.equal(w.feeds.of(H.room).cfg, null);
     assert.equal(w.storage.m.has("feed:" + H.room), false);
+});
+
+await check("games watching from inside the game count in the room's watching, and keep a watched-only feed on", async () => {
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
+    w.feeds.env.LOBBY = { idFromName: n => n, get: () => w.lobby };
+    const watchingOf = async room => (await w.status()).games.find(g => g.id === room).watching;
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    const p = await w.page();
+    await w.say(p, `spectate ${H.room}`);
+    H.take();
+    const feed = w.feeds.of(H.room), room = w.lobby.rooms.get(H.room);
+    const v1 = await page(feed), v2 = await page(feed);
+    feed.pagesTimer.fn();
+    await w.settle();
+    assert.equal(room.feed.pages, 2);
+    assert.equal(await watchingOf(H.room), 3, "the page and the two games");
+    assert.equal(w.storage.m.get("feed:" + H.room).pages, 2, "kept for a restart");
+    // The page stops watching: the games watching keep the feed on.
+    await w.say(p, "spectate 0");
+    assert.equal(room.feed.idle, 0);
+    assert.equal(await watchingOf(H.room), 2);
+    await feed.webSocketClose(v1);
+    await feed.webSocketClose(v2);
+    feed.pagesTimer.fn();
+    await w.settle();
+    assert.equal(await watchingOf(H.room), undefined);
+    assert.ok(room.feed.idle > 0, "nobody watching: it lingers");
+    // Only a number from a room with a feed.
+    assert.equal(await w.lobby.feedPages(H.room + 99, 1), false);
+    assert.equal(await w.lobby.feedPages(H.room, -1), false);
+    assert.equal(await w.lobby.feedPages(H.room, 1.5), false);
+    assert.equal(await w.lobby.feedPages(String(H.room), 1), true);
+    assert.equal(room.feed.pages, 1);
+    // A room that can't be watched shows no count.
+    await w.say(H, "spectators off");
+    assert.equal(await w.lobby.feedPages(H.room, 1), false, "its feed has ended");
+    assert.equal(await watchingOf(H.room), undefined);
 });
 
 await check("the Worker's /feed/ route", async () => {

@@ -193,6 +193,9 @@ const SECS_RE = /^[0-9]{1,4}$/;
 // stops watching it, so a page coming back (or the next one) doesn't wait out
 // the delay again.
 const FEED_LINGER_MS = 2 * 60 * 1000;
+// The most games a feed may say watch from inside the game (src/feed.js
+// takes 200).
+const MAX_FEED_PAGES = 1000;
 // HMAC pads a key with zeros, so this is the same as no key, which
 // crypto.subtle won't take.
 const NO_KEY = new Uint8Array(64);
@@ -543,8 +546,10 @@ export class Lobby extends DurableObject {
         // spect is what its host's game said about watching it, {on, delay},
         // null until it does (spectOn). feed is its feed while it's on,
         // {tokens: {player id: token}, idle (when its last page stopped
-        // watching, 0 while one does), armed (what the feed was last told)},
-        // and feedChain the calls to its feed, one after another.
+        // watching, 0 while one does), armed (what the feed was last told),
+        // pages (how many games watch it from inside the game, as the feed
+        // last said: feedPages)}, and feedChain the calls to its feed, one
+        // after another.
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
@@ -608,7 +613,7 @@ export class Lobby extends DurableObject {
             const room = this.newRoom(id, entry, seats.get("seats:" + id), pw);
             room.spect = spects.get("spect:" + id) || null;
             const feed = feeds.get("feed:" + id);
-            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "" } : null;
+            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0 } : null;
             this.rooms.set(id, room);
         }
         this.stripPasswords();
@@ -1365,7 +1370,8 @@ export class Lobby extends DurableObject {
             }
         }
         lobby.sort(byName);
-        // How many pages watch each room's match.
+        // How many pages watch each room's match; the games watching it from
+        // inside the game are added from its feed (feedPages).
         const watching = new Map();
         for (const c of this.conns.values()) {
             if (c.watch && c.spect)
@@ -1392,7 +1398,7 @@ export class Lobby extends DurableObject {
             const live = this.ladder.on() ? this.ladder.live(room.id, info.map, locked) : null;
             // Whether its match can be watched, and by how many pages it is.
             const spect = this.spectOn(room, locked);
-            const seen = spect ? watching.get(room.id) || 0 : 0;
+            const seen = spect ? (watching.get(room.id) || 0) + ((room.feed && room.feed.pages) || 0) : 0;
             games.push({
                 id: room.id, name: info.name, game,
                 map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
@@ -1536,7 +1542,8 @@ export class Lobby extends DurableObject {
             return;
         const info = readEntry(room.entry);
         const on = !!info && this.spectOn(room, info.locked || !!room.pw);
-        let watched = false;
+        // A game watching from inside the game watches too.
+        let watched = !!(room.feed && room.feed.pages);
         for (const c of this.conns.values()) {
             if (c.watch && c.spect === room.id)
                 watched = true;
@@ -1550,7 +1557,7 @@ export class Lobby extends DurableObject {
             return;
         }
         if (!room.feed)
-            room.feed = { tokens: {}, idle: 0, armed: "" };
+            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0 };
         const idle = always || watched ? 0 : room.feed.idle || now;
         const tokens = {}, fresh = [];
         for (const [id, ws] of this.feedGames(room)) {
@@ -1563,13 +1570,13 @@ export class Lobby extends DurableObject {
         const armed = JSON.stringify([delay, tokens]);
         if (idle !== room.feed.idle) {
             room.feed.idle = idle;
-            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle });
+            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0 });
         }
         if (armed === room.feed.armed)
             return;
         room.feed.tokens = tokens;
         room.feed.armed = armed;
-        this.ctx.storage.put("feed:" + room.id, { tokens, idle });
+        this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0 });
         const byToken = Object.fromEntries(Object.entries(tokens).map(([id, t]) => [t, Number(id)]));
         const feed = room.feed;
         this.feedCall(room, stub => stub.arm(room.id, delay, byToken)).then(ok => {
@@ -1584,6 +1591,22 @@ export class Lobby extends DurableObject {
                     this.send(ws, `feed ${room.id} ${t}`);
             }
         });
+    }
+
+    // From a room's feed (src/feed.js), over RPC: how many games watch its
+    // match from inside the game now. They're counted in its watching, and
+    // keep a feed that's only on while watched (FEED_ONLY_WATCHED) on.
+    async feedPages(roomId, n) {
+        const room = this.rooms.get(Number(roomId));
+        if (!room || !room.feed || !Number.isInteger(n) || n < 0)
+            return false;
+        n = Math.min(n, MAX_FEED_PAGES);
+        if ((room.feed.pages || 0) === n)
+            return true;
+        room.feed.pages = n;
+        this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle: room.feed.idle || 0, pages: n });
+        this.statusChanged();
+        return true;
     }
 
     feedEnd(room, why) {

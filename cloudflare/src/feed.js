@@ -31,6 +31,11 @@
 // every minute; a page that comes when the feed holds none (it was evicted, or
 // has just started) has the feed ask the host's game for one ("key"), at
 // most once every KEY_ASK_MS.
+//
+// A page watching here is a game watching the match from inside the game
+// (Watch in the game). The feed tells the Lobby how many there are
+// (feedPages, over RPC) a moment after one comes or goes, so the room's
+// watching counts them with the pages watching its scores.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -59,6 +64,9 @@ const KEY_ASK_MS = 10 * 1000;
 // A feed nothing has been sent to for this long ends itself (its room may
 // have ended while the lobby was away).
 const IDLE_MS = 10 * 60 * 1000;
+// How long after a page comes or goes the Lobby is told how many watch, so
+// a crowd coming at once is one call.
+const PAGES_SAY_MS = 2000;
 
 export class Feed extends DurableObject {
     constructor(ctx, env) {
@@ -83,6 +91,8 @@ export class Feed extends DurableObject {
         this.lastUp = 0;          // when a game last sent, or the feed was armed
         this.keyAsked = 0;        // when the host's game was last asked for a keyframe
         this.ending = null;       // why, while pages get the match's last seconds (end)
+        this.pagesTold = -1;      // how many pages the Lobby was last told watch, -1 for not yet
+        this.pagesTimer = null;   // the wait before it's told again
         ctx.blockConcurrencyWhile(async () => {
             this.cfg = (await ctx.storage.get("cfg")) || null;
             for (const ws of ctx.getWebSockets())
@@ -167,9 +177,14 @@ export class Feed extends DurableObject {
         this.base = this.nextSeq;
         this.cfg = null;
         this.ending = null;
+        this.pagesTold = -1;
         if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
+        }
+        if (this.pagesTimer) {
+            clearTimeout(this.pagesTimer);
+            this.pagesTimer = null;
         }
     }
 
@@ -193,6 +208,42 @@ export class Feed extends DurableObject {
         return { armed: !!this.cfg, delay: this.cfg ? this.cfg.delay : 0, chunks: this.chunks.length, bytes: this.bytes, games, pages };
     }
 
+    pageCount() {
+        let pages = 0;
+        for (const s of this.socks.values()) {
+            if ("next" in s) pages++;
+        }
+        return pages;
+    }
+
+    // A page came or went: the Lobby hears how many watch, PAGES_SAY_MS
+    // later (without the LOBBY binding, nobody does).
+    pagesChanged() {
+        if (!this.cfg || this.pagesTimer || !this.env || !this.env.LOBBY)
+            return;
+        this.pagesTimer = setTimeout(() => {
+            this.pagesTimer = null;
+            this.pagesSay();
+        }, PAGES_SAY_MS);
+    }
+
+    async pagesSay() {
+        if (!this.cfg || !this.env || !this.env.LOBBY)
+            return;
+        const room = this.cfg.room, n = this.pageCount();
+        if (n === this.pagesTold)
+            return;
+        this.pagesTold = n;
+        try {
+            const lobby = this.env.LOBBY.get(this.env.LOBBY.idFromName("lobby"));
+            await lobby.feedPages(room, n);
+        } catch (e) {
+            // Told again the next time a page comes or goes.
+            this.pagesTold = -1;
+            console.log(`feed: room ${room}: the lobby didn't hear how many watch: ${e && e.message || e}`);
+        }
+    }
+
     async fetch(request) {
         if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket")
             return new Response("Expected a WebSocket upgrade", { status: 426 });
@@ -211,11 +262,7 @@ export class Feed extends DurableObject {
             }
             state = { seat };
         } else {
-            let pages = 0;
-            for (const s of this.socks.values()) {
-                if ("next" in s) pages++;
-            }
-            if (pages >= MAX_VIEWERS)
+            if (this.pageCount() >= MAX_VIEWERS)
                 return new Response("Too many watching", { status: 503 });
             state = { next: -1 };
         }
@@ -231,6 +278,7 @@ export class Feed extends DurableObject {
                 this.sendTo(server, "feed waiting");
                 this.askKey();
             }
+            this.pagesChanged();
         }
         return new Response(null, { status: 101, webSocket: client });
     }
@@ -260,15 +308,21 @@ export class Feed extends DurableObject {
     }
 
     async webSocketClose(ws) {
+        const s = this.socks.get(ws);
         this.socks.delete(ws);
         this.rate.delete(ws);
         try { ws.close(1000, "bye"); } catch (e) {}
+        if (s && "next" in s)
+            this.pagesChanged();
         this.endIfDone();
     }
 
     async webSocketError(ws) {
+        const s = this.socks.get(ws);
         this.socks.delete(ws);
         this.rate.delete(ws);
+        if (s && "next" in s)
+            this.pagesChanged();
         this.endIfDone();
     }
 
@@ -364,11 +418,7 @@ export class Feed extends DurableObject {
     later(ms) {
         if (this.timer || !ms)
             return;
-        let pages = false;
-        for (const s of this.socks.values()) {
-            if ("next" in s) pages = true;
-        }
-        if (!pages)
+        if (!this.pageCount())
             return;
         this.timer = setTimeout(() => {
             this.timer = null;
