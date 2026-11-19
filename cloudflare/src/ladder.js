@@ -165,6 +165,9 @@ const CLOCK_SLACK_MS = 1500;
 const LAST_SHOWN_MS = 2 * 60 * 1000;
 // The room windows show a run of kills from this many on.
 const LIVE_STREAK = 3;
+// How many of its latest kills the room windows' live view of a match has
+// (kills), for watching it.
+const LIVE_KILLS = 5;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
 export const COUNT_AGREE = 0.9;
@@ -556,6 +559,9 @@ function mapFile(map) {
 //     last: [killer, victim, kind, at],
 //                            its latest kill that counts (killer "" when
 //                            nobody did it: a fall, the level, a suicide)
+//     kills: [[killer, victim, kind, at], ...],
+//                            its latest LIVE_KILLS kills that count, the
+//                            oldest first (the last of them is last)
 //     streak: [name, n] }    the longest run of kills going, from
 //                            LIVE_STREAK on, of a player on the scoreboard
 //
@@ -586,9 +592,12 @@ export function liveView(m, over = 0) {
     // The kills that count (buildRecord), in the order they happened.
     const kills = m.kills.filter(c => c.own || c.by.length >= 2 || !m.players[c.v].reports)
                          .sort((a, b) => a.ts - b.ts);
+    const line = c => [c.k < 0 || c.k === c.v ? "" : name(c.k), name(c.v), c.kind, Math.round(c.ts)];
     const last = kills.at(-1);
-    if (last)
-        out.last = [last.k < 0 || last.k === last.v ? "" : name(last.k), name(last.v), last.kind, Math.round(last.ts)];
+    if (last) {
+        out.last = line(last);
+        out.kills = kills.slice(-LIVE_KILLS).map(line);
+    }
     const run = new Map();
     for (const c of kills) {
         run.set(c.v, 0);
@@ -1191,7 +1200,7 @@ export class Ladder {
             v = liveView(m, m.ended ? m.overAt || now : 0);
         }
         if (locked || v.nocount === "password") {
-            for (const k of ["sb", "teams", "last", "streak", "count"])
+            for (const k of ["sb", "teams", "last", "kills", "streak", "count"])
                 delete v[k];
             v.nocount = "password";
         }

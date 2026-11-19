@@ -16,7 +16,8 @@ game packets:
                     join <room> [<password>]
                     welcome <id> <entry> | leave | signal <id> <data> | ping
                     hello <game> <name> | watch | rejoin <room> <id> <key>
-                    rehost <room> <key> [<entry>] | turn
+                    rehost <room> <key> [<entry>] | turn | spectate <room>
+                    spectators on|off [<delay s>]
   relay -> client   list (<room> <players> <entry>)* | hosted <room>
                     peer-joined <id> | peer-left <id> | welcome <id> <entry>
                     host-left | error <code> | signal <id> <data>
@@ -80,6 +81,14 @@ the counts and the lobby by the game players run, for the page's rooms. The
 relay reads a game's details from its entry (a jkMultiEntry, then the mod tail
 from mods.js), and never sends its password, only whether it has one. A player
 is a connection that said hello or is in a room; watching pages don't count.
+A watching page says which room's match it watches with spectate <room>
+(spectate 0 for none), and each game in status says whether it can be watched
+("spect": 1 or 0) and, once anyone does, how many pages watch it
+("watching"). A room's host's game says whether it can be with spectators on
+or spectators off, and how far behind live in seconds (30 to 300, 30 when it
+doesn't say; nothing here sends a match on yet). Until it says, a game can be
+watched unless it has a password. lobby says spect for games to know this.
+Watching takes no seat and reaches no game.
 
 Game packets go over WebRTC once a player's link is up, so a socket that
 drops mid-game (a network blip, or the lobby restarting) needn't end the
@@ -154,6 +163,11 @@ QUIET_S = 120
 # The game reconnects after 1 s, then 2, 4 and every 5 s. Same as HOLD_MS in
 # cloudflare/src/lobby.js.
 HOLD_S = 60
+# How far behind live a watched match may be shown (spectators), in seconds:
+# never under SPECT_MIN_DELAY_S, so watching can't call out where players are.
+SPECT_MIN_DELAY_S = 30
+SPECT_MAX_DELAY_S = 300
+SPECT_DELAY_S = 30
 KEY_RE = re.compile(r"^[0-9a-f]{32}$")
 # The netcode number in a game's address. A game that doesn't say is 0, as is
 # every build until the first change older builds can't play with.
@@ -192,6 +206,7 @@ class Conn:
         self.name = None  # from hello
         self.game = ""
         self.watch = False
+        self.spect = 0  # the room whose match this watching page watches
         self.closed = False
 
     def send_frame(self, opcode, payload):
@@ -247,6 +262,11 @@ class Room:
         self.pw = None  # the password's Verifier, None without one
         self.peers = {}
         self.seats = {1: Seat()}
+        self.spect = None  # (on, delay s) from its host's spectators, None until it says
+
+    def spect_on(self, locked):
+        """Whether its match can be watched: as its host said, else unless it has a password."""
+        return self.spect[0] if self.spect else not locked
 
     def net(self):
         """The netcode the room's games speak: its host's, also while the host's seat is held."""
@@ -385,6 +405,20 @@ class Relay:
             elif op == "watch" and not args:
                 conn.watch = True
                 self._watch(conn, outbox)
+            elif op == "spectate" and len(args) == 1 and args[0].isdigit() and len(args[0]) <= 9 and conn.watch:
+                room_id = int(args[0]) if int(args[0]) in self.rooms else 0
+                if conn.spect != room_id:
+                    conn.spect = room_id
+                    self._status_changed(outbox)
+            elif op == "spectators" and len(args) in (1, 2) and args[0] in ("on", "off") and \
+                    (len(args) == 1 or (args[1].isdigit() and len(args[1]) <= 4)):
+                room = conn.room
+                if room and room.host is conn:
+                    delay = int(args[1]) if len(args) == 2 else 0
+                    spect = (args[0] == "on", min(SPECT_MAX_DELAY_S, max(SPECT_MIN_DELAY_S, delay or SPECT_DELAY_S)))
+                    if spect != room.spect:
+                        room.spect = spect
+                        self._status_changed(outbox)
             else:
                 outbox.append((conn, OP_TEXT, b"error bad-request"))
         self.deliver(outbox)
@@ -503,6 +537,10 @@ class Relay:
         lobby = sorted((c.name for c in waiting), key=sort_key)
         by_game = {g: dict(online=0, lobby=sorted((c.name for c in waiting if c.game == g), key=sort_key))
                    for g in GAMES}
+        watching = {}
+        for c in self.conns:
+            if c.watch and c.spect:
+                watching[c.spect] = watching.get(c.spect, 0) + 1
         games = []
         online = len(lobby)
         for room in sorted(self.rooms.values(), key=lambda r: r.id):
@@ -514,10 +552,14 @@ class Relay:
             online += len(names)
             game = host.game or guess_game(info["episode"])
             by_game[game]["online"] += len(names)
-            games.append(dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
-                              mod=info["mod"], locked=info["locked"] or room.pw is not None, players=len(names),
-                              max=info["max"],
-                              names=names[:MAX_STATUS_NAMES], net=room.net()))
+            locked = info["locked"] or room.pw is not None
+            spect = room.spect_on(locked)
+            g = dict(id=room.id, name=info["name"], game=game, map=info["map"], episode=info["episode"],
+                     mod=info["mod"], locked=locked, players=len(names), max=info["max"],
+                     names=names[:MAX_STATUS_NAMES], net=room.net(), spect=1 if spect else 0)
+            if spect and watching.get(room.id):
+                g["watching"] = watching[room.id]
+            games.append(g)
         for g in by_game.values():
             g["online"] += len(g["lobby"])
             g["lobby"] = g["lobby"][:MAX_STATUS_NAMES]
@@ -810,7 +852,7 @@ class IceConfig:
         return line + " %d" % self.ttl if with_ttl else line
 
     def lobby_message(self):
-        return "lobby links turn pw" if self.turn else "lobby links pw"
+        return "lobby links turn pw spect" if self.turn else "lobby links pw spect"
 
 
 def log(text):
@@ -924,7 +966,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())
-        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links pw")
+        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links pw spect")
         try:
             self.websocket_loop(conn)
         finally:

@@ -312,12 +312,12 @@ await check("settings that aren't host, none or a time are taken as none, and lo
     assert.ok(logged.slice(at).some(l => l.includes("PASSWORDS_FOR_OLD_GAMES_UNTIL isn't a time")));
 });
 
-await check("the lobby says pw on connect, after links and turn", async () => {
+await check("the lobby says pw on connect, after links and turn, and spect after it", async () => {
     let w = await new World(Lobby, {}).start();
-    assert.equal((await w.connect("old")).lobbyLine, "lobby links pw");
-    assert.equal((await w.connect("new")).lobbyLine, "lobby links pw");
+    assert.equal((await w.connect("old")).lobbyLine, "lobby links pw spect");
+    assert.equal((await w.connect("new")).lobbyLine, "lobby links pw spect");
     w = await new World(Lobby, { TURN_KEY_ID: "id", TURN_KEY_API_TOKEN: "token" }).start();
-    assert.equal((await w.connect("new")).lobbyLine, "lobby links turn pw");
+    assert.equal((await w.connect("new")).lobbyLine, "lobby links turn pw spect");
 });
 
 await check("a game that sends passwords gets the password box exactly for rooms with a password, never a password", async () => {

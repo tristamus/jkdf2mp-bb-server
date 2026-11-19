@@ -704,6 +704,29 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
 - The count behind the 8 GB (`shot_total`) follows what the lobby adds and takes off. Rows deleted
   by hand need it set right (above), and bytes left in the bucket by a failed delete aren't in it.
 
+## Watching a match
+
+The room windows on the page let visitors watch a match without joining it (spectating). A page
+watching the lobby says which room's match it's watching, `spectate <room>` (`spectate 0` for none),
+and every game in the status says whether it can be watched (`"spect": 1` or `0`) and, once any page
+does, how many are (`"watching": 2`). A page watches one match at a time; it never takes a seat,
+never reaches the room's games, and isn't counted among the players. Only a page that said `watch`
+may send `spectate`; a room that isn't there is taken as none.
+
+A room's host's game says whether its match may be watched, and how far behind live it's shown in
+seconds: `spectators on [<delay>]` or `spectators off`, kept with the room (`spect:<id>` in storage)
+until it ends. The delay is never under 30 s, so watching can't be used to call out where players
+are, and at most 300; 30 when it isn't given. Until its host's game says, a game can be watched
+unless it has a password. The lobby says `spect` on its `lobby` line, for games to know it takes
+`spectators`.
+
+What a watching page shows today is the match as the status has it (the rules, clock, scores and
+its latest kills, `kills` in `live`: `src/ladder.js`, `liveView`). A password game's status has no
+scores or kills, as before. It costs nothing more than the counts did: every message the lobby sends
+a page is free, and a page sends one line when it starts or stops watching.
+
+`node test/spectate.mjs` checks it.
+
 ## Imperial relay games
 
 `/imperial-games` (`src/imperial.js`) answers the game list of the Imperial Network Protocol relay

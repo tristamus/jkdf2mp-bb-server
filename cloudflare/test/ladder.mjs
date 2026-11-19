@@ -2065,6 +2065,37 @@ await check("the page's status has a room's match as it's played: its rules, clo
     assert.equal((await w2.status()).games[0].live.nocount, "coop");
 });
 
+await check("the page's status has a match's latest kills, for watching it", async () => {
+    const w = await new World(newEnv()).start();
+    const H = await w.host("Maw", { map: "m10.jkl" });
+    const K = await w.join("Kyle_K", H);
+    H.since = K.since = Date.now();
+    await H.report({ rules: { mode: 0, sl: 0, tl: 0 }, gt: 0, sb: [[1, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0]] });
+    await w.settle();
+    assert.equal("kills" in (await w.status()).games[0].live, false, "none before the first");
+    // Seven kills: Kyle kills Maw four times, Maw kills Kyle twice, then
+    // Maw falls.
+    for (let i = 0; i < 4; i++) {
+        skew += SEC;
+        await killAll([H, K], 1, 2, 1);
+    }
+    for (let i = 0; i < 2; i++) {
+        skew += SEC;
+        await killAll([H, K], 2, 1, 2);
+    }
+    skew += SEC;
+    await killAll([H, K], 1, 0, 5);
+    const live = (await w.status()).games[0].live;
+    assert.deepEqual(live.kills.map(k => k.slice(0, 3)),
+                     [["Kyle_K", "Maw", 1], ["Kyle_K", "Maw", 1], ["Maw", "Kyle_K", 2], ["Maw", "Kyle_K", 2], ["", "Maw", 5]],
+                     "the latest five, the oldest first");
+    assert.deepEqual(live.kills.at(-1), live.last, "the last of them is last");
+    assert.ok(live.kills.every((k, i) => !i || k[3] >= live.kills[i - 1][3]), "in the order they happened");
+    for (const g of [K, H])
+        await w.say(g.ws, "leave");
+    await w.settle();
+});
+
 await check("a report's playlist and clock are taken as they should be, and nothing else", () => {
     const rep = o => cleanReport(b64(JSON.stringify({ v: 1, lv: 1, map: "m2.jkl", t: 0, ...o })));
     assert.deepEqual(rep({ gt: 61000, pl: { i: 2, n: 3, loop: 1, next: " Canyon\u0007 Oasis " } }).pl,

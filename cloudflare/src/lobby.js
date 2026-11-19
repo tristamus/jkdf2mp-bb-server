@@ -50,6 +50,14 @@
 // without it, and their join hears "error version newer", which tells their
 // player to reload the page. See relay.py for the lines.
 //
+// Watching a match (spectating): a page watching the lobby says which of its
+// rooms it's watching (spectate <room>, spectate 0 for none), and the status
+// gives each room whether it can be watched (spect: 1, or 0) and how many
+// pages are watching it (watching). A room's host's game may say whether it
+// may be (spectators on|off [<delay s>]); one that hasn't said can be,
+// unless it has a password. The lobby says spect on connect for games to
+// know it takes that. Watchers never take a seat or reach the room's games.
+//
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
@@ -162,6 +170,14 @@ const PW_HEX_RE = /^(?:[0-9a-fA-F]{4}){1,31}$/;
 // "error password wait".
 const PW_TRIES = 10;
 const PW_TRIES_MS = 60 * 1000;
+// How far behind live a watched match may be shown, in seconds, as a
+// host's game asks (spectators): never less than SPECT_MIN_DELAY_S, so
+// watching can't call out where players are; SPECT_DELAY_S when it doesn't
+// say.
+const SPECT_MIN_DELAY_S = 30;
+const SPECT_MAX_DELAY_S = 300;
+const SPECT_DELAY_S = 30;
+const SECS_RE = /^[0-9]{1,4}$/;
 // HMAC pads a key with zeros, so this is the same as no key, which
 // crypto.subtle won't take.
 const NO_KEY = new Uint8Array(64);
@@ -467,8 +483,9 @@ function turnOn(env) {
 
 // What the lobby can do beyond the basics, for the game to know on connect.
 function lobbyMessage(env) {
-    // match: games in a room report their match (src/ladder.js).
-    return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "");
+    // match: games in a room report their match (src/ladder.js). spect: a
+    // host's game may say whether its match can be watched (spectators).
+    return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect";
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -495,18 +512,21 @@ export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         // room id -> {id, host, entry, peers: Map(id -> ws), seats, pw,
-        // entrySeq}, where seats is Map(id -> {key, until, lost, name, game,
+        // entrySeq, spect}, where seats is Map(id -> {key, until, lost, name, game,
         // net}) for the host (1) and each peer: until, lost (when its player
         // was last here), name, game and net only while the seat is held,
         // and at, when its player sat down. pw is the password's verifier, {salt, mac,
         // legacy}, null for a room without one. entrySeq counts the host's
         // entries, so one that waited for its verifier doesn't undo a newer.
+        // spect is what its host's game said about watching it, {on, delay},
+        // null until it does (spectOn).
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
-        // ws -> {room, id, name, game, watch, since, net, pw, ip}: the room
-        // id and player id, the player's name and game from hello (name null
-        // until then), whether it's a page watching the counts, when it
+        // ws -> {room, id, name, game, watch, spect, since, net, pw, ip}: the
+        // room id and player id, the player's name and game from hello (name
+        // null until then), whether it's a page watching the counts, the room
+        // whose match that page is watching (0 or none for none), when it
         // connected, the netcode it connected with, whether it sends
         // passwords with join, and its address (CF-Connecting-IP).
         this.conns = new Map();
@@ -547,6 +567,7 @@ export class Lobby extends DurableObject {
         const entries = await this.ctx.storage.list({ prefix: "room:" });
         const seats = await this.ctx.storage.list({ prefix: "seats:" });
         const pws = await this.ctx.storage.list({ prefix: "pw:" });
+        const spects = await this.ctx.storage.list({ prefix: "spect:" });
         for (const [key, entry] of entries) {
             const id = Number(key.slice(5));
             let pw = pws.get("pw:" + id) || null;
@@ -558,7 +579,9 @@ export class Lobby extends DurableObject {
                 pw = await newVerifier(pwHex, this.env.PASSWORD_KEY, pw ? pw.legacy : true);
                 this.ctx.storage.put("pw:" + id, pw);
             }
-            this.rooms.set(id, this.newRoom(id, entry, seats.get("seats:" + id), pw));
+            const room = this.newRoom(id, entry, seats.get("seats:" + id), pw);
+            room.spect = spects.get("spect:" + id) || null;
+            this.rooms.set(id, room);
         }
         this.stripPasswords();
         for (const ws of this.ctx.getWebSockets()) {
@@ -616,6 +639,10 @@ export class Lobby extends DurableObject {
             if (!this.rooms.has(Number(key.slice(3))))
                 this.ctx.storage.delete(key);
         }
+        for (const key of spects.keys()) {
+            if (!this.rooms.has(Number(key.slice(6))))
+                this.ctx.storage.delete(key);
+        }
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
@@ -627,7 +654,7 @@ export class Lobby extends DurableObject {
         return {
             id, host: null, entry, peers: new Map(),
             seats: new Map(Object.entries(seats || {}).map(([k, v]) => [Number(k), v])),
-            pw: pw || null, entrySeq: 0,
+            pw: pw || null, entrySeq: 0, spect: null,
         };
     }
 
@@ -943,6 +970,11 @@ export class Lobby extends DurableObject {
         } else if (op === "watch" && !args.length) {
             this.saveConn(ws, { ...c, watch: true });
             this.watch(ws);
+        } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
+            this.spectate(ws, c, Number(args[0]));
+        } else if (op === "spectators" && (args.length === 1 || args.length === 2) && (args[0] === "on" || args[0] === "off") &&
+                   (args.length === 1 || SECS_RE.test(args[1]))) {
+            this.spectators(ws, c, args[0] === "on", args.length === 2 ? Number(args[1]) : 0);
         } else if (op === "match" && args.length === 1) {
             // Never answered, right or wrong (src/ladder.js).
             return this.ladder.report(ws, c, args[0]);
@@ -1292,6 +1324,12 @@ export class Lobby extends DurableObject {
             }
         }
         lobby.sort(byName);
+        // How many pages watch each room's match.
+        const watching = new Map();
+        for (const c of this.conns.values()) {
+            if (c.watch && c.spect)
+                watching.set(c.spect, (watching.get(c.spect) || 0) + 1);
+        }
         const games = [];
         let online = lobby.length;
         for (const room of [...this.rooms.values()].sort((a, b) => a.id - b.id)) {
@@ -1311,11 +1349,15 @@ export class Lobby extends DurableObject {
             // Its match as it's played: the rules, the clock and the scores
             // (src/ladder.js, liveView), once its host's game has reported.
             const live = this.ladder.on() ? this.ladder.live(room.id, info.map, locked) : null;
+            // Whether its match can be watched, and by how many pages it is.
+            const spect = this.spectOn(room, locked);
+            const seen = spect ? watching.get(room.id) || 0 : 0;
             games.push({
                 id: room.id, name: info.name, game,
                 map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
                 locked, players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room), rank: info.maxRank, ...(live ? { live } : {}),
+                spect: spect ? 1 : 0, ...(seen ? { watching: seen } : {}),
             });
         }
         for (const g of Object.values(byGame)) {
@@ -1382,6 +1424,38 @@ export class Lobby extends DurableObject {
         this.lastStatus = status;
         for (const w of this.watchers())
             this.send(w, line);
+    }
+
+    // spectate <room>: the match this page watches, 0 for none. A room
+    // that isn't there, or ended, is none. Watching takes no seat: the page
+    // is only counted, in the room's watching.
+    spectate(ws, c, roomId) {
+        const id = this.rooms.has(roomId) ? roomId : 0;
+        if ((c.spect || 0) === id)
+            return;
+        this.saveConn(ws, { ...c, spect: id });
+        this.statusChanged();
+    }
+
+    // spectators on|off [<delay s>], from a room's host's game: whether its
+    // match may be watched, and how far behind live, at least
+    // SPECT_MIN_DELAY_S.
+    spectators(ws, c, on, delay) {
+        const room = this.rooms.get(c.room);
+        if (!room || room.host !== ws)
+            return;
+        const spect = { on, delay: Math.min(SPECT_MAX_DELAY_S, Math.max(SPECT_MIN_DELAY_S, delay || SPECT_DELAY_S)) };
+        if (room.spect && room.spect.on === spect.on && room.spect.delay === spect.delay)
+            return;
+        room.spect = spect;
+        this.ctx.storage.put("spect:" + room.id, spect);
+        this.statusChanged();
+    }
+
+    // Whether a room's match can be watched: as its host's game said, else
+    // unless it has a password (locked).
+    spectOn(room, locked) {
+        return room.spect ? !!room.spect.on : !locked;
     }
 
     // The netcode a room's games speak: its host's, also while the host's
@@ -1528,7 +1602,7 @@ export class Lobby extends DurableObject {
         this.pwTries.delete(room.id);
         const host = room.seats.get(1);
         this.ladder.roomEnded(room, host && host.until && host.lost ? host.lost : 0);
-        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id]);
+        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id, "spect:" + room.id]);
         for (const peer of room.peers.values()) {
             this.setConn(peer, 0, 0);
             this.send(peer, "host-left");
