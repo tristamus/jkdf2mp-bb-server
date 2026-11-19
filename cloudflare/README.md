@@ -727,12 +727,14 @@ a page is free, and a page sends one line when it starts or stops watching.
 
 `node test/spectate.mjs` checks it.
 
-### A match's feed (Stage 2, beta only)
+### A match's feed (Stage 2)
 
 To watch the game itself, a match gets a feed (`src/feed.js`): a Durable Object per room (`FEED`,
 named `room:<id>`) that the room's games send what they send everyone to, and that hands it to
 the pages watching, each chunk only once it's the room's delay old. Without the `FEED` binding
-(live, for now) none of this runs. The games watching it are the game itself running as a viewer
+none of this runs; `wrangler.toml` binds it on the site and on beta. Once a deployment has the
+`Feed` class (migration `v3`), every Worker deployed there must export it, so a kit from before it
+can't be its rollback: take the `FEED` binding out instead. The games watching it are the game itself running as a viewer
 (Watch in the game, OpenJKDF2's `stdComm_WSRelay.c`): to the feed, a page.
 
 - The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While

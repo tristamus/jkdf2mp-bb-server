@@ -89,6 +89,14 @@ class_name = "LevelJob"
 binding = "LEVELS"
 bucket_name = "jkdf2mp-levels-beta"
 
+# A watched match's feed (src/feed.js, spectator mode Stage 2): with this
+# binding the lobby says feed, the room's games send to it and /feed/ is
+# served. Taking the binding out turns all of that off (the class stays,
+# migration v3, so the Worker must still export Feed).
+[[durable_objects.bindings]]
+name = "FEED"
+class_name = "Feed"
+
 # The free plan only has Durable Objects that keep their storage in SQLite.
 [[migrations]]
 tag = "v1"
@@ -100,8 +108,10 @@ tag = "v2"
 new_sqlite_classes = ["LevelJob"]
 
 # A watched match's feed (src/feed.js, spectator mode Stage 2), one object per
-# room. Bound on beta only for now: without the FEED binding the lobby doesn't
-# say feed and /feed/ answers 404. It keeps nothing but who may send.
+# room. Bound on both: without the FEED binding the lobby doesn't say feed and
+# /feed/ answers 404. It keeps nothing but who may send. Once a deployment has
+# this class, every Worker deployed there must export Feed (a kit from before
+# it can't be deployed there again).
 [[migrations]]
 tag = "v3"
 new_sqlite_classes = ["Feed"]
