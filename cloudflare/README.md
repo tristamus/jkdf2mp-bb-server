@@ -754,13 +754,23 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
 - About 2 s after a page connects or leaves, the feed tells the lobby how many watch (`feedPages`,
   over RPC). The lobby adds them to the room's `watching` in the status, keeps the number with the
   feed (`feed:<id>`), and with `FEED_ONLY_WATCHED` they keep the feed on like a page watching.
-- A feed holds at most 32 MB and keeps nothing in storage but who may send; one nothing is sent to
-  for 10 minutes ends itself.
+- A game watching from inside the game that doesn't have the match's mod (nor finds it in the Mod
+  Library) says `mod <fp>` on its socket, and the feed asks the host's game (`mod <fp>`, at most
+  every 20 s for each mod). The host's game puts the mod as it sends it to joiners, without the
+  original game files in it: `PUT /feed/<room>/mod/<fp>/info?up=<token>` (JSON, at most 64 KiB),
+  then each 1 MiB block as `/feed/<room>/mod/<fp>/<n>` (at most 1 MiB + 64 bytes, 10 a second).
+  The Worker hands each to the feed (`modPut`, over RPC), which checks it's the host's game and a
+  mod a game asked for (at most 2, and 1.25 GiB in all), and keeps it in the `SHOTS` bucket under
+  `feed-mods/<room>/<fp>/`. Anyone gets them with `GET` from the bucket. They're deleted when the
+  feed ends.
+- A feed holds at most 32 MB and keeps nothing in storage but who may send (and how much of a mod
+  its host put); one nothing is sent to for 10 minutes ends itself.
 
 Cost: what a feed sends pages is free; each chunk a game sends is a twentieth of a request. A game
 sends 4 a second (measured on beta: about 3.2 KiB/s a player, 3.0 standing still), so about 720
 requests an hour per player, plus the feed object's time, for every watchable match being played
-(only watched ones with `FEED_ONLY_WATCHED`).
+(only watched ones with `FEED_ONLY_WATCHED`). A mod put for a game watching is a request and an R2
+write for each MiB block sent (deflated, a 300 MiB mod is about 80), held only while the feed is on.
 
 `node test/feed.mjs` checks it.
 

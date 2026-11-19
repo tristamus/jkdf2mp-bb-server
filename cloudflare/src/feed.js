@@ -36,6 +36,21 @@
 // (Watch in the game). The feed tells the Lobby how many there are
 // (feedPages, over RPC) a moment after one comes or goes, so the room's
 // watching counts them with the pages watching its scores.
+//
+// One that doesn't have the match's mod, nor finds it in the Mod Library,
+// says "mod <fp>" (the mod's fingerprint, its SHA-256 as packed): the feed
+// asks the host's game for it ("mod <fp>", at most once every MOD_ASK_MS for
+// each mod), and the host's game puts it here as it sends it to joiners,
+// without the original game files in it (OpenJKDF2's maps.js feedUp):
+//
+//   PUT /feed/<room>/mod/<fp>/<part>?up=<token>   the host's game (modPut)
+//   GET /feed/<room>/mod/<fp>/<part>              a game watching
+//
+// <part> is info (JSON, at most MOD_INFO_MAX) or a block's number (at most
+// MOD_PART_MAX). They're kept in the SHOTS bucket under
+// feed-mods/<room>/<fp>/ while the feed is on, and deleted when it ends:
+// only a mod a game watching asked for, at most MAX_FEED_MODS of them and
+// MOD_MAX_BYTES in all, and nothing for longer than the feed is on.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -67,6 +82,24 @@ const IDLE_MS = 10 * 60 * 1000;
 // How long after a page comes or goes the Lobby is told how many watch, so
 // a crowd coming at once is one call.
 const PAGES_SAY_MS = 2000;
+// The host's mod, for games watching that don't have it (above). A part is a
+// block of the mod as joiners get it (1 MiB, squeezed where that makes it
+// smaller) and a byte for how; a mod is at most 1 GB of files and their
+// table, sent in at most about 1,030 blocks, and a block that fails may be
+// sent again.
+const FP_RE = /^[0-9a-f]{64}$/;
+const PART_RE = /^(info|[0-9]{1,4})$/;
+const MOD_ASK_MS = 20 * 1000;
+const MAX_FEED_MODS = 2;
+const MOD_INFO_MAX = 64 * 1024;
+const MOD_PART_MAX = 1024 * 1024 + 64;
+const MOD_MAX_PARTS = 1100;
+const MOD_MAX_BYTES = 1280 * 1024 * 1024;
+const MOD_PUTS_PER_S = 10;
+// A page says little (mod <fp> now and then): more than this in
+// RATE_WINDOW_MS and its socket is closed.
+const PAGE_SAYS = 10;
+export const MOD_PREFIX = "feed-mods/";
 
 export class Feed extends DurableObject {
     constructor(ctx, env) {
@@ -93,8 +126,13 @@ export class Feed extends DurableObject {
         this.ending = null;       // why, while pages get the match's last seconds (end)
         this.pagesTold = -1;      // how many pages the Lobby was last told watch, -1 for not yet
         this.pagesTimer = null;   // the wait before it's told again
+        this.mods = {};           // fp -> bytes put of the host's mod (modPut), kept in storage
+        this.modAsked = new Map(); // fp -> when the host's game was last asked for it
+        this.modPuts = [];        // when the latest parts were put
+        this.modWrites = new Set(); // parts on their way to the bucket
         ctx.blockConcurrencyWhile(async () => {
             this.cfg = (await ctx.storage.get("cfg")) || null;
+            this.mods = (await ctx.storage.get("mods")) || {};
             for (const ws of ctx.getWebSockets())
                 this.socks.set(ws, ws.deserializeAttachment() || { next: -1 });
             for (const s of this.socks.values()) {
@@ -140,6 +178,10 @@ export class Feed extends DurableObject {
                 this.closeWs(ws, 1000, why);
         }
         this.rate.clear();
+        const room = this.cfg ? this.cfg.room : null;
+        const mods = Object.keys(this.mods).length > 0;
+        this.mods = {};
+        this.modAsked.clear();
         await this.ctx.storage.deleteAll();
         if (this.cfg && why === "room ended" && this.unsent()) {
             this.cfg = { ...this.cfg, tokens: {} };
@@ -148,7 +190,74 @@ export class Feed extends DurableObject {
         } else {
             this.finish(why);
         }
+        if (mods && room !== null)
+            await this.modsDelete(room);
         return true;
+    }
+
+    // Deletes what the host's game put of its mod, once what's on its way
+    // is in.
+    async modsDelete(room) {
+        if (!this.env || !this.env.SHOTS)
+            return;
+        await Promise.allSettled([...this.modWrites]);
+        const prefix = MOD_PREFIX + room + "/";
+        try {
+            const keys = [];
+            let cursor;
+            do {
+                const list = await this.env.SHOTS.list({ prefix, cursor });
+                for (const o of list.objects)
+                    keys.push(o.key);
+                cursor = list.truncated ? list.cursor : undefined;
+            } while (cursor);
+            for (let i = 0; i < keys.length; i += 1000)
+                await this.env.SHOTS.delete(keys.slice(i, i + 1000));
+        } catch (e) {
+            console.log(`feed: room ${room}: the host's mod wasn't all deleted: ${e && e.message || e}`);
+        }
+    }
+
+    // From the Worker (feedRoute): a part of the host's mod, put by the game
+    // with token up (the host's). {status}: 200 when it's kept.
+    async modPut(up, fp, part, body) {
+        if (!this.cfg || !this.env || !this.env.SHOTS)
+            return { status: 404 };
+        const seat = TOKEN_RE.test(String(up)) ? this.cfg.tokens[up] : undefined;
+        if (seat !== SEAT_HOST)
+            return { status: 403 };
+        part = String(part);
+        if (!FP_RE.test(String(fp)) || !PART_RE.test(part) || (part !== "info" && Number(part) >= MOD_MAX_PARTS))
+            return { status: 400 };
+        const bytes = body instanceof ArrayBuffer ? body.byteLength : body && body.length;
+        if (!(bytes > 0) || bytes > (part === "info" ? MOD_INFO_MAX : MOD_PART_MAX))
+            return { status: 413 };
+        const now = Date.now();
+        this.modPuts = this.modPuts.filter(t => now - t < RATE_WINDOW_MS);
+        if (this.modPuts.length >= MOD_PUTS_PER_S * RATE_WINDOW_MS / 1000)
+            return { status: 429 };
+        // Only a mod a game watching asked for, and so much in all.
+        if (!(fp in this.mods) && (!this.modAsked.has(fp) || Object.keys(this.mods).length >= MAX_FEED_MODS))
+            return { status: 403 };
+        if (Object.values(this.mods).reduce((a, b) => a + b, 0) + bytes > MOD_MAX_BYTES)
+            return { status: 413 };
+        this.modPuts.push(now);
+        this.mods[fp] = (this.mods[fp] || 0) + bytes;
+        this.lastUp = now;
+        await this.ctx.storage.put("mods", this.mods);
+        const write = this.env.SHOTS.put(MOD_PREFIX + this.cfg.room + "/" + fp + "/" + part, body, {
+            httpMetadata: { contentType: part === "info" ? "application/json" : "application/octet-stream" }
+        });
+        this.modWrites.add(write);
+        try {
+            await write;
+        } catch (e) {
+            console.log(`feed: room ${this.cfg && this.cfg.room}: a part of the host's mod wasn't kept: ${e && e.message || e}`);
+            return { status: 503 };
+        } finally {
+            this.modWrites.delete(write);
+        }
+        return { status: 200 };
     }
 
     // Whether a page watching hasn't had all there is for it yet.
@@ -285,9 +394,16 @@ export class Feed extends DurableObject {
 
     async webSocketMessage(ws, message) {
         const s = this.socks.get(ws);
-        // Pages have nothing to say (their ping is answered without waking
-        // the object), nor has a game in text.
-        if (!s || !("seat" in s) || typeof message === "string")
+        if (!s)
+            return;
+        // A page says only mod <fp> (its ping is answered without waking the
+        // object), and a game nothing in text.
+        if (!("seat" in s)) {
+            if (typeof message === "string")
+                this.pageSays(ws, message);
+            return;
+        }
+        if (typeof message === "string")
             return;
         const now = Date.now();
         const times = (this.rate.get(ws) || []).filter(t => now - t < RATE_WINDOW_MS);
@@ -324,6 +440,32 @@ export class Feed extends DurableObject {
         if (s && "next" in s)
             this.pagesChanged();
         this.endIfDone();
+    }
+
+    // A game watching asks for the host's mod: the host's game is asked to
+    // put it here, at most once every MOD_ASK_MS for each mod.
+    pageSays(ws, text) {
+        const now = Date.now();
+        const times = (this.rate.get(ws) || []).filter(t => now - t < RATE_WINDOW_MS);
+        times.push(now);
+        this.rate.set(ws, times);
+        if (times.length > PAGE_SAYS) {
+            this.closeWs(ws, 1008, "too many");
+            this.pagesChanged();
+            return;
+        }
+        const m = /^mod ([0-9a-f]{64})$/.exec(text);
+        if (!m || !this.cfg || this.ending || now - (this.modAsked.get(m[1]) || 0) < MOD_ASK_MS)
+            return;
+        for (const [host, s] of this.socks) {
+            if (s.seat === SEAT_HOST) {
+                if (this.modAsked.size >= 64)
+                    this.modAsked.clear();
+                this.modAsked.set(m[1], now);
+                this.sendTo(host, "mod " + m[1]);
+                return;
+            }
+        }
     }
 
     // Ending, with no page left that has anything to get: over.
@@ -455,9 +597,17 @@ function joinRecords(chunks, from, end) {
 }
 
 // The Worker's route for /feed/<room>: to that room's feed, if this
-// deployment has them (the FEED binding).
+// deployment has them (the FEED binding). And /feed/<room>/mod/<fp>/<part>:
+// the host's mod, put through the feed (modPut) and got straight from the
+// bucket.
 const FEED_PATH_RE = /^\/feed\/([0-9]{1,9})$/;
+const FEED_MOD_RE = /^\/feed\/([0-9]{1,9})\/mod\/([0-9a-f]{64})\/(info|[0-9]{1,4})$/;
+const MOD_TEXT = { 400: "Bad part", 403: "Not the host's game in this match", 404: "No feed for this match",
+                   413: "Too big", 429: "Too many", 503: "Not kept, try again" };
 export async function feedRoute(request, env, url) {
+    const mod = FEED_MOD_RE.exec(url.pathname);
+    if (mod)
+        return feedModRoute(request, env, url, Number(mod[1]), mod[2], mod[3]);
     const m = FEED_PATH_RE.exec(url.pathname);
     if (!m)
         return null;
@@ -466,4 +616,31 @@ export async function feedRoute(request, env, url) {
     if ((request.headers.get("Upgrade") || "").toLowerCase() !== "websocket")
         return new Response("Expected a WebSocket upgrade", { status: 426 });
     return env.FEED.get(env.FEED.idFromName("room:" + Number(m[1]))).fetch(request);
+}
+
+async function feedModRoute(request, env, url, room, fp, part) {
+    const plain = (text, status) => new Response(text, { status, headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } });
+    if (!env.FEED || !env.SHOTS)
+        return plain("Not found", 404);
+    if (request.method === "GET" || request.method === "HEAD") {
+        const obj = await env.SHOTS.get(MOD_PREFIX + room + "/" + fp + "/" + part);
+        if (!obj)
+            return plain("Not here (yet)", 404);
+        const headers = { "Content-Type": part === "info" ? "application/json" : "application/octet-stream",
+                          "Cache-Control": "no-store" };
+        return new Response(request.method === "HEAD" ? null : obj.body, { status: 200, headers });
+    }
+    if (request.method !== "PUT")
+        return plain("Method not allowed", 405);
+    const max = part === "info" ? MOD_INFO_MAX : MOD_PART_MAX;
+    const length = Number(request.headers.get("Content-Length"));
+    if (length > max)
+        return plain(MOD_TEXT[413], 413);
+    const body = await request.arrayBuffer();
+    if (!body.byteLength || body.byteLength > max)
+        return plain(MOD_TEXT[body.byteLength ? 413 : 400], body.byteLength ? 413 : 400);
+    const up = url.searchParams.get("up") || "";
+    const r = await env.FEED.get(env.FEED.idFromName("room:" + room)).modPut(up, fp, part, body);
+    const status = r && r.status || 503;
+    return plain(status === 200 ? "Kept" : MOD_TEXT[status] || "Not kept", status);
 }

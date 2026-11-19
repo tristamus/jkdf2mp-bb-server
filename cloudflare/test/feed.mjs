@@ -673,6 +673,170 @@ await check("games watching from inside the game count in the room's watching, a
     assert.equal(await watchingOf(H.room), undefined);
 });
 
+// A bucket like R2's, for the host's mod: objects by key.
+class FakeBucket {
+    constructor() { this.m = new Map(); this.lists = 0; }
+    async put(key, body, opts) {
+        this.m.set(key, { bytes: new Uint8Array(body instanceof ArrayBuffer ? body : body.buffer.slice(0)), type: opts && opts.httpMetadata && opts.httpMetadata.contentType });
+    }
+    async get(key) {
+        const o = this.m.get(key);
+        return o ? { body: o.bytes, type: o.type } : null;
+    }
+    async list({ prefix, cursor }) {
+        this.lists++;
+        // Two at a time, to go by the cursor.
+        const keys = [...this.m.keys()].filter(k => k.startsWith(prefix)).sort();
+        const from = cursor ? Number(cursor) : 0;
+        return { objects: keys.slice(from, from + 2).map(key => ({ key })), truncated: from + 2 < keys.length, cursor: String(from + 2) };
+    }
+    async delete(keys) {
+        for (const k of [].concat(keys))
+            this.m.delete(k);
+    }
+}
+const FP = "ab".repeat(32), FP2 = "cd".repeat(32), FP3 = "ef".repeat(32);
+const bytes = n => new Uint8Array(n).fill(7).buffer;
+
+await check("a game watching asks for the host's mod: the host's game is asked, once every 20 s for each mod", async () => {
+    clock = 3_000_000;
+    const feed = await newFeed({ SHOTS: new FakeBucket() });
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const host = await game(feed, T1), other = await game(feed, T2);
+    const p = await page(feed);
+    host.take();
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.deepEqual(host.take(), ["mod " + FP]);
+    assert.deepEqual(other.take(), [], "only the host's game");
+    await feed.webSocketMessage(p, "mod " + FP);
+    clock += 19_000;
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.deepEqual(host.take(), [], "not again within 20 s");
+    await feed.webSocketMessage(p, "mod " + FP2);
+    assert.deepEqual(host.take(), ["mod " + FP2], "another mod is its own");
+    clock += 2000;
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.deepEqual(host.take(), ["mod " + FP]);
+    // Anything else is nothing, and a game's text too.
+    await feed.webSocketMessage(p, "mod nope");
+    await feed.webSocketMessage(other, "mod " + FP3);
+    assert.deepEqual(host.take(), []);
+    // A page that says too much is closed.
+    const q = await page(feed);
+    for (let i = 0; i < 11; i++)
+        await feed.webSocketMessage(q, "hi");
+    assert.deepEqual(q.closed, [1008, "too many"]);
+});
+
+await check("the host's game puts its mod: only the host's, only one asked for, so much and so often", async () => {
+    clock = 4_000_000;
+    const shots = new FakeBucket();
+    const feed = await newFeed({ SHOTS: shots });
+    assert.equal((await feed.modPut(T1, FP, "info", bytes(10))).status, 404, "not armed");
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    await game(feed, T1);
+    const p = await page(feed);
+    assert.equal((await feed.modPut(T1, FP, "info", bytes(10))).status, 403, "nobody asked for it");
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.equal((await feed.modPut(T2, FP, "info", bytes(10))).status, 403, "not the host's game");
+    assert.equal((await feed.modPut("x", FP, "info", bytes(10))).status, 403);
+    assert.equal((await feed.modPut(T1, "ab", "info", bytes(10))).status, 400);
+    assert.equal((await feed.modPut(T1, FP, "1100", bytes(10))).status, 400, "past the most blocks");
+    assert.equal((await feed.modPut(T1, FP, "x", bytes(10))).status, 400);
+    assert.equal((await feed.modPut(T1, FP, "info", bytes(64 * 1024 + 1))).status, 413);
+    assert.equal((await feed.modPut(T1, FP, "0", bytes(1024 * 1024 + 65))).status, 413);
+    assert.equal((await feed.modPut(T1, FP, "0", bytes(0))).status, 413);
+    assert.equal((await feed.modPut(T1, FP, "info", bytes(10))).status, 200);
+    assert.equal((await feed.modPut(T1, FP, "0", bytes(1024 * 1024 + 1))).status, 200);
+    const info = shots.m.get("feed-mods/7/" + FP + "/info");
+    assert.equal(info.type, "application/json");
+    assert.equal(info.bytes.length, 10);
+    assert.equal(shots.m.get("feed-mods/7/" + FP + "/0").type, "application/octet-stream");
+    assert.deepEqual(feed.ctx.storage.m.get("mods"), { [FP]: 10 + 1024 * 1024 + 1 });
+    // At most 10 a second, over 5 s.
+    for (let i = 1; i < 49; i++)
+        assert.equal((await feed.modPut(T1, FP, String(i), bytes(100))).status, 200, "part " + i);
+    assert.equal((await feed.modPut(T1, FP, "49", bytes(100))).status, 429);
+    clock += 5001;
+    assert.equal((await feed.modPut(T1, FP, "49", bytes(100))).status, 200);
+    // Two mods at most, and 1.25 GiB in all.
+    await feed.webSocketMessage(p, "mod " + FP2);
+    await feed.webSocketMessage(p, "mod " + FP3);
+    assert.equal((await feed.modPut(T1, FP2, "info", bytes(10))).status, 200);
+    assert.equal((await feed.modPut(T1, FP3, "info", bytes(10))).status, 403, "a third mod");
+    feed.mods[FP2] = 1280 * 1024 * 1024 - feed.mods[FP] - 10;
+    assert.equal((await feed.modPut(T1, FP2, "1", bytes(11))).status, 413);
+    assert.equal((await feed.modPut(T1, FP2, "1", bytes(10))).status, 200);
+});
+
+await check("a mod the host's game was putting goes on after the feed is evicted, and goes when it ends", async () => {
+    clock = 5_000_000;
+    const shots = new FakeBucket();
+    const storage = new FakeStorage();
+    const ctx = new FakeCtx(storage);
+    let feed = new Feed(ctx, { SHOTS: shots });
+    await ctx.ready;
+    await feed.arm(7, 30, { [T1]: 1 });
+    ws101(await feed.fetch(req("/feed/7?up=" + T1)));
+    ws101(await feed.fetch(req("/feed/7")));
+    await feed.webSocketMessage(ctx.sockets.at(-1), "mod " + FP);
+    for (const part of ["info", "0", "1", "2", "3"])
+        assert.equal((await feed.modPut(T1, FP, part, bytes(5))).status, 200);
+    shots.m.set("feed-mods/70/x", { bytes: new Uint8Array(1) });
+    // Evicted: what it was asked is gone, what it put isn't.
+    feed = new Feed(new FakeCtx(storage, ctx.sockets), { SHOTS: shots });
+    await feed.ctx.ready;
+    assert.equal((await feed.modPut(T1, FP, "4", bytes(5))).status, 200);
+    assert.equal(shots.m.size, 7);
+    await feed.end("room ended");
+    assert.deepEqual([...shots.m.keys()], ["feed-mods/70/x"], "only this room's are deleted");
+    assert.equal(storage.m.size, 0);
+    // A feed that never had one doesn't look.
+    const lists = shots.lists;
+    const other = await newFeed({ SHOTS: shots });
+    await other.arm(8, 30, { [T1]: 1 });
+    await other.end("watching off");
+    assert.equal(shots.lists, lists);
+});
+
+await check("the Worker's mod route: the host's game puts through its feed, anyone gets from the bucket", async () => {
+    clock = 6_000_000;
+    const shots = new FakeBucket();
+    const feeds = new Feeds({ SHOTS: shots });
+    const env = { FEED: feeds, SHOTS: shots };
+    const at = path => "https://lobby.test/feed/12/mod/" + FP + "/" + path;
+    const put = (path, body, headers = {}) => feedRoute(new Request(at(path), { method: "PUT", body, headers }), env, new URL(at(path)));
+    const get = (path, method = "GET") => feedRoute(new Request(at(path), { method }), env, new URL(at(path)));
+    assert.equal((await feedRoute(new Request(at("info")), { FEED: feeds }, new URL(at("info")))).status, 404, "no bucket");
+    assert.equal(await feedRoute(new Request("https://lobby.test/feed/12/mod/ab/info"), env, new URL("https://lobby.test/feed/12/mod/ab/info")), null);
+    assert.equal((await get("info")).status, 404);
+    assert.equal((await put("info?up=" + T1, "{}")).status, 404, "no feed armed");
+    const feed = feeds.get("room:12");
+    await feed.arm(12, 30, { [T1]: 1 });
+    ws101(await feed.fetch(req("/feed/12?up=" + T1)));
+    ws101(await feed.fetch(req("/feed/12")));
+    await feed.webSocketMessage(feed.ctx.sockets.at(-1), "mod " + FP);
+    assert.equal((await put("info?up=" + T2, "{}")).status, 403);
+    assert.equal((await put("info?up=" + T1, "x".repeat(64 * 1024 + 1))).status, 413);
+    assert.equal((await put("info?up=" + T1, "{}", { "Content-Length": "99999999" })).status, 413, "by its length first");
+    assert.equal((await put("info?up=" + T1, "")).status, 400);
+    const r = await put("info?up=" + T1, '{"status":"ok"}');
+    assert.equal(r.status, 200);
+    const g = await get("info");
+    assert.equal(g.status, 200);
+    assert.equal(g.headers["Content-Type"], "application/json");
+    assert.equal(g.headers["Cache-Control"], "no-store");
+    assert.equal(new TextDecoder().decode(g.body), '{"status":"ok"}');
+    assert.equal((await get("info", "HEAD")).body, null);
+    assert.equal((await put("0?up=" + T1, new Uint8Array([1, 2, 3]))).status, 200);
+    assert.deepEqual([...(await get("0")).body], [1, 2, 3]);
+    assert.equal((await get("1")).status, 404);
+    assert.equal((await get("info", "DELETE")).status, 405);
+    // The Worker sends them there too.
+    const w = await lobbyModule.default.fetch(new Request(at("0")), { ...env, SITE: "", MOVED_FROM: "" }, {});
+    assert.equal(w.status, 200);
+});
+
 await check("the Worker's /feed/ route", async () => {
     const url = path => new URL("https://lobby.test" + path);
     assert.equal(await feedRoute(req("/feedx/1"), {}, url("/feedx/1")), null);
