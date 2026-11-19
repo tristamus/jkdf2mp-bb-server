@@ -101,6 +101,39 @@ await check("a feed nobody armed has nothing, for games or pages", async () => {
     assert.equal((await feed.fetch(req("/feed/7", false))).status, 426);
 });
 
+await check("a page that comes with no keyframe here has the feed ask the host's game for one, at most every 10 s", async () => {
+    clock = 2_000_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const host = await game(feed, T1), other = await game(feed, T2);
+    host.take();
+    other.take();
+    let p = await page(feed);
+    assert.deepEqual(p.take(), ["feed 30", "feed waiting"]);
+    assert.deepEqual(host.take(), ["key"], "the host's game is asked");
+    assert.deepEqual(other.take(), [], "not a joiner's");
+    await page(feed);
+    clock += 5000;
+    await page(feed);
+    assert.deepEqual(host.take(), [], "not again within 10 s");
+    clock += 6000;
+    await page(feed);
+    assert.deepEqual(host.take(), ["key"]);
+    // One on its way (not yet of age) is enough.
+    await feed.webSocketMessage(host, chunk(1, 1));
+    clock += 20_000;
+    p = await page(feed);
+    assert.deepEqual(p.take(), ["feed 30", "feed waiting"]);
+    assert.deepEqual(host.take(), []);
+    // No host's game in the feed: nobody to ask.
+    const lone = await newFeed();
+    await lone.arm(7, 30, { [T2]: 2 });
+    const g = await game(lone, T2);
+    g.take();
+    await page(lone);
+    assert.deepEqual(g.take(), []);
+});
+
 await check("only a game with a token the lobby gave sends, as its seat", async () => {
     const feed = await newFeed();
     await feed.arm(7, 30, { [T1]: 1, [T2]: 2, nope: 3, ["3".repeat(32)]: 99 });

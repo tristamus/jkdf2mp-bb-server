@@ -26,6 +26,10 @@
 // starting at a keyframe once there is one at least the delay old, and every
 // chunk after it in order as each comes of age. "feed waiting" says there is
 // none yet, and "feed ended <why>" comes before the feed closes the socket.
+// The host's game sends a keyframe once its feed opens, at each new level and
+// every minute; a page that comes when the feed holds none (it was evicted, or
+// has just started) has the feed ask the host's game for one ("key"), at
+// most once every KEY_ASK_MS.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -49,6 +53,8 @@ const KIND_KEY_MORE = 2;
 const SEAT_MAX = 64;
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const RECORD_HEAD = 10;
+const SEAT_HOST = 1;
+const KEY_ASK_MS = 10 * 1000;
 // A feed nothing has been sent to for this long ends itself (its room may
 // have ended while the lobby was away).
 const IDLE_MS = 10 * 60 * 1000;
@@ -74,6 +80,7 @@ export class Feed extends DurableObject {
         this.rate = new Map();    // a game's ws -> times of its latest chunks
         this.timer = null;
         this.lastUp = 0;          // when a game last sent, or the feed was armed
+        this.keyAsked = 0;        // when the host's game was last asked for a keyframe
         ctx.blockConcurrencyWhile(async () => {
             this.cfg = (await ctx.storage.get("cfg")) || null;
             for (const ws of ctx.getWebSockets())
@@ -183,8 +190,10 @@ export class Feed extends DurableObject {
         if ("next" in state) {
             this.sendTo(server, "feed " + this.cfg.delay);
             this.flush();
-            if (state.next < 0)
+            if (state.next < 0) {
                 this.sendTo(server, "feed waiting");
+                this.askKey();
+            }
         }
         return new Response(null, { status: 101, webSocket: client });
     }
@@ -222,6 +231,20 @@ export class Feed extends DurableObject {
     async webSocketError(ws) {
         this.socks.delete(ws);
         this.rate.delete(ws);
+    }
+
+    // A page waits with no keyframe here to start from, not even one still
+    // coming of age: ask the host's game for one.
+    askKey(now = Date.now()) {
+        if (this.chunks.some(c => c.kind === KIND_KEY) || now - this.keyAsked < KEY_ASK_MS)
+            return;
+        for (const [ws, s] of this.socks) {
+            if (s.seat === SEAT_HOST) {
+                this.keyAsked = now;
+                this.sendTo(ws, "key");
+                return;
+            }
+        }
     }
 
     take(now, kind, seat, packets) {
