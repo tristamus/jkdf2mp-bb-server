@@ -365,8 +365,8 @@ await check("the lobby says feed on connect only with a FEED binding", async () 
     assert.deepEqual(H.take(), ["error bad-request"], "and doesn't take it");
 });
 
-await check("a game in a room asks to take part; the feed starts once a page watches", async () => {
-    const w = await new World().start();
+await check("with FEED_ONLY_WATCHED, a game in a room asks to take part; the feed starts once a page watches", async () => {
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
     const loner = await w.connect();
     await w.say(loner, "feed");
     assert.deepEqual(loner.take(), ["error bad-request"], "not in a room");
@@ -398,7 +398,7 @@ await check("a game in a room asks to take part; the feed starts once a page wat
 });
 
 await check("each game taking part has its own token; the host's delay goes to the feed", async () => {
-    const w = await new World().start();
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
     const H = await w.host("Maw");
     const J = await w.joiner("Kyle_K", H.room);
     const quiet = await w.joiner("Jerec", H.room);
@@ -419,8 +419,8 @@ await check("each game taking part has its own token; the host's delay goes to t
     assert.deepEqual(feed.cfg.tokens, { [th]: 1 });
 });
 
-await check("a feed nobody watches goes on for 2 minutes, then ends", async () => {
-    const w = await new World().start();
+await check("with FEED_ONLY_WATCHED, a feed nobody watches goes on for 2 minutes, then ends", async () => {
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
     const H = await w.host("Maw");
     await w.say(H, "feed");
     const p = await w.page();
@@ -448,7 +448,7 @@ await check("a feed nobody watches goes on for 2 minutes, then ends", async () =
 });
 
 await check("watching off, or a password, means no feed", async () => {
-    const w = await new World().start();
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
     const H = await w.host("Maw");
     await w.say(H, "feed");
     const p = await w.page();
@@ -467,8 +467,8 @@ await check("watching off, or a password, means no feed", async () => {
     assert.equal(feedLines(L).length, 1);
 });
 
-await check("with FEED_ALWAYS, a watchable match's feed is on whether watched or not", async () => {
-    const w = await new World({ FEED_ALWAYS: "1" }).start();
+await check("by default, a watchable match's feed is on whether watched or not", async () => {
+    const w = await new World().start();
     const H = await w.host("Maw");
     await w.say(H, "feed");
     assert.equal(feedLines(H).length, 1);
@@ -478,10 +478,17 @@ await check("with FEED_ALWAYS, a watchable match's feed is on whether watched or
     w.lobby.sweep();
     await w.settle();
     assert.ok(room.feed);
+    // Still none for a password game, and none once its host turns watching off.
+    const L = await w.host("Jerec", { password: "sith" });
+    await w.say(L, "feed");
+    assert.deepEqual(feedLines(L), []);
+    await w.say(H, "spectators off");
+    assert.deepEqual(feedLines(H), ["feed off"]);
+    assert.equal(room.feed, null);
 });
 
 await check("a room that ends ends its feed; a lobby restart keeps the tokens", async () => {
-    const w = await new World().start();
+    const w = await new World({ FEED_ONLY_WATCHED: "1" }).start();
     const H = await w.host("Maw");
     await w.say(H, "feed");
     const p = await w.page();

@@ -61,10 +61,11 @@
 // With a Durable Object bound as FEED (src/feed.js), a watchable match also
 // gets a feed for pages to watch the game itself, held back by its delay: the
 // lobby says feed on connect, a game in a room that takes part says feed, and
-// while anyone watches its room's match (or for FEED_LINGER_MS after, or all
-// the time with FEED_ALWAYS "1") it's told where to send (feed <room>
-// <token>), or feed off when that stops. The status says feed: 1 for a match
-// whose feed is on.
+// while its match can be watched it's told where to send (feed <room>
+// <token>), or feed off when that stops, so a page that comes to watch has
+// the game at once (Antonio's choice, 2026-11-19). With the FEED_ONLY_WATCHED
+// var "1", only while a page watches the match, and for FEED_LINGER_MS after
+// the last one stops. The status says feed: 1 for a match whose feed is on.
 //
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
@@ -188,8 +189,9 @@ const SPECT_MIN_DELAY_S = 30;
 const SPECT_MAX_DELAY_S = 300;
 const SPECT_DELAY_S = 30;
 const SECS_RE = /^[0-9]{1,4}$/;
-// How long a match's feed goes on after its last page stops watching it, so a
-// page coming back (or the next one) doesn't wait out the delay again.
+// With FEED_ONLY_WATCHED, how long a match's feed goes on after its last page
+// stops watching it, so a page coming back (or the next one) doesn't wait out
+// the delay again.
 const FEED_LINGER_MS = 2 * 60 * 1000;
 // HMAC pads a key with zeros, so this is the same as no key, which
 // crypto.subtle won't take.
@@ -1520,8 +1522,10 @@ export class Lobby extends DurableObject {
             this.feedCheck(room, now);
     }
 
+    // Whether a watchable match's feed is on whether or not a page watches:
+    // yes, unless FEED_ONLY_WATCHED is "1".
     feedAlways() {
-        return String(this.env.FEED_ALWAYS || "") === "1";
+        return String(this.env.FEED_ONLY_WATCHED || "") !== "1";
     }
 
     // Starts, changes or ends a room's feed, as its watchable state, its

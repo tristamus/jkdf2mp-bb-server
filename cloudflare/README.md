@@ -734,11 +734,12 @@ named `room:<id>`) that the room's games send what they send everyone to, and th
 the pages watching, each chunk only once it's the room's delay old. Without the `FEED` binding
 (live, for now) none of this runs. No game sends to one yet: the engine's side is still to come.
 
-- The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While a
-  page watches its room's match (and for 2 minutes after the last one stops, or all the time with
-  the `FEED_ALWAYS` var `"1"`), and the match can be watched, the lobby arms the room's feed with
-  its delay and a token for each such game, then tells each game `feed <room> <token>`; it says
-  `feed off` when that stops. The status has `"feed": 1` for a match whose feed is on.
+- The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While
+  the match can be watched, the lobby arms the room's feed with its delay and a token for each such
+  game, then tells each game `feed <room> <token>`; it says `feed off` when that stops. So a page
+  that comes to watch has the game at once. With the `FEED_ONLY_WATCHED` var `"1"`, a feed runs
+  only while a page watches the match, and for 2 minutes after the last one stops (cheaper, but a
+  new viewer waits out the delay). The status has `"feed": 1` for a match whose feed is on.
 - A game connects to `/feed/<room>?up=<token>` and sends binary chunks: a kind byte (0 packets sent
   to everyone, 1 a keyframe's start: what a game joining now would be sent, 2 more of it), then its
   packets. At most 64 KB a chunk and 20 a second (incoming messages are billed, 20 to a request), so
@@ -750,9 +751,10 @@ the pages watching, each chunk only once it's the room's delay old. Without the 
 - A feed holds at most 32 MB and keeps nothing in storage but who may send; one nothing is sent to
   for 10 minutes ends itself.
 
-Cost: what a feed sends pages is free; each chunk a game sends is a twentieth of a request, so a
-game sending 4 a second is about 720 requests an hour, plus the object's time while the match is
-watched.
+Cost: what a feed sends pages is free; each chunk a game sends is a twentieth of a request. A game
+sends 4 a second (measured on beta: about 3.2 KiB/s a player, 3.0 standing still), so about 720
+requests an hour per player, plus the feed object's time, for every watchable match being played
+(only watched ones with `FEED_ONLY_WATCHED`).
 
 `node test/feed.mjs` checks it.
 
