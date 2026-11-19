@@ -99,6 +99,13 @@ new_sqlite_classes = ["Lobby"]
 tag = "v2"
 new_sqlite_classes = ["LevelJob"]
 
+# A watched match's feed (src/feed.js, spectator mode Stage 2), one object per
+# room. Bound on beta only for now: without the FEED binding the lobby doesn't
+# say feed and /feed/ answers 404. It keeps nothing but who may send.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Feed"]
+
 [vars]
 # Handed to every page for WebRTC (Cloudflare's own STUN server, from its
 # Realtime docs). Leave it empty to send every game packet through the relay.
@@ -182,6 +189,10 @@ bucket_name = "jkdf2mp-shots-beta"
 [[env.beta.durable_objects.bindings]]
 name = "LEVELJOB"
 class_name = "LevelJob"
+
+[[env.beta.durable_objects.bindings]]
+name = "FEED"
+class_name = "Feed"
 
 [[env.beta.r2_buckets]]
 binding = "LEVELS"

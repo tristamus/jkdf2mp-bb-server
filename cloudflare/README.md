@@ -727,6 +727,35 @@ a page is free, and a page sends one line when it starts or stops watching.
 
 `node test/spectate.mjs` checks it.
 
+### A match's feed (Stage 2, beta only)
+
+To watch the game itself, a match gets a feed (`src/feed.js`): a Durable Object per room (`FEED`,
+named `room:<id>`) that the room's games send what they send everyone to, and that hands it to
+the pages watching, each chunk only once it's the room's delay old. Without the `FEED` binding
+(live, for now) none of this runs. No game sends to one yet: the engine's side is still to come.
+
+- The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While a
+  page watches its room's match (and for 2 minutes after the last one stops, or all the time with
+  the `FEED_ALWAYS` var `"1"`), and the match can be watched, the lobby arms the room's feed with
+  its delay and a token for each such game, then tells each game `feed <room> <token>`; it says
+  `feed off` when that stops. The status has `"feed": 1` for a match whose feed is on.
+- A game connects to `/feed/<room>?up=<token>` and sends binary chunks: a kind byte (0 packets sent
+  to everyone, 1 a keyframe's start: what a game joining now would be sent, 2 more of it), then its
+  packets. At most 64 KB a chunk and 20 a second (incoming messages are billed, 20 to a request), so
+  a game batches them.
+- A page connects to `/feed/<room>`, gets `feed <delay>` (and `feed waiting` until there's a
+  keyframe old enough), then binary batches of records: `u32` length, `u32` ms since the feed began,
+  `u8` kind, `u8` seat, the packets. It starts at the latest keyframe that's of age and gets every
+  chunk after it in order. `feed ended <why>` comes before the feed closes.
+- A feed holds at most 32 MB and keeps nothing in storage but who may send; one nothing is sent to
+  for 10 minutes ends itself.
+
+Cost: what a feed sends pages is free; each chunk a game sends is a twentieth of a request, so a
+game sending 4 a second is about 720 requests an hour, plus the object's time while the match is
+watched.
+
+`node test/feed.mjs` checks it.
+
 ## Imperial relay games
 
 `/imperial-games` (`src/imperial.js`) answers the game list of the Imperial Network Protocol relay

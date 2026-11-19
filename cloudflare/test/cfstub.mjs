@@ -80,6 +80,11 @@ export class FakeStorage {
     async getAlarm() {
         return this.alarm;
     }
+    deleteAll() {
+        this.m.clear();
+        this.alarm = null;
+        return Promise.resolve();
+    }
     setAlarm(at) {
         this.alarm = at;
         return Promise.resolve();
