@@ -732,7 +732,8 @@ a page is free, and a page sends one line when it starts or stops watching.
 To watch the game itself, a match gets a feed (`src/feed.js`): a Durable Object per room (`FEED`,
 named `room:<id>`) that the room's games send what they send everyone to, and that hands it to
 the pages watching, each chunk only once it's the room's delay old. Without the `FEED` binding
-(live, for now) none of this runs. No game sends to one yet: the engine's side is still to come.
+(live, for now) none of this runs. The games watching it are the game itself running as a viewer
+(Watch in the game, OpenJKDF2's `stdComm_WSRelay.c`): to the feed, a page.
 
 - The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While
   the match can be watched, the lobby arms the room's feed with its delay and a token for each such
@@ -748,6 +749,9 @@ the pages watching, each chunk only once it's the room's delay old. Without the 
   keyframe old enough), then binary batches of records: `u32` length, `u32` ms since the feed began,
   `u8` kind, `u8` seat, the packets. It starts at the latest keyframe that's of age and gets every
   chunk after it in order. `feed ended <why>` comes before the feed closes.
+- About 2 s after a page connects or leaves, the feed tells the lobby how many watch (`feedPages`,
+  over RPC). The lobby adds them to the room's `watching` in the status, keeps the number with the
+  feed (`feed:<id>`), and with `FEED_ONLY_WATCHED` they keep the feed on like a page watching.
 - A feed holds at most 32 MB and keeps nothing in storage but who may send; one nothing is sent to
   for 10 minutes ends itself.
 
