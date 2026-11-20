@@ -725,6 +725,16 @@ its latest kills, `kills` in `live`: `src/ladder.js`, `liveView`). A password ga
 scores or kills, as before. It costs nothing more than the counts did: every message the lobby sends
 a page is free, and a page sends one line when it starts or stops watching.
 
+To look back through a match's kills, a watching page asks for all of them: `kills <room>`, answered
+`kills <room> <base64 JSON>`: `{"n": 12, "kills": [...]}`, how many kills count in all and the
+latest 500 of them, the oldest first, as `live` has its latest (`[killer, victim, kind, at]`:
+`Ladder.liveKills`). It's `{"n": 0, "kills": []}` for a room with no match the status shows, or with
+a password. They stay with the match as it ends, while the room windows show its last scores. The
+status's `live` says how many there are (`nk`), so a page asks when it starts watching and again
+only if what it has and the status's latest don't add up to that (after a dropped connection, or a
+kill counted late), at most once a second (the lobby leaves out what comes faster).
+`node test/ladder.mjs` checks it.
+
 `node test/spectate.mjs` checks it.
 
 ### A match's feed (Stage 2)
