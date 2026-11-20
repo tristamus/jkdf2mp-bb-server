@@ -704,6 +704,84 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
 - The count behind the 8 GB (`shot_total`) follows what the lobby adds and takes off. Rows deleted
   by hand need it set right (above), and bytes left in the bucket by a failed delete aren't in it.
 
+## Watching a match
+
+The room windows on the page let visitors watch a match without joining it (spectating). A page
+watching the lobby says which room's match it's watching, `spectate <room>` (`spectate 0` for none),
+and every game in the status says whether it can be watched (`"spect": 1` or `0`) and, once any page
+does, how many are (`"watching": 2`). A page watches one match at a time; it never takes a seat,
+never reaches the room's games, and isn't counted among the players. Only a page that said `watch`
+may send `spectate`; a room that isn't there is taken as none.
+
+A room's host's game says whether its match may be watched, and how far behind live it's shown in
+seconds: `spectators on [<delay>]` or `spectators off`, kept with the room (`spect:<id>` in storage)
+until it ends. The delay is never under 30 s, so watching can't be used to call out where players
+are, and at most 300; 30 when it isn't given. Until its host's game says, a game can be watched
+unless it has a password. The lobby says `spect` on its `lobby` line, for games to know it takes
+`spectators`.
+
+What a watching page shows today is the match as the status has it (the rules, clock, scores and
+its latest kills, `kills` in `live`: `src/ladder.js`, `liveView`). A password game's status has no
+scores or kills, as before. It costs nothing more than the counts did: every message the lobby sends
+a page is free, and a page sends one line when it starts or stops watching.
+
+`node test/spectate.mjs` checks it.
+
+### A match's feed (Stage 2)
+
+To watch the game itself, a match gets a feed (`src/feed.js`): a Durable Object per room (`FEED`,
+named `room:<id>`) that the room's games send what they send everyone to, and that hands it to
+the pages watching, each chunk only once it's the room's delay old. Without the `FEED` binding
+none of this runs; `wrangler.toml` binds it on the site and on beta. Once a deployment has the
+`Feed` class (migration `v3`), every Worker deployed there must export it, so a kit from before it
+can't be its rollback: take the `FEED` binding out instead. The games watching it are the game itself running as a viewer
+(Watch in the game, OpenJKDF2's `stdComm_WSRelay.c`): to the feed, a page.
+
+- The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While
+  the match can be watched, the lobby arms the room's feed with its delay and a token for each such
+  game, then tells each game `feed <room> <token>`; it says `feed off` when that stops. So a page
+  that comes to watch has the game at once. With the `FEED_ONLY_WATCHED` var `"1"`, a feed runs
+  only while a page watches the match, and for 2 minutes after the last one stops (cheaper, but a
+  new viewer waits out the delay). The status has `"feed": 1` for a match whose feed is on.
+- A game connects to `/feed/<room>?up=<token>` and sends binary chunks: a kind byte (0 packets sent
+  to everyone, 1 a keyframe's start: what a game joining now would be sent, 2 more of it), then its
+  packets. At most 64 KB a chunk and 20 a second (incoming messages are billed, 20 to a request), so
+  a game batches them.
+- A page connects to `/feed/<room>`, gets `feed <delay>` (and `feed waiting` until there's a
+  keyframe old enough), then binary batches of records: `u32` length, `u32` ms since the feed began,
+  `u8` kind, `u8` seat, the packets. It starts at the latest keyframe that's of age and gets every
+  chunk after it in order. `feed ended <why>` comes before the feed closes.
+- About 2 s after a page connects or leaves, the feed tells the lobby how many watch (`feedPages`,
+  over RPC). The lobby adds them to the room's `watching` in the status, keeps the number with the
+  feed (`feed:<id>`), and with `FEED_ONLY_WATCHED` they keep the feed on like a page watching.
+  The game in a viewing page's box connects to `/feed/<room>?box=1` and isn't in that number: its
+  page says `spectate <room>` the whole time it shows the match, so it's counted once, and the
+  count doesn't move while the box's game starts again (into the host's mod).
+- A game watching from inside the game that doesn't have the match's mod (nor finds it in the Mod
+  Library) says `mod <fp>` on its socket, and the feed asks the host's game (`mod <fp>`, at most
+  every 20 s for each mod). The host's game puts the mod as it sends it to joiners, without the
+  original game files in it: `PUT /feed/<room>/mod/<fp>/info?up=<token>` (JSON, at most 64 KiB),
+  then each 1 MiB block as `/feed/<room>/mod/<fp>/<n>` (at most 1 MiB + 64 bytes, 10 a second).
+  The Worker hands each to the feed (`modPut`, over RPC), which checks it's the host's game and a
+  mod a game asked for (at most 2, and 1.25 GiB in all), and keeps it in the `SHOTS` bucket under
+  `feed-mods/<room>/<fp>/`. Anyone gets them with `GET` from the bucket. They're deleted when the
+  feed ends.
+- A spectator talks to the match's players: its game says `say <name>\t<text>` on its socket, and
+  the feed sends the host's game `say <name> (watching): <text>`, which puts it in the match's chat
+  (everyone in the match sees it, and those watching get it with the feed's delay). At most one
+  every 3 s from a socket (more are dropped), printable ASCII, a name of at most 16 characters and a
+  message of at most 96.
+- A feed holds at most 32 MB and keeps nothing in storage but who may send (and how much of a mod
+  its host put); one nothing is sent to for 10 minutes ends itself.
+
+Cost: what a feed sends pages is free; each chunk a game sends is a twentieth of a request. A game
+sends 4 a second (measured on beta: about 3.2 KiB/s a player, 3.0 standing still), so about 720
+requests an hour per player, plus the feed object's time, for every watchable match being played
+(only watched ones with `FEED_ONLY_WATCHED`). A mod put for a game watching is a request and an R2
+write for each MiB block sent (deflated, a 300 MiB mod is about 80), held only while the feed is on.
+
+`node test/feed.mjs` checks it.
+
 ## Imperial relay games
 
 `/imperial-games` (`src/imperial.js`) answers the game list of the Imperial Network Protocol relay

@@ -305,10 +305,10 @@ for label, options, env, keeps in MODES:
 @check("the relay says pw on connect, after links and turn")
 def _():
     with Relay() as r:
-        assert r.connect("old").lobby_line == "lobby links pw"
-        assert r.connect("new").lobby_line == "lobby links pw"
+        assert r.connect("old").lobby_line == "lobby links pw spect"
+        assert r.connect("new").lobby_line == "lobby links pw spect"
     with Relay("--turn", "turn:turn.example.org:3478", "--turn-user", "u", "--turn-pass", "p") as r:
-        assert r.connect("new").lobby_line == "lobby links turn pw"
+        assert r.connect("new").lobby_line == "lobby links turn pw spect"
 
 
 @check("a game that sends passwords gets the password box exactly for rooms with a password, never a password")
@@ -610,6 +610,27 @@ def _():
         p = subprocess.run([sys.executable, "-B", RELAY, "--port", "1", *options], capture_output=True, text=True,
                            timeout=10, env=dict(os.environ, **(env or {})))
         assert p.returncode == 2 and "passwords-for-old-games" in p.stderr, (options, p.returncode, p.stderr)
+
+
+@check("a watching page's match is counted, and a host's game turns watching off (spectate, spectators)")
+def _():
+    with Relay() as r:
+        h = r.host("new")
+        locked = r.host("new", password=PASSWORD)
+        page = r.connect("new")
+        page.say("watch")
+        assert page.say("spectate %d" % h.room)[-1].startswith("status ")
+        games = {g["id"]: g for g in r.status()[1]["games"]}
+        assert (games[h.room]["spect"], games[h.room]["watching"]) == (1, 1), games
+        assert (games[locked.room]["spect"], "watching" in games[locked.room]) == (0, False), games
+        assert h.say("spectators off") == []
+        games = {g["id"]: g for g in r.status()[1]["games"]}
+        assert (games[h.room]["spect"], "watching" in games[h.room]) == (0, False), games
+        assert locked.say("spectators on 90") == []
+        assert {g["id"]: g for g in r.status()[1]["games"]}[locked.room]["spect"] == 1
+        game = r.connect("new")
+        assert game.say("spectate %d" % h.room) == ["error bad-request"], "only a watching page"
+        assert h.say("spectators maybe") == ["error bad-request"]
 
 
 @check("the relay's log never has a password")

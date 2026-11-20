@@ -50,6 +50,23 @@
 // without it, and their join hears "error version newer", which tells their
 // player to reload the page. See relay.py for the lines.
 //
+// Watching a match (spectating): a page watching the lobby says which of its
+// rooms it's watching (spectate <room>, spectate 0 for none), and the status
+// gives each room whether it can be watched (spect: 1, or 0) and how many
+// pages are watching it (watching). A room's host's game may say whether it
+// may be (spectators on|off [<delay s>]); one that hasn't said can be,
+// unless it has a password. The lobby says spect on connect for games to
+// know it takes that. Watchers never take a seat or reach the room's games.
+//
+// With a Durable Object bound as FEED (src/feed.js), a watchable match also
+// gets a feed for pages to watch the game itself, held back by its delay: the
+// lobby says feed on connect, a game in a room that takes part says feed, and
+// while its match can be watched it's told where to send (feed <room>
+// <token>), or feed off when that stops, so a page that comes to watch has
+// the game at once (Antonio's choice, 2026-11-19). With the FEED_ONLY_WATCHED
+// var "1", only while a page watches the match, and for FEED_LINGER_MS after
+// the last one stops. The status says feed: 1 for a match whose feed is on.
+//
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
@@ -70,12 +87,14 @@ import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
 import { imperialGames } from "./imperial.js";
+import { feedRoute } from "./feed.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
 import { ladderRoute } from "./ladder-pages.js";
 import { levelsRoute, kickLevels } from "./levels.js";
 // The Level Library's job (src/levels.js), a Durable Object of its own.
 export { LevelJob } from "./levels.js";
+export { Feed } from "./feed.js";
 
 const MAX_MESSAGE = 64 * 1024;
 const MAX_ENTRY_HEX = 2048;
@@ -162,6 +181,21 @@ const PW_HEX_RE = /^(?:[0-9a-fA-F]{4}){1,31}$/;
 // "error password wait".
 const PW_TRIES = 10;
 const PW_TRIES_MS = 60 * 1000;
+// How far behind live a watched match may be shown, in seconds, as a
+// host's game asks (spectators): never less than SPECT_MIN_DELAY_S, so
+// watching can't call out where players are; SPECT_DELAY_S when it doesn't
+// say.
+const SPECT_MIN_DELAY_S = 30;
+const SPECT_MAX_DELAY_S = 300;
+const SPECT_DELAY_S = 30;
+const SECS_RE = /^[0-9]{1,4}$/;
+// With FEED_ONLY_WATCHED, how long a match's feed goes on after its last page
+// stops watching it, so a page coming back (or the next one) doesn't wait out
+// the delay again.
+const FEED_LINGER_MS = 2 * 60 * 1000;
+// The most games a feed may say watch from inside the game (src/feed.js
+// takes 200).
+const MAX_FEED_PAGES = 1000;
 // HMAC pads a key with zeros, so this is the same as no key, which
 // crypto.subtle won't take.
 const NO_KEY = new Uint8Array(64);
@@ -174,6 +208,11 @@ export default {
                 return new Response("Expected a WebSocket upgrade", { status: 426 });
             const lobby = env.LOBBY.get(env.LOBBY.idFromName("lobby"));
             return lobby.fetch(request);
+        }
+        if (url.pathname.startsWith("/feed/")) {
+            const feed = await feedRoute(request, env, url);
+            if (feed)
+                return feed;
         }
         if (url.pathname === "/summary")
             return takeSummary(request, env);
@@ -467,8 +506,11 @@ function turnOn(env) {
 
 // What the lobby can do beyond the basics, for the game to know on connect.
 function lobbyMessage(env) {
-    // match: games in a room report their match (src/ladder.js).
-    return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "");
+    // match: games in a room report their match (src/ladder.js). spect: a
+    // host's game may say whether its match can be watched (spectators).
+    // feed: a watched match's games send it to its feed (src/feed.js).
+    return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect" +
+        (env.FEED ? " feed" : "");
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -495,18 +537,26 @@ export class Lobby extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
         // room id -> {id, host, entry, peers: Map(id -> ws), seats, pw,
-        // entrySeq}, where seats is Map(id -> {key, until, lost, name, game,
+        // entrySeq, spect}, where seats is Map(id -> {key, until, lost, name, game,
         // net}) for the host (1) and each peer: until, lost (when its player
         // was last here), name, game and net only while the seat is held,
         // and at, when its player sat down. pw is the password's verifier, {salt, mac,
         // legacy}, null for a room without one. entrySeq counts the host's
         // entries, so one that waited for its verifier doesn't undo a newer.
+        // spect is what its host's game said about watching it, {on, delay},
+        // null until it does (spectOn). feed is its feed while it's on,
+        // {tokens: {player id: token}, idle (when its last page stopped
+        // watching, 0 while one does), armed (what the feed was last told),
+        // pages (how many games watch it from inside the game, as the feed
+        // last said: feedPages)}, and feedChain the calls to its feed, one
+        // after another.
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
-        // ws -> {room, id, name, game, watch, since, net, pw, ip}: the room
-        // id and player id, the player's name and game from hello (name null
-        // until then), whether it's a page watching the counts, when it
+        // ws -> {room, id, name, game, watch, spect, since, net, pw, ip}: the
+        // room id and player id, the player's name and game from hello (name
+        // null until then), whether it's a page watching the counts, the room
+        // whose match that page is watching (0 or none for none), when it
         // connected, the netcode it connected with, whether it sends
         // passwords with join, and its address (CF-Connecting-IP).
         this.conns = new Map();
@@ -547,6 +597,8 @@ export class Lobby extends DurableObject {
         const entries = await this.ctx.storage.list({ prefix: "room:" });
         const seats = await this.ctx.storage.list({ prefix: "seats:" });
         const pws = await this.ctx.storage.list({ prefix: "pw:" });
+        const spects = await this.ctx.storage.list({ prefix: "spect:" });
+        const feeds = await this.ctx.storage.list({ prefix: "feed:" });
         for (const [key, entry] of entries) {
             const id = Number(key.slice(5));
             let pw = pws.get("pw:" + id) || null;
@@ -558,7 +610,11 @@ export class Lobby extends DurableObject {
                 pw = await newVerifier(pwHex, this.env.PASSWORD_KEY, pw ? pw.legacy : true);
                 this.ctx.storage.put("pw:" + id, pw);
             }
-            this.rooms.set(id, this.newRoom(id, entry, seats.get("seats:" + id), pw));
+            const room = this.newRoom(id, entry, seats.get("seats:" + id), pw);
+            room.spect = spects.get("spect:" + id) || null;
+            const feed = feeds.get("feed:" + id);
+            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0 } : null;
+            this.rooms.set(id, room);
         }
         this.stripPasswords();
         for (const ws of this.ctx.getWebSockets()) {
@@ -616,6 +672,16 @@ export class Lobby extends DurableObject {
             if (!this.rooms.has(Number(key.slice(3))))
                 this.ctx.storage.delete(key);
         }
+        for (const key of spects.keys()) {
+            if (!this.rooms.has(Number(key.slice(6))))
+                this.ctx.storage.delete(key);
+        }
+        // A feed whose room went while the object was away ends itself once
+        // nothing comes (src/feed.js).
+        for (const key of feeds.keys()) {
+            if (!this.rooms.has(Number(key.slice(5))))
+                this.ctx.storage.delete(key);
+        }
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
@@ -627,7 +693,7 @@ export class Lobby extends DurableObject {
         return {
             id, host: null, entry, peers: new Map(),
             seats: new Map(Object.entries(seats || {}).map(([k, v]) => [Number(k), v])),
-            pw: pw || null, entrySeq: 0,
+            pw: pw || null, entrySeq: 0, spect: null, feed: null, feedChain: null,
         };
     }
 
@@ -762,6 +828,9 @@ export class Lobby extends DurableObject {
             }
         }
         if (quiet || ended)
+            this.statusChanged();
+        else if ([...this.rooms.values()].some(r => r.feed && r.feed.idle))
+            // A feed nobody watches ends once FEED_LINGER_MS is up.
             this.statusChanged();
         for (const [roomId, tries] of this.pwTries) {
             for (const [who, t] of tries) {
@@ -943,6 +1012,15 @@ export class Lobby extends DurableObject {
         } else if (op === "watch" && !args.length) {
             this.saveConn(ws, { ...c, watch: true });
             this.watch(ws);
+        } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
+            this.spectate(ws, c, Number(args[0]));
+        } else if (op === "spectators" && (args.length === 1 || args.length === 2) && (args[0] === "on" || args[0] === "off") &&
+                   (args.length === 1 || SECS_RE.test(args[1]))) {
+            this.spectators(ws, c, args[0] === "on", args.length === 2 ? Number(args[1]) : 0);
+        } else if (op === "feed" && args.length === 0 && this.env.FEED && c.room && this.rooms.has(c.room)) {
+            if (!c.feed)
+                this.saveConn(ws, { ...c, feed: true });
+            this.feedCheck(this.rooms.get(c.room));
         } else if (op === "match" && args.length === 1) {
             // Never answered, right or wrong (src/ladder.js).
             return this.ladder.report(ws, c, args[0]);
@@ -1292,6 +1370,13 @@ export class Lobby extends DurableObject {
             }
         }
         lobby.sort(byName);
+        // How many pages watch each room's match; the games watching it from
+        // inside the game are added from its feed (feedPages).
+        const watching = new Map();
+        for (const c of this.conns.values()) {
+            if (c.watch && c.spect)
+                watching.set(c.spect, (watching.get(c.spect) || 0) + 1);
+        }
         const games = [];
         let online = lobby.length;
         for (const room of [...this.rooms.values()].sort((a, b) => a.id - b.id)) {
@@ -1311,11 +1396,15 @@ export class Lobby extends DurableObject {
             // Its match as it's played: the rules, the clock and the scores
             // (src/ladder.js, liveView), once its host's game has reported.
             const live = this.ladder.on() ? this.ladder.live(room.id, info.map, locked) : null;
+            // Whether its match can be watched, and by how many pages it is.
+            const spect = this.spectOn(room, locked);
+            const seen = spect ? (watching.get(room.id) || 0) + ((room.feed && room.feed.pages) || 0) : 0;
             games.push({
                 id: room.id, name: info.name, game,
                 map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
                 locked, players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room), rank: info.maxRank, ...(live ? { live } : {}),
+                spect: spect ? 1 : 0, ...(seen ? { watching: seen } : {}), ...(room.feed ? { feed: 1 } : {}),
             });
         }
         for (const g of Object.values(byGame)) {
@@ -1356,6 +1445,7 @@ export class Lobby extends DurableObject {
     // After anything that can change the counts: tells the watching pages,
     // unless they already have this status.
     statusChanged() {
+        this.feeds();
         const watchers = this.watchers();
         if (!watchers.length) {
             this.lastStatus = null;
@@ -1382,6 +1472,163 @@ export class Lobby extends DurableObject {
         this.lastStatus = status;
         for (const w of this.watchers())
             this.send(w, line);
+    }
+
+    // spectate <room>: the match this page watches, 0 for none. A room
+    // that isn't there, or ended, is none. Watching takes no seat: the page
+    // is only counted, in the room's watching.
+    spectate(ws, c, roomId) {
+        const id = this.rooms.has(roomId) ? roomId : 0;
+        if ((c.spect || 0) === id)
+            return;
+        this.saveConn(ws, { ...c, spect: id });
+        this.statusChanged();
+    }
+
+    // spectators on|off [<delay s>], from a room's host's game: whether its
+    // match may be watched, and how far behind live, at least
+    // SPECT_MIN_DELAY_S.
+    spectators(ws, c, on, delay) {
+        const room = this.rooms.get(c.room);
+        if (!room || room.host !== ws)
+            return;
+        const spect = { on, delay: Math.min(SPECT_MAX_DELAY_S, Math.max(SPECT_MIN_DELAY_S, delay || SPECT_DELAY_S)) };
+        if (room.spect && room.spect.on === spect.on && room.spect.delay === spect.delay)
+            return;
+        room.spect = spect;
+        this.ctx.storage.put("spect:" + room.id, spect);
+        this.statusChanged();
+    }
+
+    // Whether a room's match can be watched: as its host's game said, else
+    // unless it has a password (locked).
+    spectOn(room, locked) {
+        return room.spect ? !!room.spect.on : !locked;
+    }
+
+    // The games in a room that take part in its feed (they said feed), by
+    // player id: [[id, ws]].
+    feedGames(room) {
+        const out = [];
+        if (room.host && this.conn(room.host).feed)
+            out.push([1, room.host]);
+        for (const [id, ws] of room.peers) {
+            if (this.conn(ws).feed)
+                out.push([id, ws]);
+        }
+        return out;
+    }
+
+    // Puts every room's feed as it should be.
+    feeds() {
+        if (!this.env.FEED)
+            return;
+        const now = Date.now();
+        for (const room of this.rooms.values())
+            this.feedCheck(room, now);
+    }
+
+    // Whether a watchable match's feed is on whether or not a page watches:
+    // yes, unless FEED_ONLY_WATCHED is "1".
+    feedAlways() {
+        return String(this.env.FEED_ONLY_WATCHED || "") !== "1";
+    }
+
+    // Starts, changes or ends a room's feed, as its watchable state, its
+    // pages and its games now are: a token for each game taking part, told
+    // to it once the feed has it.
+    feedCheck(room, now = Date.now()) {
+        if (!this.env.FEED || !room)
+            return;
+        const info = readEntry(room.entry);
+        const on = !!info && this.spectOn(room, info.locked || !!room.pw);
+        // A game watching from inside the game watches too.
+        let watched = !!(room.feed && room.feed.pages);
+        for (const c of this.conns.values()) {
+            if (c.watch && c.spect === room.id)
+                watched = true;
+        }
+        const always = this.feedAlways();
+        // idle 0: watched until now, so it starts to linger.
+        const lingering = room.feed && (!room.feed.idle || now - room.feed.idle < FEED_LINGER_MS);
+        if (!on || !(always || watched || lingering)) {
+            if (room.feed)
+                this.feedEnd(room, on ? "nobody watching" : "watching off");
+            return;
+        }
+        if (!room.feed)
+            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0 };
+        const idle = always || watched ? 0 : room.feed.idle || now;
+        const tokens = {}, fresh = [];
+        for (const [id, ws] of this.feedGames(room)) {
+            const t = room.feed.tokens[id] || newKey();
+            if (!room.feed.tokens[id])
+                fresh.push([id, ws, t]);
+            tokens[id] = t;
+        }
+        const delay = room.spect ? room.spect.delay : SPECT_DELAY_S;
+        const armed = JSON.stringify([delay, tokens]);
+        if (idle !== room.feed.idle) {
+            room.feed.idle = idle;
+            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0 });
+        }
+        if (armed === room.feed.armed)
+            return;
+        room.feed.tokens = tokens;
+        room.feed.armed = armed;
+        this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0 });
+        const byToken = Object.fromEntries(Object.entries(tokens).map(([id, t]) => [t, Number(id)]));
+        const feed = room.feed;
+        this.feedCall(room, stub => stub.arm(room.id, delay, byToken)).then(ok => {
+            if (!ok) {
+                // Asked again the next time anything changes.
+                if (room.feed === feed && feed.armed === armed)
+                    feed.armed = "";
+                return;
+            }
+            for (const [id, ws, t] of fresh) {
+                if (room.feed === feed && feed.tokens[id] === t)
+                    this.send(ws, `feed ${room.id} ${t}`);
+            }
+        });
+    }
+
+    // From a room's feed (src/feed.js), over RPC: how many games watch its
+    // match from inside the game now. They're counted in its watching, and
+    // keep a feed that's only on while watched (FEED_ONLY_WATCHED) on.
+    async feedPages(roomId, n) {
+        const room = this.rooms.get(Number(roomId));
+        if (!room || !room.feed || !Number.isInteger(n) || n < 0)
+            return false;
+        n = Math.min(n, MAX_FEED_PAGES);
+        if ((room.feed.pages || 0) === n)
+            return true;
+        room.feed.pages = n;
+        this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle: room.feed.idle || 0, pages: n });
+        this.statusChanged();
+        return true;
+    }
+
+    feedEnd(room, why) {
+        const feed = room.feed;
+        room.feed = null;
+        this.ctx.storage.delete("feed:" + room.id);
+        for (const [id, ws] of this.feedGames(room)) {
+            if (feed.tokens[id])
+                this.send(ws, "feed off");
+        }
+        this.feedCall(room, stub => stub.end(why));
+    }
+
+    // Calls a room's feed, after its calls before: true once it answered.
+    feedCall(room, fn) {
+        const stub = this.env.FEED.get(this.env.FEED.idFromName("room:" + room.id));
+        const next = (room.feedChain || Promise.resolve()).then(() => fn(stub)).then(() => true, e => {
+            console.log(`relay: room ${room.id}: its feed didn't answer: ${e && e.message || e}`);
+            return false;
+        });
+        room.feedChain = next;
+        return next;
     }
 
     // The netcode a room's games speak: its host's, also while the host's
@@ -1524,11 +1771,13 @@ export class Lobby extends DurableObject {
     // was held to the end was gone before this: its match was over when it
     // was last here.
     endRoom(room) {
+        if (room.feed)
+            this.feedEnd(room, "room ended");
         this.rooms.delete(room.id);
         this.pwTries.delete(room.id);
         const host = room.seats.get(1);
         this.ladder.roomEnded(room, host && host.until && host.lost ? host.lost : 0);
-        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id]);
+        this.ctx.storage.delete(["room:" + room.id, "seats:" + room.id, "pw:" + room.id, "spect:" + room.id, "feed:" + room.id]);
         for (const peer of room.peers.values()) {
             this.setConn(peer, 0, 0);
             this.send(peer, "host-left");
