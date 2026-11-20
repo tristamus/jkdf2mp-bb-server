@@ -35,7 +35,12 @@
 // A page watching here is a game watching the match from inside the game
 // (Watch in the game). The feed tells the Lobby how many there are
 // (feedPages, over RPC) a moment after one comes or goes, so the room's
-// watching counts them with the pages watching its scores.
+// watching counts them with the pages watching its scores. One that comes
+// with ?box=1 is the game in a viewing page's box (OpenJKDF2's index.html,
+// #watch-<room>-embed): that page is counted by the Lobby already (spectate
+// <room>, for as long as it shows the match), so the feed leaves it out, and
+// the count doesn't move when the box's game starts again (into the host's
+// mod) or comes on or off the feed.
 //
 // One that doesn't have the match's mod, nor finds it in the Mod Library,
 // says "mod <fp>" (the mod's fingerprint, its SHA-256 as packed): the feed
@@ -317,10 +322,12 @@ export class Feed extends DurableObject {
         return { armed: !!this.cfg, delay: this.cfg ? this.cfg.delay : 0, chunks: this.chunks.length, bytes: this.bytes, games, pages };
     }
 
-    pageCount() {
+    // Every page here (boxed = false: not those in a viewing page's box,
+    // which the Lobby counts as the page itself).
+    pageCount(boxed = true) {
         let pages = 0;
         for (const s of this.socks.values()) {
-            if ("next" in s) pages++;
+            if ("next" in s && (boxed || !s.box)) pages++;
         }
         return pages;
     }
@@ -339,7 +346,7 @@ export class Feed extends DurableObject {
     async pagesSay() {
         if (!this.cfg || !this.env || !this.env.LOBBY)
             return;
-        const room = this.cfg.room, n = this.pageCount();
+        const room = this.cfg.room, n = this.pageCount(false);
         if (n === this.pagesTold)
             return;
         this.pagesTold = n;
@@ -358,7 +365,7 @@ export class Feed extends DurableObject {
             return new Response("Expected a WebSocket upgrade", { status: 426 });
         if (!this.cfg)
             return new Response("No feed for this match", { status: 404 });
-        const up = new URL(request.url).searchParams.get("up");
+        const params = new URL(request.url).searchParams, up = params.get("up");
         let state;
         if (up !== null) {
             const seat = TOKEN_RE.test(up) ? this.cfg.tokens[up] : undefined;
@@ -373,7 +380,7 @@ export class Feed extends DurableObject {
         } else {
             if (this.pageCount() >= MAX_VIEWERS)
                 return new Response("Too many watching", { status: 503 });
-            state = { next: -1 };
+            state = params.get("box") === "1" ? { next: -1, box: 1 } : { next: -1 };
         }
         const pair = new WebSocketPair();
         const [client, server] = Object.values(pair);
@@ -387,7 +394,8 @@ export class Feed extends DurableObject {
                 this.sendTo(server, "feed waiting");
                 this.askKey();
             }
-            this.pagesChanged();
+            if (!state.box)
+                this.pagesChanged();
         }
         return new Response(null, { status: 101, webSocket: client });
     }
@@ -428,7 +436,7 @@ export class Feed extends DurableObject {
         this.socks.delete(ws);
         this.rate.delete(ws);
         try { ws.close(1000, "bye"); } catch (e) {}
-        if (s && "next" in s)
+        if (s && "next" in s && !s.box)
             this.pagesChanged();
         this.endIfDone();
     }
@@ -437,7 +445,7 @@ export class Feed extends DurableObject {
         const s = this.socks.get(ws);
         this.socks.delete(ws);
         this.rate.delete(ws);
-        if (s && "next" in s)
+        if (s && "next" in s && !s.box)
             this.pagesChanged();
         this.endIfDone();
     }

@@ -754,6 +754,9 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
 - About 2 s after a page connects or leaves, the feed tells the lobby how many watch (`feedPages`,
   over RPC). The lobby adds them to the room's `watching` in the status, keeps the number with the
   feed (`feed:<id>`), and with `FEED_ONLY_WATCHED` they keep the feed on like a page watching.
+  The game in a viewing page's box connects to `/feed/<room>?box=1` and isn't in that number: its
+  page says `spectate <room>` the whole time it shows the match, so it's counted once, and the
+  count doesn't move while the box's game starts again (into the host's mod).
 - A game watching from inside the game that doesn't have the match's mod (nor finds it in the Mod
   Library) says `mod <fp>` on its socket, and the feed asks the host's game (`mod <fp>`, at most
   every 20 s for each mod). The host's game puts the mod as it sends it to joiners, without the

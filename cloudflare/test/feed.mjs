@@ -383,6 +383,42 @@ await check("the feed tells the lobby how many pages watch, 2 s after one comes 
     assert.equal(alone.pagesTimer, null);
 });
 
+await check("the game in a viewing page's box (?box=1) gets the feed but isn't counted: the lobby counts its page", async () => {
+    const told = [];
+    const LOBBY = { idFromName: n => n, get: n => ({ feedPages: async (room, count) => { told.push(count); return true; } }) };
+    const feed = await newFeed({ LOBBY });
+    await feed.arm(7, 30, { [T1]: 1 });
+    ws101(await feed.fetch(req("/feed/7?box=1")));
+    const b = feed.ctx.sockets.at(-1);
+    assert.deepEqual(feed.socks.get(b), { next: -1, box: 1 });
+    assert.deepEqual(texts(b.sent).slice(0, 2), ["feed 30", "feed waiting"], "it watches like any page");
+    assert.equal(feed.pagesTimer, null, "nothing for the lobby to hear");
+    assert.equal(feed.pageCount(), 1, "still one of the most that may watch");
+    assert.equal(feed.pageCount(false), 0);
+    // An in-game page next to it is counted, the box's game still isn't.
+    const p = await page(feed);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told, [1]);
+    // The box's game leaving (its game starts again into the host's mod): nothing changes.
+    await feed.webSocketClose(b);
+    assert.equal(feed.pagesTimer, null);
+    // Kept as a box's game through an eviction.
+    ws101(await feed.fetch(req("/feed/7?box=1")));
+    const b2 = feed.ctx.sockets.at(-1);
+    const again = new Feed(new FakeCtx(feed.ctx.storage, feed.ctx.sockets), { LOBBY });
+    await again.ctx.ready;
+    assert.deepEqual(again.socks.get(b2), { next: -1, box: 1 });
+    assert.equal(again.pageCount(false), 1, "only the in-game page");
+    await feed.webSocketClose(p);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told, [1, 0]);
+    // Anything else after box= is a page like any other.
+    ws101(await feed.fetch(req("/feed/7?box=yes")));
+    assert.deepEqual(feed.socks.get(feed.ctx.sockets.at(-1)), { next: -1 });
+});
+
 // ---- The lobby's part.
 
 function entry({ name = "t_Room", episode = "JK1MP", map = "m2.jkl", password = "" } = {}) {
