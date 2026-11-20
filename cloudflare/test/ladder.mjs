@@ -2091,6 +2091,67 @@ await check("the page's status has a match's latest kills, for watching it", asy
                      "the latest five, the oldest first");
     assert.deepEqual(live.kills.at(-1), live.last, "the last of them is last");
     assert.ok(live.kills.every((k, i) => !i || k[3] >= live.kills[i - 1][3]), "in the order they happened");
+    // A page watching it asks for all of them, to look back through.
+    const page = await w.connect();
+    await w.say(page, "watch");
+    page.take();
+    const asked = async room => {
+        await w.say(page, `kills ${room}`);
+        const line = page.take().find(l => l.startsWith("kills "));
+        assert.ok(line, "an answer");
+        const [, id, data] = line.split(" ");
+        const got = JSON.parse(Buffer.from(data, "base64").toString());
+        assert.equal(got.n, got.kills.length, "all of them, with how many");
+        return [Number(id), got.kills];
+    };
+    assert.equal(live.nk, 7, "how many in all");
+    const [room, all] = await asked(H.room);
+    assert.equal(room, H.room);
+    assert.equal(all.length, 7, "all seven");
+    assert.deepEqual(all.slice(-5), live.kills, "the status's five are its latest");
+    assert.deepEqual(all.slice(0, 2).map(k => k.slice(0, 3)), [["Kyle_K", "Maw", 1], ["Kyle_K", "Maw", 1]]);
+    await w.say(page, `kills ${H.room}`);
+    assert.equal(page.take().filter(l => l.startsWith("kills ")).length, 0, "at most one a second");
+    skew += SEC;
+    await new Promise(r => setTimeout(r, 1010));
+    assert.deepEqual(await asked(999), [999, []], "none for a room that isn't there");
+    // Its level ends: all of them still, while the room shows how it stood.
+    await H.report({ end: "level" });
+    await K.report({ end: "level" });
+    skew += 16 * SEC;
+    await w.settle();
+    assert.ok((await w.status()).games[0].live.over, "over");
+    await new Promise(r => setTimeout(r, 1010));
+    assert.deepEqual((await asked(H.room))[1], all, "all of them as its level ends");
+    skew += 16 * SEC;
+    await w.alarm();
+    assert.equal(w.lobby.ladder.matches.get(H.room).done, true);
+    await new Promise(r => setTimeout(r, 1010));
+    assert.deepEqual((await asked(H.room))[1], all, "still all of them, kept, as the room shows its last scores");
+    const w2 = await new World(newEnv(), w.storage).start(w.ctx.sockets);
+    await w2.say(page, `kills ${H.room}`);
+    assert.deepEqual(JSON.parse(Buffer.from(page.take().find(l => l.startsWith("kills ")).split(" ")[2], "base64")),
+                     { n: 7, kills: all }, "and after a restart");
+    for (const g of [K, H])
+        await w2.say(g.ws, "leave");
+});
+
+await check("a page can't get the kills of a match with a password", async () => {
+    const w = await new World(newEnv()).start();
+    const H = await w.host("Maw", { map: "m10.jkl", password: "sith" });
+    const K = await w.join("Kyle_K", H, { password: "sith" });
+    H.since = K.since = Date.now();
+    await H.report({ rules: { mode: 0, sl: 0, tl: 0 }, gt: 0, sb: [[1, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0]] });
+    await w.settle();
+    skew += SEC;
+    await killAll([H, K], 1, 2, 1);
+    const page = await w.connect();
+    await w.say(page, "watch");
+    page.take();
+    await w.say(page, `kills ${H.room}`);
+    const line = page.take().find(l => l.startsWith("kills "));
+    assert.equal(line, `kills ${H.room} ${Buffer.from('{"n":0,"kills":[]}').toString("base64")}`);
+    assert.equal("nk" in (await w.status()).games[0].live, false, "nor how many in the status");
     for (const g of [K, H])
         await w.say(g.ws, "leave");
     await w.settle();

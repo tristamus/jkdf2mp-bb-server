@@ -104,6 +104,8 @@ const LAST_PEER_ID = 64;
 const HEX_RE = /^[0-9a-fA-F]+$/;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const ID_RE = /^[0-9]{1,9}$/;
+// The least time between a page's two asks for a match's kills (kills).
+const KILLS_MS = 1000;
 const KEY_RE = /^[0-9a-f]{32}$/;
 // The netcode number in a game's address. A game that doesn't say is 0, as
 // is every build until the first change older builds can't play with.
@@ -507,7 +509,8 @@ function turnOn(env) {
 // What the lobby can do beyond the basics, for the game to know on connect.
 function lobbyMessage(env) {
     // match: games in a room report their match (src/ladder.js). spect: a
-    // host's game may say whether its match can be watched (spectators).
+    // host's game may say whether its match can be watched (spectators), and
+    // a page may ask for the kills of the match it watches (kills).
     // feed: a watched match's games send it to its feed (src/feed.js).
     return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect" +
         (env.FEED ? " feed" : "");
@@ -560,6 +563,8 @@ export class Lobby extends DurableObject {
         // connected, the netcode it connected with, whether it sends
         // passwords with join, and its address (CF-Connecting-IP).
         this.conns = new Map();
+        // A page's socket -> when it last asked for a match's kills (kills).
+        this.killsAsked = new WeakMap();
         this.heard = new Map();   // ws -> when its last message came (not its pings)
         // ws -> Map(notice -> {first, last, told}): packets it sends that go
         // nowhere, by what it would be told about them (see NOTICE_MS).
@@ -1014,6 +1019,8 @@ export class Lobby extends DurableObject {
             this.watch(ws);
         } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
             this.spectate(ws, c, Number(args[0]));
+        } else if (op === "kills" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
+            this.kills(ws, Number(args[0]));
         } else if (op === "spectators" && (args.length === 1 || args.length === 2) && (args[0] === "on" || args[0] === "off") &&
                    (args.length === 1 || SECS_RE.test(args[1]))) {
             this.spectators(ws, c, args[0] === "on", args.length === 2 ? Number(args[1]) : 0);
@@ -1483,6 +1490,23 @@ export class Lobby extends DurableObject {
             return;
         this.saveConn(ws, { ...c, spect: id });
         this.statusChanged();
+    }
+
+    // kills <room>: the kills that count of the room's match (src/ladder.js,
+    // liveKills), for a page watching it to look back through: "kills <room>
+    // <base64 JSON>", {n, kills}, how many in all and the latest 500 of them,
+    // the oldest first; none for no match or a password. The status has the
+    // latest few as they come (live's kills, and nk). At most one a second
+    // for each page (KILLS_MS).
+    kills(ws, roomId) {
+        const now = Date.now();
+        if (now - (this.killsAsked.get(ws) || 0) < KILLS_MS)
+            return;
+        this.killsAsked.set(ws, now);
+        const room = this.rooms.get(roomId);
+        const info = room && readEntry(room.entry);
+        const kills = info && this.ladder.on() ? this.ladder.liveKills(room.id, info.map, info.locked || !!room.pw, now) : null;
+        this.send(ws, `kills ${roomId} ${base64Utf8(JSON.stringify(kills || { n: 0, kills: [] }))}`);
     }
 
     // spectators on|off [<delay s>], from a room's host's game: whether its

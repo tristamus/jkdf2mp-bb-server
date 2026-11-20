@@ -168,6 +168,9 @@ const LIVE_STREAK = 3;
 // How many of its latest kills the room windows' live view of a match has
 // (kills), for watching it.
 const LIVE_KILLS = 5;
+// How many of its latest kills a page watching a match gets on asking
+// (Ladder.liveKills): the whole match, nearly always.
+const LIVE_ALL_KILLS = 500;
 const MIN_SECS = 60;
 const COUNT_SECS = 120;
 export const COUNT_AGREE = 0.9;
@@ -562,6 +565,8 @@ function mapFile(map) {
 //     kills: [[killer, victim, kind, at], ...],
 //                            its latest LIVE_KILLS kills that count, the
 //                            oldest first (the last of them is last)
+//     nk: n,                 how many kills count in all (a page watching
+//                            it asks for the rest: liveKills)
 //     streak: [name, n] }    the longest run of kills going, from
 //                            LIVE_STREAK on, of a player on the scoreboard
 //
@@ -589,14 +594,13 @@ export function liveView(m, over = 0) {
                 .sort((a, b) => b[1] - a[1] || b[2] - a[2] || a[3] - b[3]);
     if ((r.mode & MODE_TEAMS) && m.teams)
         out.teams = m.teams.slice();
-    // The kills that count (buildRecord), in the order they happened.
-    const kills = m.kills.filter(c => c.own || c.by.length >= 2 || !m.players[c.v].reports)
-                         .sort((a, b) => a.ts - b.ts);
-    const line = c => [c.k < 0 || c.k === c.v ? "" : name(c.k), name(c.v), c.kind, Math.round(c.ts)];
+    const kills = countedKills(m);
+    const line = c => killLine(m, c);
     const last = kills.at(-1);
     if (last) {
         out.last = line(last);
         out.kills = kills.slice(-LIVE_KILLS).map(line);
+        out.nk = kills.length;
     }
     const run = new Map();
     for (const c of kills) {
@@ -613,6 +617,23 @@ export function liveView(m, over = 0) {
     if (best)
         out.streak = best;
     return out;
+}
+
+// The kills that count (buildRecord), in the order they happened.
+function countedKills(m) {
+    return m.kills.filter(c => c.own || c.by.length >= 2 || !m.players[c.v].reports).sort((a, b) => a.ts - b.ts);
+}
+
+// A kill as the live view has it: [killer, victim, kind, at].
+function killLine(m, c) {
+    const name = i => (m.players[i] && m.players[i].name) || "";
+    return [c.k < 0 || c.k === c.v ? "" : name(c.k), name(c.v), c.kind, Math.round(c.ts)];
+}
+
+// A match's latest LIVE_ALL_KILLS kills that count, as liveView has its
+// latest, the oldest first.
+function allKills(m) {
+    return countedKills(m).slice(-LIVE_ALL_KILLS).map(c => killLine(m, c));
 }
 
 function newPlayer(seat, key, now) {
@@ -1200,11 +1221,25 @@ export class Ladder {
             v = liveView(m, m.ended ? m.overAt || now : 0);
         }
         if (locked || v.nocount === "password") {
-            for (const k of ["sb", "teams", "last", "kills", "streak", "count"])
+            for (const k of ["sb", "teams", "last", "kills", "nk", "streak", "count"])
                 delete v[k];
             v.nocount = "password";
         }
         return v;
+    }
+
+    // A room's match's kills that count while live has its match, for a
+    // page watching it to look back through (Lobby "kills"): {n, kills},
+    // how many in all (live's nk) and at most LIVE_ALL_KILLS of them, the
+    // latest, the oldest first. null otherwise, and with a password.
+    liveKills(roomId, map, locked, now = Date.now()) {
+        const v = this.live(roomId, map, locked, now);
+        if (!v || v.nocount === "password")
+            return null;
+        const m = this.matches.get(roomId);
+        if (m.done)
+            return { n: v.nk || 0, kills: m.kills || v.kills || [] };
+        return { n: countedKills(m).length, kills: allKills(m) };
     }
 
     later(fn) {
@@ -1573,7 +1608,7 @@ export class Ladder {
             // And how it stood as it ended, for the room windows between
             // levels (live).
             const done = { done: true, room: m.room, hostLv: m.hostLv, map: m.map, title: m.title || "",
-                           last: m.rules ? liveView(m, m.overAt || now) : null, doneAt: now };
+                           last: m.rules ? liveView(m, m.overAt || now) : null, kills: m.rules ? allKills(m) : [], doneAt: now };
             this.matches.set(m.room, done);
             storage.put("match:" + m.room, done);
         }
