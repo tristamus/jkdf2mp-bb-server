@@ -764,6 +764,44 @@ await check("a game watching asks for the host's mod: the host's game is asked, 
     assert.deepEqual(q.closed, [1008, "too many"]);
 });
 
+await check("a spectator's message goes to the host's game as the chat shows it, one every 3 s from each", async () => {
+    clock = 3_500_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const p = await page(feed), box = (ws101(await feed.fetch(req("/feed/7?box=1"))), feed.ctx.sockets.at(-1));
+    await feed.webSocketMessage(p, "say Rogue\thello there");
+    const host = await game(feed, T1), other = await game(feed, T2);
+    host.take();
+    await feed.webSocketMessage(p, "say Rogue\thello there");
+    assert.deepEqual(host.take(), ["say Rogue (watching): hello there"]);
+    assert.deepEqual(other.take(), [], "only the host's game");
+    clock += 2999;
+    await feed.webSocketMessage(p, "say Rogue\tagain");
+    assert.deepEqual(host.take(), [], "not within 3 s");
+    await feed.webSocketMessage(box, "say  Kyle   Katarn \t  gg   wp\u00e9\u0007 ");
+    assert.deepEqual(host.take(), ["say Kyle Katarn (watching): gg wp??"], "another socket is its own; cleaned");
+    clock += 1;
+    await feed.webSocketMessage(p, "say Rogue\tagain");
+    assert.deepEqual(host.take(), ["say Rogue (watching): again"]);
+    clock += 3000;
+    await feed.webSocketMessage(p, "say " + "N".repeat(40) + "\t" + "x".repeat(200));
+    assert.deepEqual(host.take(), ["say " + "N".repeat(16) + " (watching): " + "x".repeat(96)], "no longer than the chat");
+    assert.ok(("N".repeat(16) + " (watching): " + "x".repeat(96)).length < 127);
+    clock += 3000;
+    await feed.webSocketMessage(p, "say \thi");
+    assert.deepEqual(host.take(), ["say Someone (watching): hi"]);
+    // Nothing: no text, no tab, a game's text, or once the feed is ending.
+    clock += 3000;
+    await feed.webSocketMessage(p, "say Rogue\t   ");
+    await feed.webSocketMessage(p, "say Rogue hi");
+    await feed.webSocketMessage(other, "say Rogue\thi");
+    assert.deepEqual(host.take(), []);
+    await feed.end("room ended");
+    clock += 3000;
+    await feed.webSocketMessage(p, "say Rogue\thi");
+    assert.deepEqual(host.take().filter(m => typeof m === "string" && m.startsWith("say")), []);
+});
+
 await check("the host's game puts its mod: only the host's, only one asked for, so much and so often", async () => {
     clock = 4_000_000;
     const shots = new FakeBucket();

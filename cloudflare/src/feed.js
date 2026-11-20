@@ -56,6 +56,10 @@
 // feed-mods/<room>/<fp>/ while the feed is on, and deleted when it ends:
 // only a mod a game watching asked for, at most MAX_FEED_MODS of them and
 // MOD_MAX_BYTES in all, and nothing for longer than the feed is on.
+//
+// A spectator can talk to the match's players: its game says "say
+// <name>\t<text>", and the feed sends the host's game "say <name>
+// (watching): <text>", which it puts in the match's chat (spectatorSays).
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -101,10 +105,28 @@ const MOD_PART_MAX = 1024 * 1024 + 64;
 const MOD_MAX_PARTS = 1100;
 const MOD_MAX_BYTES = 1280 * 1024 * 1024;
 const MOD_PUTS_PER_S = 10;
-// A page says little (mod <fp> now and then): more than this in
-// RATE_WINDOW_MS and its socket is closed.
+// A page says little (mod <fp> now and then, a spectator's message): more
+// than this in RATE_WINDOW_MS and its socket is closed.
 const PAGE_SAYS = 10;
+// A spectator's message for the match's players, from a game watching ("say
+// <name>\t<text>"): the host's game is sent "say <name> (watching): <text>"
+// to put in the match's chat (and so on the feed, for everyone watching), at
+// most one every SAY_MS from each socket; more are dropped. Printable ASCII
+// only (the game's chat), runs of spaces as one, at most SAY_NAME_MAX and
+// SAY_TEXT_MAX characters: the line fits the game's 127.
+const SAY_MS = 3000;
+const SAY_NAME_MAX = 16;
+const SAY_TEXT_MAX = 96;
 export const MOD_PREFIX = "feed-mods/";
+
+// As the game watching cleans what it sends (stdComm_WSRelay.c's
+// wsrelay_SayClean), so it knows its own message coming back: printable
+// ASCII ("?" for the rest), runs of spaces as one, no space at either end,
+// at most max characters.
+export function sayClean(text, max) {
+    return String(text).replace(/[^\x20-\x7e\t\n\r\f\v]/g, "?").replace(/[ \t\n\r\f\v]+/g, " ").trim()
+        .substring(0, max).trim();
+}
 
 export class Feed extends DurableObject {
     constructor(ctx, env) {
@@ -462,6 +484,10 @@ export class Feed extends DurableObject {
             this.pagesChanged();
             return;
         }
+        if (text.startsWith("say ")) {
+            this.spectatorSays(ws, text.substring(4), now);
+            return;
+        }
         const m = /^mod ([0-9a-f]{64})$/.exec(text);
         if (!m || !this.cfg || this.ending || now - (this.modAsked.get(m[1]) || 0) < MOD_ASK_MS)
             return;
@@ -471,6 +497,28 @@ export class Feed extends DurableObject {
                     this.modAsked.clear();
                 this.modAsked.set(m[1], now);
                 this.sendTo(host, "mod " + m[1]);
+                return;
+            }
+        }
+    }
+
+    // A spectator's message (SAY_MS above): to the host's game, as the line
+    // the match's chat shows.
+    spectatorSays(ws, said, now) {
+        const s = this.socks.get(ws);
+        if (!s || !this.cfg || this.ending || now - (s.saidAt || 0) < SAY_MS)
+            return;
+        const tab = said.indexOf("\t");
+        if (tab < 0)
+            return;
+        const name = sayClean(said.substring(0, tab), SAY_NAME_MAX) || "Someone";
+        const words = sayClean(said.substring(tab + 1), SAY_TEXT_MAX);
+        if (!words)
+            return;
+        for (const [host, h] of this.socks) {
+            if (h.seat === SEAT_HOST) {
+                s.saidAt = now;
+                this.sendTo(host, "say " + name + " (watching): " + words);
                 return;
             }
         }

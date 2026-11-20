@@ -766,6 +766,11 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
   mod a game asked for (at most 2, and 1.25 GiB in all), and keeps it in the `SHOTS` bucket under
   `feed-mods/<room>/<fp>/`. Anyone gets them with `GET` from the bucket. They're deleted when the
   feed ends.
+- A spectator talks to the match's players: its game says `say <name>\t<text>` on its socket, and
+  the feed sends the host's game `say <name> (watching): <text>`, which puts it in the match's chat
+  (everyone in the match sees it, and those watching get it with the feed's delay). At most one
+  every 3 s from a socket (more are dropped), printable ASCII, a name of at most 16 characters and a
+  message of at most 96.
 - A feed holds at most 32 MB and keeps nothing in storage but who may send (and how much of a mod
   its host put); one nothing is sent to for 10 minutes ends itself.
 
