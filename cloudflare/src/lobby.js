@@ -63,7 +63,8 @@
 // lobby says feed on connect, a game in a room that takes part says feed, and
 // while its match can be watched it's told where to send (feed <room>
 // <token>), or feed off when that stops, so a page that comes to watch has
-// the game at once (Antonio's choice, 2026-11-19). With the FEED_ONLY_WATCHED
+// the game at once (Antonio's choice, 2026-11-19). A game that says feed
+// again has lost its feed, and is told its token again. With the FEED_ONLY_WATCHED
 // var "1", only while a page watches the match, and for FEED_LINGER_MS after
 // the last one stops. The status says feed: 1 for a match whose feed is on.
 //
@@ -195,6 +196,9 @@ const SECS_RE = /^[0-9]{1,4}$/;
 // stops watching it, so a page coming back (or the next one) doesn't wait out
 // the delay again.
 const FEED_LINGER_MS = 2 * 60 * 1000;
+// A game asking for its feed again (feed) has lost it: the room's feed is armed
+// again, in case it ended itself, at most once every FEED_REARM_MS.
+const FEED_REARM_MS = 5000;
 // The most games a feed may say watch from inside the game (src/feed.js
 // takes 200).
 const MAX_FEED_PAGES = 1000;
@@ -618,7 +622,7 @@ export class Lobby extends DurableObject {
             const room = this.newRoom(id, entry, seats.get("seats:" + id), pw);
             room.spect = spects.get("spect:" + id) || null;
             const feed = feeds.get("feed:" + id);
-            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0 } : null;
+            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0, told: {}, ok: "" } : null;
             this.rooms.set(id, room);
         }
         this.stripPasswords();
@@ -1027,7 +1031,19 @@ export class Lobby extends DurableObject {
         } else if (op === "feed" && args.length === 0 && this.env.FEED && c.room && this.rooms.has(c.room)) {
             if (!c.feed)
                 this.saveConn(ws, { ...c, feed: true });
-            this.feedCheck(this.rooms.get(c.room));
+            // A game asking again lost its feed (its socket to it gave up)
+            // or never heard of it (the feed didn't answer): it's told its
+            // token again once the feed has it, armed again in case it ended
+            // itself.
+            const room = this.rooms.get(c.room), now = Date.now();
+            if (room.feed) {
+                delete room.feed.told[c.id];
+                if (now - (room.feed.rearmAt || 0) >= FEED_REARM_MS) {
+                    room.feed.rearmAt = now;
+                    room.feed.armed = "";
+                }
+            }
+            this.feedCheck(room, now);
         } else if (op === "match" && args.length === 1) {
             // Never answered, right or wrong (src/ladder.js).
             return this.ladder.report(ws, c, args[0]);
@@ -1560,7 +1576,7 @@ export class Lobby extends DurableObject {
 
     // Starts, changes or ends a room's feed, as its watchable state, its
     // pages and its games now are: a token for each game taking part, told
-    // to it once the feed has it.
+    // to it once the feed has it (feedTell).
     feedCheck(room, now = Date.now()) {
         if (!this.env.FEED || !room)
             return;
@@ -1581,40 +1597,54 @@ export class Lobby extends DurableObject {
             return;
         }
         if (!room.feed)
-            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0 };
+            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0, told: {}, ok: "" };
         const idle = always || watched ? 0 : room.feed.idle || now;
-        const tokens = {}, fresh = [];
-        for (const [id, ws] of this.feedGames(room)) {
-            const t = room.feed.tokens[id] || newKey();
-            if (!room.feed.tokens[id])
-                fresh.push([id, ws, t]);
-            tokens[id] = t;
-        }
+        const tokens = {};
+        for (const [id] of this.feedGames(room))
+            tokens[id] = room.feed.tokens[id] || newKey();
         const delay = room.spect ? room.spect.delay : SPECT_DELAY_S;
         const armed = JSON.stringify([delay, tokens]);
         if (idle !== room.feed.idle) {
             room.feed.idle = idle;
             this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0 });
         }
-        if (armed === room.feed.armed)
+        if (armed === room.feed.armed) {
+            if (room.feed.ok === armed)
+                this.feedTell(room);
             return;
+        }
         room.feed.tokens = tokens;
         room.feed.armed = armed;
         this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0 });
         const byToken = Object.fromEntries(Object.entries(tokens).map(([id, t]) => [t, Number(id)]));
         const feed = room.feed;
         this.feedCall(room, stub => stub.arm(room.id, delay, byToken)).then(ok => {
+            if (room.feed !== feed || feed.armed !== armed)
+                return;
             if (!ok) {
-                // Asked again the next time anything changes.
-                if (room.feed === feed && feed.armed === armed)
-                    feed.armed = "";
+                // Asked again the next time anything changes, and its new
+                // games are told then.
+                feed.armed = "";
                 return;
             }
-            for (const [id, ws, t] of fresh) {
-                if (room.feed === feed && feed.tokens[id] === t)
-                    this.send(ws, `feed ${room.id} ${t}`);
-            }
+            feed.ok = armed;
+            this.feedTell(room);
         });
+    }
+
+    // Tells each game taking part in a room's feed its token, once the feed
+    // has it: a game not told it yet (new, or the feed didn't answer then),
+    // or one that asked again (it lost its feed). Telling a game the token it
+    // sends with changes nothing for it.
+    feedTell(room) {
+        const feed = room.feed;
+        for (const [id, ws] of this.feedGames(room)) {
+            const t = feed.tokens[id];
+            if (t && feed.told[id] !== t) {
+                feed.told[id] = t;
+                this.send(ws, `feed ${room.id} ${t}`);
+            }
+        }
     }
 
     // From a room's feed (src/feed.js), over RPC: how many games watch its
