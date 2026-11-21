@@ -667,7 +667,7 @@ export async function matchPage(db, id, viewerHash, opts = {}) {
         <p class="foot">${how}</p>
       </div>
       ${side}${shots.length ? SHOT_VIEW : ""}`;
-    return page(200, `${title} - jkdf2mp match ${id}`, `${GAMES_LONG[m.game] || GAMES_LONG.jk1} - Match ${id}`, body, {
+    return page(200, `${title} - jediknight.zone match ${id}`, `${GAMES_LONG[m.game] || GAMES_LONG.jk1} - Match ${id}`, body, {
         description: `${gameName}${m.mod ? " with " + m.mod : ""}, ${count(m.players, "player")}, ${length(m.secs)}. ${top}`,
         ogTitle: title, path: `/match/${id}`, images: !!opts.shots,
         // What a link to the match shows where it's pasted: its final
@@ -722,10 +722,10 @@ export async function matchesPage(db, url) {
         <p class="foot">Each player's game reports the kills it sees, and the lobby puts the reports together.
           Games with a password aren't listed here.</p>
       </div>`;
-    return page(200, `${game ? GAMES[game] + " matches" : "Latest matches"} - jkdf2mp`,
+    return page(200, `${game ? GAMES[game] + " matches" : "Latest matches"} - jediknight.zone`,
                 `${game ? GAMES_LONG[game] : "Jedi Knight"} - Latest Matches`, body, {
-        description: "The latest multiplayer matches played in the jkdf2mp game rooms.",
-        ogTitle: `${game ? GAMES[game] + " matches" : "Latest matches"} - jkdf2mp Game Rooms`,
+        description: "The latest multiplayer matches played in the jediknight.zone game rooms.",
+        ogTitle: `${game ? GAMES[game] + " matches" : "Latest matches"} - jediknight.zone Game Rooms`,
         path: link(game, 0).replace(/&amp;/g, "&"),
     });
 }
@@ -989,9 +989,9 @@ export async function playersPage(db, url, viewerHash, now) {
           ${unranked ? `&dagger; Fewer than ${KD_MIN} kills and deaths ${PERIODS_LC[period]}: K/D is shown but takes no place. ` : ""}Pick a column to sort by it.
           ${HOW_COUNTED}</p>
       </div>`;
-    return page(200, `${GAMES[game]} standings, ${PERIODS_LC[period]} - jkdf2mp`, `${GAMES_LONG[game]} - Standings`, main, {
+    return page(200, `${GAMES[game]} standings, ${PERIODS_LC[period]} - jediknight.zone`, `${GAMES_LONG[game]} - Standings`, main, {
         description: `Who leads the ${GAMES[game]} game rooms ${PERIODS_LC[period]}: kills, deaths, wins and time played.`,
-        ogTitle: `${GAMES[game]} standings - jkdf2mp Game Rooms`,
+        ogTitle: `${GAMES[game]} standings - jediknight.zone Game Rooms`,
         path: playersLink(game, asked, "score", false).replace(/&amp;/g, "&"),
     });
 }
@@ -1212,9 +1212,9 @@ export async function playerPage(db, id, url, viewerHash, now) {
           Where a player's game didn't say which browser it was, the match counts by their name alone${who.keyless ? ` (${count(who.keyless, "match", "matches")} of this record)` : ""}.</p>
       </div>`;
     const line = me ? `${num(me.kills)} kills, ${num(me.deaths)} deaths, ${count(me.matches, "match", "matches")}, ${span(me.secs)} played ${PERIODS_LC[period]}.` : "";
-    return page(200, `${who.name} - ${GAMES[game]} - jkdf2mp`, `${GAMES_LONG[game]} - ${who.name}`, main, {
+    return page(200, `${who.name} - ${GAMES[game]} - jediknight.zone`, `${GAMES_LONG[game]} - ${who.name}`, main, {
         description: `${who.name} in the ${GAMES[game]} game rooms. ${line}`.trim(),
-        ogTitle: `${who.name} - jkdf2mp Game Rooms`, path: `/player/${id}`,
+        ogTitle: `${who.name} - jediknight.zone Game Rooms`, path: `/player/${id}`,
     });
 }
 
@@ -1251,7 +1251,8 @@ a:hover { color: var(--gold); }
   background: linear-gradient(100deg, var(--teal-dark) 0 62%, var(--teal) 62%); }
 .brand { padding: 10px 14px 8px; min-width: 190px; }
 .brand a { text-decoration: none; }
-.brand-mark { font: italic bold 40px/1 Verdana, Geneva, sans-serif; letter-spacing: -2px; color: #fff; }
+/* The site's name is its address, as on the landing page (36px, 32px on phones). */
+.brand-mark { font: italic bold 36px/1 Verdana, Geneva, sans-serif; letter-spacing: -2px; white-space: nowrap; color: #fff; }
 .brand-mark span { color: var(--gold); }
 .brand-sub { margin-top: 4px; font: bold 17px Verdana, Geneva, sans-serif; letter-spacing: 3px; text-transform: uppercase;
   color: var(--muted); }
@@ -1449,6 +1450,7 @@ h3.part { margin: 18px 0 6px; color: var(--gold); font: bold 14px Verdana, Genev
   .tabs { margin-left: 0; }
   .cards.three, .cards.two { grid-template-columns: 1fr; }
   .banner a.play { padding: 6px 14px; font-size: 16px; }
+  .brand-mark { font-size: 32px; }
   .shot-view .step { width: 26px; }
 }
 /* A phone: two pictures side by side, the final scoreboard across both. */
@@ -1585,7 +1587,7 @@ function page(status, title, windowTitle, body, opts = {}) {
     const og = opts.ogTitle ? `
 <meta name="description" content="${esc(opts.description || "")}">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="jkdf2mp Game Rooms">
+<meta property="og:site_name" content="jediknight.zone Game Rooms">
 <meta property="og:title" content="${esc(opts.ogTitle)}">
 <meta property="og:description" content="${esc(opts.description || "")}">
 <meta name="theme-color" content="#ffcc66">${opts.image ? `
@@ -1617,7 +1619,7 @@ function page(status, title, windowTitle, body, opts = {}) {
   </nav>
   <header class="masthead">
     <div class="brand">
-      <a href="/"><div class="brand-mark">jkdf2<span>mp</span></div></a>
+      <a href="/"><div class="brand-mark">jediknight<span>.zone</span></div></a>
       <div class="brand-sub">Match Record</div>
     </div>
     <div class="banner">
