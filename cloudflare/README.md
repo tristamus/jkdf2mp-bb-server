@@ -771,13 +771,16 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
   count doesn't move while the box's game starts again (into the host's mod).
 - A game watching from inside the game that doesn't have the match's mod (nor finds it in the Mod
   Library) says `mod <fp>` on its socket, and the feed asks the host's game (`mod <fp>`, at most
-  every 20 s for each mod). The host's game puts the mod as it sends it to joiners, without the
-  original game files in it: `PUT /feed/<room>/mod/<fp>/info?up=<token>` (JSON, at most 64 KiB),
-  then each 1 MiB block as `/feed/<room>/mod/<fp>/<n>` (at most 1 MiB + 64 bytes, 10 a second).
-  The Worker hands each to the feed (`modPut`, over RPC), which checks it's the host's game and a
-  mod a game asked for (at most 2, and 1.25 GiB in all), and keeps it in the `SHOTS` bucket under
-  `feed-mods/<room>/<fp>/`. Anyone gets them with `GET` from the bucket. They're deleted when the
-  feed ends.
+  every 20 s for each mod). The same goes for the match's level when the Level Library doesn't
+  have the host's version of it: `<fp>` is then the GOB's SHA-256, and the host's game tells the two
+  apart. The host's game puts the mod or level as it sends it to joiners, without the original game
+  files in it: `PUT /feed/<room>/mod/<fp>/info?up=<token>` (JSON, at most 64 KiB), then each 1 MiB
+  block as `/feed/<room>/mod/<fp>/<n>` (at most 1 MiB + 64 bytes, 10 a second). The Worker hands
+  each to the feed (`modPut`, over RPC), which checks it's the host's game and one a game asked for
+  (at most 8, for a mod and a playlist's levels, and 1.25 GiB in all), and keeps it in the `SHOTS`
+  bucket under `feed-mods/<room>/<fp>/`. Past that, the one put longest ago is deleted to make room,
+  once nothing of it has been put for 2 minutes. Anyone gets them with `GET` from the bucket.
+  They're deleted when the feed ends.
 - A spectator talks to the match's players: its game says `say <name>\t<text>` on its socket, and
   the feed sends the host's game `say <name> (watching): <text>`, which puts it in the match's chat
   (everyone in the match sees it, and those watching get it with the feed's delay). At most one

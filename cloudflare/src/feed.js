@@ -46,7 +46,10 @@
 // says "mod <fp>" (the mod's fingerprint, its SHA-256 as packed): the feed
 // asks the host's game for it ("mod <fp>", at most once every MOD_ASK_MS for
 // each mod), and the host's game puts it here as it sends it to joiners,
-// without the original game files in it (OpenJKDF2's maps.js feedUp):
+// without the original game files in it (OpenJKDF2's maps.js feedUp). The
+// same for the match's level, when the Level Library doesn't have the
+// host's version of it: <fp> is then its GOB's SHA-256, and the host's game
+// tells them apart.
 //
 //   PUT /feed/<room>/mod/<fp>/<part>?up=<token>   the host's game (modPut)
 //   GET /feed/<room>/mod/<fp>/<part>              a game watching
@@ -54,8 +57,11 @@
 // <part> is info (JSON, at most MOD_INFO_MAX) or a block's number (at most
 // MOD_PART_MAX). They're kept in the SHOTS bucket under
 // feed-mods/<room>/<fp>/ while the feed is on, and deleted when it ends:
-// only a mod a game watching asked for, at most MAX_FEED_MODS of them and
-// MOD_MAX_BYTES in all, and nothing for longer than the feed is on.
+// only a mod or level a game watching asked for, at most MAX_FEED_MODS of
+// them and MOD_MAX_BYTES in all, and nothing for longer than the feed is on.
+// Past that, the one put longest ago goes to make room, once nothing of it
+// has been put for MOD_IDLE_MS (the games watching have it by then; one that
+// comes later asks for it again).
 //
 // A spectator can talk to the match's players: its game says "say
 // <name>\t<text>", and the feed sends the host's game "say <name>
@@ -99,7 +105,9 @@ const PAGES_SAY_MS = 2000;
 const FP_RE = /^[0-9a-f]{64}$/;
 const PART_RE = /^(info|[0-9]{1,4})$/;
 const MOD_ASK_MS = 20 * 1000;
-const MAX_FEED_MODS = 2;
+// The mod and the levels of a playlist (6 at most), and some.
+const MAX_FEED_MODS = 8;
+const MOD_IDLE_MS = 2 * 60 * 1000;
 const MOD_INFO_MAX = 64 * 1024;
 const MOD_PART_MAX = 1024 * 1024 + 64;
 const MOD_MAX_PARTS = 1100;
@@ -153,13 +161,16 @@ export class Feed extends DurableObject {
         this.ending = null;       // why, while pages get the match's last seconds (end)
         this.pagesTold = -1;      // how many pages the Lobby was last told watch, -1 for not yet
         this.pagesTimer = null;   // the wait before it's told again
-        this.mods = {};           // fp -> bytes put of the host's mod (modPut), kept in storage
+        this.mods = {};           // fp -> bytes put of the host's mod or level (modPut), kept in storage
+        this.modAt = {};          // fp -> when a part of it was last put, kept in storage
+        this.modGone = new Set(); // fps on their way out of the bucket (modRoom)
         this.modAsked = new Map(); // fp -> when the host's game was last asked for it
         this.modPuts = [];        // when the latest parts were put
         this.modWrites = new Set(); // parts on their way to the bucket
         ctx.blockConcurrencyWhile(async () => {
             this.cfg = (await ctx.storage.get("cfg")) || null;
             this.mods = (await ctx.storage.get("mods")) || {};
+            this.modAt = (await ctx.storage.get("modAt")) || {};
             for (const ws of ctx.getWebSockets())
                 this.socks.set(ws, ws.deserializeAttachment() || { next: -1 });
             for (const s of this.socks.values()) {
@@ -208,6 +219,7 @@ export class Feed extends DurableObject {
         const room = this.cfg ? this.cfg.room : null;
         const mods = Object.keys(this.mods).length > 0;
         this.mods = {};
+        this.modAt = {};
         this.modAsked.clear();
         await this.ctx.storage.deleteAll();
         if (this.cfg && why === "room ended" && this.unsent()) {
@@ -222,27 +234,48 @@ export class Feed extends DurableObject {
         return true;
     }
 
-    // Deletes what the host's game put of its mod, once what's on its way
-    // is in.
-    async modsDelete(room) {
+    // Deletes what the host's game put of its mod and level (of those fps
+    // only, when given), once what's on its way is in.
+    async modsDelete(room, fps) {
         if (!this.env || !this.env.SHOTS)
             return;
         await Promise.allSettled([...this.modWrites]);
-        const prefix = MOD_PREFIX + room + "/";
+        const prefixes = fps ? fps.map(fp => MOD_PREFIX + room + "/" + fp + "/") : [MOD_PREFIX + room + "/"];
         try {
             const keys = [];
-            let cursor;
-            do {
-                const list = await this.env.SHOTS.list({ prefix, cursor });
-                for (const o of list.objects)
-                    keys.push(o.key);
-                cursor = list.truncated ? list.cursor : undefined;
-            } while (cursor);
+            for (const prefix of prefixes) {
+                let cursor;
+                do {
+                    const list = await this.env.SHOTS.list({ prefix, cursor });
+                    for (const o of list.objects)
+                        keys.push(o.key);
+                    cursor = list.truncated ? list.cursor : undefined;
+                } while (cursor);
+            }
             for (let i = 0; i < keys.length; i += 1000)
                 await this.env.SHOTS.delete(keys.slice(i, i + 1000));
         } catch (e) {
             console.log(`feed: room ${room}: the host's mod wasn't all deleted: ${e && e.message || e}`);
         }
+    }
+
+    // The ones to delete to make room for bytes more of fp (new: not kept
+    // yet), the one put longest ago first, of those nothing has been put of
+    // for MOD_IDLE_MS; null when there isn't room even so.
+    modRoom(fp, isNew, bytes, now) {
+        const out = [];
+        let count = Object.keys(this.mods).length, total = Object.values(this.mods).reduce((a, b) => a + b, 0);
+        const idle = Object.keys(this.mods).filter(k => k !== fp && now - (this.modAt[k] || 0) >= MOD_IDLE_MS)
+                                           .sort((a, b) => (this.modAt[a] || 0) - (this.modAt[b] || 0));
+        while ((isNew && count >= MAX_FEED_MODS) || total + bytes > MOD_MAX_BYTES) {
+            const k = idle.shift();
+            if (k === undefined)
+                return null;
+            out.push(k);
+            count--;
+            total -= this.mods[k];
+        }
+        return out;
     }
 
     // From the Worker (feedRoute): a part of the host's mod, put by the game
@@ -263,15 +296,35 @@ export class Feed extends DurableObject {
         this.modPuts = this.modPuts.filter(t => now - t < RATE_WINDOW_MS);
         if (this.modPuts.length >= MOD_PUTS_PER_S * RATE_WINDOW_MS / 1000)
             return { status: 429 };
-        // Only a mod a game watching asked for, and so much in all.
-        if (!(fp in this.mods) && (!this.modAsked.has(fp) || Object.keys(this.mods).length >= MAX_FEED_MODS))
+        // Only a mod or level a game watching asked for, and so much in all:
+        // what was put longest ago goes, if it can (modRoom). One still
+        // going is tried again (the host's game does, maps.js runFeedUp).
+        if (this.modGone.has(fp))
+            return { status: 503 };
+        const isNew = !(fp in this.mods);
+        if (isNew && !this.modAsked.has(fp))
             return { status: 403 };
-        if (Object.values(this.mods).reduce((a, b) => a + b, 0) + bytes > MOD_MAX_BYTES)
-            return { status: 413 };
+        const gone = this.modRoom(fp, isNew, bytes, now);
+        if (!gone)
+            return { status: isNew && Object.keys(this.mods).length >= MAX_FEED_MODS ? 403 : 413 };
+        for (const k of gone) {
+            delete this.mods[k];
+            delete this.modAt[k];
+            this.modGone.add(k);
+        }
         this.modPuts.push(now);
         this.mods[fp] = (this.mods[fp] || 0) + bytes;
+        this.modAt[fp] = now;
         this.lastUp = now;
-        await this.ctx.storage.put("mods", this.mods);
+        await this.ctx.storage.put({ mods: this.mods, modAt: this.modAt });
+        if (gone.length) {
+            console.log(`feed: room ${this.cfg.room}: deleting ${gone.length} of what the host's game put earlier, to make room`);
+            await this.modsDelete(this.cfg.room, gone);
+            for (const k of gone)
+                this.modGone.delete(k);
+            if (!this.cfg)
+                return { status: 404 };
+        }
         const write = this.env.SHOTS.put(MOD_PREFIX + this.cfg.room + "/" + fp + "/" + part, body, {
             httpMetadata: { contentType: part === "info" ? "application/json" : "application/octet-stream" }
         });
