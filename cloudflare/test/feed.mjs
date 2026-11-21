@@ -908,14 +908,91 @@ await check("the host's game puts its mod: only the host's, only one asked for, 
     assert.equal((await feed.modPut(T1, FP, "49", bytes(100))).status, 429);
     clock += 5001;
     assert.equal((await feed.modPut(T1, FP, "49", bytes(100))).status, 200);
-    // Two mods at most, and 1.25 GiB in all.
-    await feed.webSocketMessage(p, "mod " + FP2);
-    await feed.webSocketMessage(p, "mod " + FP3);
-    assert.equal((await feed.modPut(T1, FP2, "info", bytes(10))).status, 200);
-    assert.equal((await feed.modPut(T1, FP3, "info", bytes(10))).status, 403, "a third mod");
-    feed.mods[FP2] = 1280 * 1024 * 1024 - feed.mods[FP] - 10;
-    assert.equal((await feed.modPut(T1, FP2, "1", bytes(11))).status, 413);
-    assert.equal((await feed.modPut(T1, FP2, "1", bytes(10))).status, 200);
+    // Eight at most (a mod, and the levels of a playlist), and 1.25 GiB in
+    // all, while each has had something put lately.
+    const more = Array.from({ length: 8 }, (_, i) => (0x10 + i).toString(16).repeat(32));
+    for (const fp of more) {
+        clock += 1000;
+        await feed.webSocketMessage(p, "mod " + fp);
+    }
+    for (const fp of more.slice(0, 7))
+        assert.equal((await feed.modPut(T1, fp, "info", bytes(10))).status, 200);
+    assert.equal(Object.keys(feed.mods).length, 8);
+    assert.equal((await feed.modPut(T1, more[7], "info", bytes(10))).status, 403, "a ninth, with none idle");
+    feed.mods[more[6]] = 1280 * 1024 * 1024 - Object.values(feed.mods).reduce((a, b) => a + b, 0) + feed.mods[more[6]] - 10;
+    assert.equal((await feed.modPut(T1, more[6], "1", bytes(11))).status, 413);
+    assert.equal((await feed.modPut(T1, more[6], "1", bytes(10))).status, 200);
+    assert.equal(shots.m.size, 1 + 1 + 49 + 7 + 1);
+});
+
+await check("a mod or level the host's game put longest ago, idle 2 minutes, goes to make room for another", async () => {
+    clock = 4_500_000;
+    const shots = new FakeBucket();
+    const feed = await newFeed({ SHOTS: shots });
+    await feed.arm(7, 30, { [T1]: 1 });
+    await game(feed, T1);
+    const p = await page(feed);
+    const fps = Array.from({ length: 10 }, (_, i) => (0x20 + i).toString(16).repeat(32));
+    for (const fp of fps.slice(0, 8)) {
+        clock += 1000;
+        await feed.webSocketMessage(p, "mod " + fp);
+        assert.equal((await feed.modPut(T1, fp, "info", bytes(10))).status, 200);
+        assert.equal((await feed.modPut(T1, fp, "0", bytes(20))).status, 200);
+    }
+    clock += 5000;
+    await feed.webSocketMessage(p, "mod " + fps[8]);
+    assert.equal((await feed.modPut(T1, fps[8], "info", bytes(10))).status, 403, "none idle yet");
+    // The first two go idle; the second is put again, so the first goes.
+    clock += 2 * 60 * 1000 - 9000 + 2000;
+    assert.equal((await feed.modPut(T1, fps[1], "1", bytes(5))).status, 200);
+    assert.equal((await feed.modPut(T1, fps[8], "info", bytes(10))).status, 200);
+    assert.ok(!(fps[0] in feed.mods) && fps[8] in feed.mods && fps[1] in feed.mods);
+    assert.equal(Object.keys(feed.mods).length, 8);
+    assert.deepEqual([...shots.m.keys()].filter(k => k.includes(fps[0])), [], "its parts deleted");
+    assert.equal([...shots.m.keys()].filter(k => k.includes(fps[2])).length, 2, "the others' kept");
+    assert.deepEqual(Object.keys(feed.ctx.storage.m.get("modAt")).sort(), Object.keys(feed.mods).sort());
+    // Asked for again, it comes back in place of the next one put longest ago.
+    clock += 20000;
+    await feed.webSocketMessage(p, "mod " + fps[0]);
+    assert.equal((await feed.modPut(T1, fps[0], "info", bytes(10))).status, 200);
+    assert.ok(!(fps[2] in feed.mods));
+    assert.equal(shots.m.get("feed-mods/7/" + fps[0] + "/info").bytes.length, 10);
+    // Too many bytes in all: as many go as it takes, the oldest first.
+    clock += 2 * 60 * 1000;
+    feed.mods[fps[3]] = 600 * 1024 * 1024;
+    feed.mods[fps[4]] = 600 * 1024 * 1024;
+    await feed.webSocketMessage(p, "mod " + fps[9]);
+    feed.modAt[fps[1]] = clock;
+    feed.mods[fps[1]] = 100 * 1024 * 1024;
+    assert.equal((await feed.modPut(T1, fps[9], "info", bytes(10))).status, 200);
+    assert.ok(!(fps[3] in feed.mods) && fps[4] in feed.mods && fps[1] in feed.mods, "the oldest only, as that's room enough");
+    // One on its way out is put again only after it's gone.
+    feed.modGone.add(fps[5]);
+    assert.equal((await feed.modPut(T1, fps[5], "1", bytes(10))).status, 503);
+    feed.modGone.delete(fps[5]);
+    await feed.end("room ended");
+    assert.deepEqual([...shots.m.keys()], []);
+});
+
+await check("a feed kept from before modAt was (kit 176) takes its mods as put long ago", async () => {
+    clock = 4_800_000;
+    const shots = new FakeBucket();
+    const storage = new FakeStorage();
+    const ctx = new FakeCtx(storage);
+    let feed = new Feed(ctx, { SHOTS: shots });
+    await ctx.ready;
+    await feed.arm(7, 30, { [T1]: 1 });
+    ws101(await feed.fetch(req("/feed/7?up=" + T1)));
+    ws101(await feed.fetch(req("/feed/7")));
+    storage.m.set("mods", { [FP]: 10, [FP2]: 10 });
+    storage.m.delete("modAt");
+    feed = new Feed(new FakeCtx(storage, ctx.sockets), { SHOTS: shots });
+    await feed.ctx.ready;
+    assert.deepEqual(feed.modAt, {});
+    assert.deepEqual(feed.modRoom(FP3, true, 10, clock), []);
+    for (let i = 0; i < 6; i++)
+        feed.mods[(0x30 + i).toString(16).repeat(32)] = 1;
+    assert.equal(feed.modRoom(FP3, true, 10, clock).length, 1);
 });
 
 await check("a mod the host's game was putting goes on after the feed is evicted, and goes when it ends", async () => {
