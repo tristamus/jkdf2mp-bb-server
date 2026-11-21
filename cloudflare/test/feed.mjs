@@ -558,9 +558,10 @@ await check("with FEED_ONLY_WATCHED, a game in a room asks to take part; the fee
     const r = await feedRoute(new Request(`https://lobby.test/feed/${H.room}?up=${token}`, { headers: { Upgrade: "websocket" } }), env,
                               new URL(`https://lobby.test/feed/${H.room}?up=${token}`));
     assert.equal(r.status, 101);
-    // Saying it again changes nothing.
+    // A game asking again lost its feed: it's told the same token again.
     await w.say(H, "feed");
-    assert.deepEqual(feedLines(H), []);
+    assert.deepEqual(feedLines(H), [`feed ${H.room} ${token}`]);
+    assert.deepEqual(feed.cfg.tokens, { [token]: 1 });
 });
 
 await check("each game taking part has its own token; the host's delay goes to the feed", async () => {
@@ -583,6 +584,80 @@ await check("each game taking part has its own token; the host's delay goes to t
     // A player who leaves loses theirs.
     await w.say(J, "leave");
     assert.deepEqual(feed.cfg.tokens, { [th]: 1 });
+});
+
+await check("a game that takes its seat back before its old socket is seen to go is told a token for its seat", async () => {
+    const w = await new World().start();
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    assert.equal(feedLines(H).length, 1);
+    const ws1 = await w.connect();
+    await w.say(ws1, `hello jk1 ${b64("Kyle_K")}`);
+    await w.say(ws1, `join ${H.room}`);
+    const [, , id, key] = ws1.take().find(l => l.startsWith("seat ")).split(" ");
+    await w.say(ws1, "feed");
+    const token = feedLines(ws1)[0].split(" ")[2];
+    const feed = w.feeds.of(H.room);
+    assert.equal(feed.cfg.tokens[token], Number(id));
+    // Its game crashed and came back: a new socket, while the old one is
+    // still open.
+    const ws2 = await w.connect();
+    await w.say(ws2, `hello jk1 ${b64("Kyle_K")}`);
+    await w.say(ws2, `rejoin ${H.room} ${id} ${key}`);
+    assert.ok(ws2.take().includes(`rejoined ${H.room} ${id}`));
+    await w.say(ws2, "feed");
+    const lines = feedLines(ws2);
+    assert.equal(lines.length, 1, "told a token for its seat");
+    const t2 = lines[0].split(" ")[2];
+    assert.equal(feed.cfg.tokens[t2], Number(id), "which the feed takes");
+    assert.deepEqual(feedLines(H), [], "the host isn't told again");
+});
+
+await check("a game the feed didn't answer for is told its token once it does", async () => {
+    const w = await new World().start();
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    const th = feedLines(H)[0].split(" ")[2];
+    const feed = w.feeds.of(H.room), arm = feed.arm.bind(feed);
+    let fails = 1;
+    feed.arm = async (...a) => {
+        if (fails-- > 0)
+            throw new Error("not now");
+        return arm(...a);
+    };
+    const J = await w.joiner("Kyle_K", H.room);
+    await w.say(J, "feed");
+    assert.deepEqual(feedLines(J), [], "not yet: the feed doesn't have it");
+    assert.deepEqual(Object.values(feed.cfg.tokens), [1]);
+    // Anything that changes the status arms it again.
+    await w.say(await w.connect(), `hello jk1 ${b64("Jerec")}`);
+    const lines = feedLines(J);
+    assert.equal(lines.length, 1);
+    const tj = lines[0].split(" ")[2];
+    assert.deepEqual(feed.cfg.tokens, { [th]: 1, [tj]: 2 });
+    assert.deepEqual(feedLines(H), []);
+});
+
+await check("a feed that ended itself is armed again when a game asks again, at most every 5 s", async () => {
+    clock = 1_000_000;
+    const w = await new World().start();
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    const token = feedLines(H)[0].split(" ")[2];
+    const feed = w.feeds.of(H.room);
+    clock += 5000;
+    let arms = 0;
+    const arm = feed.arm.bind(feed);
+    feed.arm = async (...a) => { arms++; return arm(...a); };
+    await feed.end("idle");
+    assert.equal(feed.cfg, null);
+    await w.say(H, "feed");
+    assert.deepEqual(feedLines(H), [`feed ${H.room} ${token}`]);
+    assert.deepEqual(feed.cfg.tokens, { [token]: 1 }, "armed again, with the same token");
+    assert.equal(arms, 1);
+    await w.say(H, "feed");
+    assert.deepEqual(feedLines(H), [`feed ${H.room} ${token}`], "told again");
+    assert.equal(arms, 1, "not armed again so soon");
 });
 
 await check("with FEED_ONLY_WATCHED, a feed nobody watches goes on for 2 minutes, then ends", async () => {
@@ -664,7 +739,7 @@ await check("a room that ends ends its feed; a lobby restart keeps the tokens", 
     const w2 = await new World({ FEED: w.feeds }, w.storage).start(w.ctx.sockets);
     w2.lobby.statusChanged();
     await w2.settle();
-    assert.deepEqual(feedLines(H), [], "no new token after a restart");
+    assert.deepEqual(feedLines(H), [`feed ${H.room} ${token}`], "the same token after a restart");
     assert.deepEqual(w.feeds.of(H.room).cfg.tokens, { [token]: 1 });
     await w2.say(H, "leave");
     assert.equal(w.feeds.of(H.room).cfg, null);

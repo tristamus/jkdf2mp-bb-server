@@ -750,7 +750,9 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
 - The lobby says `feed` on its `lobby` line. A game in a room that takes part says `feed`. While
   the match can be watched, the lobby arms the room's feed with its delay and a token for each such
   game, then tells each game `feed <room> <token>`; it says `feed off` when that stops. So a page
-  that comes to watch has the game at once. With the `FEED_ONLY_WATCHED` var `"1"`, a feed runs
+  that comes to watch has the game at once. A game that says `feed` again has lost its feed: it's
+  told its token again, and the feed is armed again first (at most every 5 s for a room), in case
+  it ended itself. A game the feed didn't answer for is told once it does. With the `FEED_ONLY_WATCHED` var `"1"`, a feed runs
   only while a page watches the match, and for 2 minutes after the last one stops (cheaper, but a
   new viewer waits out the delay). The status has `"feed": 1` for a match whose feed is on.
 - A game connects to `/feed/<room>?up=<token>` and sends binary chunks: a kind byte (0 packets sent
