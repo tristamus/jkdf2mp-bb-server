@@ -21,6 +21,13 @@ export async function resolve(specifier, context, next) {
         return { url: ${JSON.stringify(stubUrl)}, shortCircuit: true };
     const r = await next(specifier, context);
     return r.url.endsWith(".js") ? { ...r, format: "module" } : r;
+}
+// A .wasm import is the compiled module, as wrangler bundles it (CompiledWasm).
+export async function load(url, context, next) {
+    if (url.endsWith(".wasm"))
+        return { format: "module", shortCircuit: true, source: "import { readFileSync } from 'node:fs';" +
+                 "export default new WebAssembly.Module(readFileSync(new URL(" + JSON.stringify(url) + ")));" };
+    return next(url, context);
 }`));
 const realResponse = globalThis.Response;
 const { FakeStorage } = await import("./cfstub.mjs");
@@ -30,6 +37,7 @@ const read = await import("../src/levels-read.js");
 const parts = await import("../src/levels-parts.js");
 const { LevelJob, levelsRoute, gobTable, gobRange } = await import("../src/levels.js");
 const { JkUnzip } = await import("../src/vendor/jkunzip.js");
+const unpacker = await import("../src/levels-unpack.js");
 
 let failed = 0;
 async function check(name, fn) {
@@ -340,6 +348,25 @@ class FakeR2 {
     }
     async delete(key) {
         this.m.delete(key);
+    }
+    // R2's multipart upload: every part but the last the same size.
+    async createMultipartUpload(key, opts) {
+        const parts = new Map();
+        this.uploads = (this.uploads || 0) + 1;
+        return {
+            uploadPart: async (n, data) => {
+                parts.set(n, new Uint8Array(data).slice());
+                return { partNumber: n, etag: `e${n}` };
+            },
+            complete: async list => {
+                const sizes = list.map(p => parts.get(p.partNumber).length);
+                assert.ok(sizes.slice(0, -1).every(n => n === sizes[0]), "unequal parts");
+                await this.put(key, new Blob(list.map(p => parts.get(p.partNumber))), opts);
+            },
+            abort: async () => {
+                this.aborted = (this.aborted || 0) + 1;
+            },
+        };
     }
 }
 
@@ -1592,6 +1619,223 @@ await check("caps lifted: no 32 MB cap on jkdf2.net nor 6 GB on the bucket; what
     assert.equal(again.kv("caps_lifted"), "1");
 });
 
+// ---- jkdf2.net's .7z, .rar and loose GOBs, made into zips
+
+// A RAR 4 archive with its files stored: [{ name, data }] (RAR's technote).
+function makeRar(files) {
+    const head = (type, flags, rest) => {
+        const b = new Uint8Array(7 + rest.length);
+        const v = new DataView(b.buffer);
+        v.setUint8(2, type);
+        v.setUint16(3, flags, true);
+        v.setUint16(5, b.length, true);
+        b.set(rest, 7);
+        v.setUint16(0, crc32(b.subarray(2)) & 0xffff, true);
+        return b;
+    };
+    const parts = [new Uint8Array([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]), head(0x73, 0, new Uint8Array(6))];
+    for (const f of files) {
+        const data = typeof f.data === "string" ? enc(f.data) : f.data;
+        const name = enc(f.name);
+        const rest = new Uint8Array(25 + name.length);
+        const v = new DataView(rest.buffer);
+        v.setUint32(0, data.length, true);
+        v.setUint32(4, data.length, true);
+        v.setUint8(8, 2);
+        v.setUint32(9, crc32(data), true);
+        v.setUint32(13, (dosDate("2004-04-04") << 16) >>> 0, true);
+        v.setUint8(17, 20);
+        v.setUint8(18, 0x30);
+        v.setUint16(19, name.length, true);
+        v.setUint32(21, 0x20, true);
+        rest.set(name, 25);
+        parts.push(head(0x74, 0x8000, rest), data);
+    }
+    parts.push(head(0x7b, 0x4000, new Uint8Array(0)));
+    return new Uint8Array(Buffer.concat(parts));
+}
+
+// Made with 7-Zip (-t7z -mx9, LZMA2) from PACKED_GOB and PACKED_README in a
+// folder "Packed Arena"; LOCKED_7Z the same with a password (-pjk -mhe=off).
+const PACKED_GOB = makeGob([{ name: "episode.jk", data: `"Packed Arena"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL packed.jkl 0 0 -1 -1\n` },
+                            { name: "jkl\\packed.jkl", data: "SECTION: JK\n".repeat(20) }]);
+const PACKED_README = "Packed Arena\r\nAuthor: Some One\r\nDate of Release : May 5, 2005\r\n";
+const PACKED_7Z = new Uint8Array(Buffer.from("N3q8ryccAAQBUE+dNgEAAAAAAAAjAAAAAAAAADJsmNXgAo0Ap10AI5PERk2AF8wbinpuovIKfmQ9KHyNiPsYVkeUXzf0fIR6cEoXvSbBK6KyEtMCr8PjVaXCeS+fcQjNWWEF2tnvOGiW0rb8RWGO4fYdXEgdy/U+Ij7pKQVsZLFZe74si7fX6ywcY6mxjTwiMdUl620ak3ttVg0j0GB95JvBb3n5vNWEg4pl2BsT8nVVDm8T8iykzhJHxbna3JHnuDS3IkvDFtn/OlhKsgAAAACBMweuD9UwshDXJNP+s3AYgUAeToFDk75QbRSF7RzcM0RJNqDCEtGMBkNPXZI9Y1ZvqpaICpFG3h2+paRMwQjMvJS+G+DcRu023Im8g94ov/lfKMbCYSTUBK0ZoR2xVqsKFqldF0AzGc6k27R0S8kDigiOHhMeWgey5hdxAPHwPiHiV2AAFwaArwEJgIcABwsBAAEjAwEBBV0AEAAADIDaCgEXN8gVAAA=", "base64"));
+const LOCKED_7Z = new Uint8Array(Buffer.from("N3q8ryccAAQSmZlaUQEAAAAAAAAjAAAAAAAAAIXy0eznaLHnxnhZk3t0Dg+PNNjnWHu+DW6XfDtnOXSX+nY38j8KgQLSjR/D0iidyNJZSTYsOOdlwJ4sQgrWHhW4m4VzmcvSiejmjmeS+L/pFK0gO2KOJ3q8fPFzOBbLd1HV4ovzL3ppA8PLt1MTshfpektSLDM3lbQJhdavMnescy2YI9d5SezsWd/txfekeoyVBumTPW1HgXNdr05KpXYbp1CDQO8ezBE/n+JJ80PvNuFniAAAgTMHrg/VMLe9FyTRz+QEKAUvF4OTaOba4PgTOr/nJD9cy0BiGsIcCohSdv2WJ3T8CpBTAhEik2CeeV2wzXxGdIjtZ4lWfcgY72XXrC5Pg6H4eTYASGFjSDNoKVFCu1gfQQ1LztuLhF+tb/TREZtQyscBga+G+m9XJoDHz/t2zyT/mr1Rodlbm8Q8m2qfN5KpUvnHm7wg/7Kc5OuoDmAAFwaAsAEJgKEABwsBAAEjAwEBBV0AEAAADID6CgEJAsjcAAA=", "base64"));
+const RAR_GOB = makeGob([{ name: "episode.jk", data: `"Rar Rally"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL rally.jkl 0 0 -1 -1\n` },
+                         { name: "jkl\\rally.jkl", data: "SECTION: JK\n" }]);
+const RALLY_RAR = makeRar([{ name: "Rally\\rally.gob", data: RAR_GOB }, { name: "Rally\\rally.txt", data: "Rar Rally\r\nAuthor: Rar Person\r\n" }]);
+const LOOSE_GOB = makeGob([{ name: "episode.jk", data: `"Loose Port"\nTYPE 2\nSEQ 1\n10: 0 0 LEVEL port.jkl 0 0 -1 -1\n` },
+                           { name: "jkl\\port.jkl", data: "SECTION: JK\n" }]);
+const entriesOf = async bytes => (await read.openZip(read.memReader(bytes))).entries.filter(e => !e.dir);
+const res = (b, len) => new Response(new Blob([b]).stream(), { headers: len === false ? {} : { "Content-Length": String(b.length) } });
+
+await check("unpacking: a .7z and a .rar into a zip the job and the page open, a GOB of its own too", async () => {
+    for (const [name, file, want] of [["packed.7z", PACKED_7Z, [["Packed Arena/packed.gob", PACKED_GOB], ["Packed Arena/readme.txt", enc(PACKED_README)]]],
+                                      ["Rally.rar", RALLY_RAR, [["Rally/rally.gob", RAR_GOB], ["Rally/rally.txt", enc("Rar Rally\r\nAuthor: Rar Person\r\n")]]],
+                                      ["port.gob", LOOSE_GOB, [["port.gob", LOOSE_GOB]]]]) {
+        for (const len of [true, false]) {
+            const bucket = new FakeR2();
+            const out = await unpacker.unpack(res(file, len), { name, bucket, key: "zip/1.zip" });
+            // Small: given back whole, not in the bucket yet.
+            assert.ok(out.bytes && !bucket.m.size, name);
+            assert.deepEqual([out.size, out.sha, out.files, out.archive.size, out.archive.sha256],
+                             [out.bytes.length, sha(out.bytes), want.length, file.length, sha(file)], name);
+            assert.equal(out.unpacked, want.reduce((n, w) => n + w[1].length, 0));
+            const es = await entriesOf(out.bytes);
+            assert.deepEqual(es.map(e => e.name), want.map(w => w[0]), name);
+            for (const [i, e] of es.entries()) {
+                assert.equal(e.method, 8);
+                assert.equal(sha(await read.readEntry({ reader: read.memReader(out.bytes), entries: es }, e)), sha(want[i][1]), e.name);
+            }
+            // As the game's page reads a zip: the central directory, then each entry's data after its local header.
+            const v = new DataView(out.bytes.buffer, out.bytes.byteOffset);
+            assert.equal(v.getUint32(out.bytes.length - 22, true), 0x06054b50);
+            assert.equal(v.getUint16(out.bytes.length - 12, true), want.length);
+        }
+    }
+    // The same file makes the same zip.
+    const a = await unpacker.unpack(res(PACKED_7Z), { name: "a.7z", bucket: new FakeR2(), key: "k" });
+    const b = await unpacker.unpack(res(PACKED_7Z), { name: "b.7z", bucket: new FakeR2(), key: "k" });
+    assert.equal(a.sha, b.sha);
+    assert.equal(unpacker.entryName("..\\a\\.\\b//c.gob"), "a/b/c.gob");
+});
+
+await check("unpacking: a big zip goes into the bucket in equal parts; locked, damaged and too big ones say so", async () => {
+    // Bytes that don't deflate (xorshift).
+    const big = new Uint8Array(300 * 1024);
+    for (let i = 0, x = 12345; i < big.length; i++) {
+        x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+        big[i] = x & 255;
+    }
+    const rar = makeRar([{ name: "noise.gob", data: big }, { name: "two.gob", data: big.subarray(1000) }]);
+    const bucket = new FakeR2();
+    const out = await unpacker.unpack(res(rar), { name: "noise.rar", bucket, key: "zip/9.zip", meta: { name: "noise.rar" }, part: 64 * 1024 });
+    assert.equal(out.bytes, undefined);
+    assert.equal(bucket.uploads, 1);
+    const o = bucket.m.get("zip/9.zip");
+    assert.deepEqual([o.bytes.length, sha(o.bytes), o.httpMetadata.contentType, o.customMetadata.name], [out.size, out.sha, "application/zip", "noise.rar"]);
+    assert.deepEqual((await entriesOf(o.bytes)).map(e => [e.name, e.size]), [["noise.gob", big.length], ["two.gob", big.length - 1000]]);
+    // A password, a bad CRC, not an archive at all, cut short.
+    // Its first file's header (libarchive doesn't check a stored file's CRC-32 in a RAR).
+    const damaged = rar.slice();
+    damaged[30] ^= 1;
+    for (const [name, file, why] of [["locked.7z", LOCKED_7Z, /password/], ["damaged.rar", damaged, /./], ["page.rar", enc("<html>Not here</html>"), /isn't an archive/],
+                                     ["short.7z", PACKED_7Z.subarray(0, 200), /./]]) {
+        const bk = new FakeR2();
+        await assert.rejects(unpacker.unpack(res(file), { name, bucket: bk, key: "k", part: 64 * 1024 }), e => e.bad && why.test(e.message) && !e.tooBig, name);
+        assert.equal(bk.m.size, 0);
+    }
+    // A part already in the bucket when it fails: the upload is dropped.
+    const bk = new FakeR2();
+    const cut = makeRar([{ name: "noise.gob", data: big }, { name: "two.gob", data: big }]);
+    // The second file's header, after the first part went.
+    cut[7 + 13 + 32 + 9 + big.length + 5] ^= 1;
+    await assert.rejects(unpacker.unpack(res(cut), { name: "cut.rar", bucket: bk, key: "k", part: 64 * 1024 }), e => e.bad);
+    assert.deepEqual([bk.uploads, bk.aborted, bk.m.size], [1, 1, 0]);
+    // More than it says it has, or more than maxHeap, or unpacking to more than maxOut: too big.
+    await assert.rejects(unpacker.unpack(res(rar), { name: "x.rar", bucket: new FakeR2(), key: "k", maxHeap: 1000 }), e => e.tooBig);
+    await assert.rejects(unpacker.unpack(res(rar, false), { name: "x.rar", bucket: new FakeR2(), key: "k", maxHeap: 1000 }), e => e.tooBig);
+    await assert.rejects(unpacker.unpack(res(rar), { name: "x.rar", bucket: new FakeR2(), key: "k", maxOut: 400 * 1024 }), e => e.tooBig && /unpacks to more/.test(e.message));
+});
+
+await check("jkdf2.net: its .7z, .rar and loose GOBs, made into zips; too big, locked and damaged ones left out", async () => {
+    const damaged = RALLY_RAR.slice();
+    damaged[30] ^= 1;
+    const files = {
+        "packed.7z": PACKED_7Z, "Rally.rar": RALLY_RAR, "port.gob": LOOSE_GOB, "locked.7z": LOCKED_7Z, "broken.rar": damaged,
+    };
+    const seen = fakeDf2({
+        [DF2_DIR("jkmp")]: () => new Response(df2Folder("jkmp", [
+            ...Object.entries(files).map(([name, b]) => ({ name, size: kb(b) })),
+            { name: "huge.7z", size: "90.00MB" }, { name: "readme.txt", size: "1.00KB" },
+        ])),
+        ...Object.fromEntries(Object.entries(files).map(([name, b]) => [DF2_FILE("jkmp", name), () => res(b)])),
+    });
+    const { job, env } = newJob({ LEVELS_DF2: "1" });
+    await runUntilIdle(job, 120);
+    const asked = seen.filter(p => p.startsWith("df2:") && p.includes("/jkmp/"));
+    // Each but the one too big to unpack, once.
+    assert.deepEqual(asked.sort(), Object.keys(files).map(n => DF2_FILE("jkmp", n)).sort());
+    const rows = job.sql.exec("SELECT id, name, zip_st, zip_sha, zip_size, err FROM lv WHERE id > 1000000 AND cat = 'df2jkmp' ORDER BY name").toArray();
+    const st = Object.fromEntries(rows.map(r => [r.name, r.zip_st]));
+    assert.deepEqual(st, { "Rally.rar": "ok", "broken.rar": "bad", "huge.7z": "big", "locked.7z": "bad", "packed.7z": "ok", "port.gob": "ok" });
+    const by = Object.fromEntries(rows.map(r => [r.name, r]));
+    assert.equal(by["huge.7z"].err, "too big to unpack here (80 MB)");
+    assert.match(by["locked.7z"].err, /password/);
+    // In the index under their own names, with the zip's hash and size.
+    const all = idxOf(env, "index/jk1-all.json");
+    const l = Object.fromEntries(all.levels.map(x => [x.z, x]));
+    for (const [z, gob, t] of [["packed.7z", PACKED_GOB, "Packed Arena"], ["Rally.rar", RAR_GOB, "Rar Rally"], ["port.gob", LOOSE_GOB, "Loose Port"]]) {
+        const e = l[z];
+        assert.ok(e, z);
+        assert.equal(e.t, t);
+        assert.deepEqual(e.g.map(g => [g.h, g.ep]), [[sha(gob), t]]);
+        const kept = env.LEVELS.m.get(`zip/${e.id}.zip`);
+        assert.deepEqual([e.h, e.sz], [sha(kept.bytes), kept.bytes.length]);
+        assert.equal(kept.customMetadata.sha256, e.h);
+        const det = idxOf(env, `detail/${e.id}.json`);
+        assert.deepEqual([det.zip, det.packed.size, det.packed.sha256], [z, files[z].length, sha(files[z])]);
+    }
+    assert.equal(l["packed.7z"].a, "Some One");
+    // No 3D data: Massassi's preview isn't asked about them.
+    assert.ok(!seen.some(p => p.startsWith("pv:") && /packed|Rally|port/.test(p)));
+    assert.deepEqual([l["packed.7z"].pv, l["port.gob"].pv], [undefined, undefined]);
+    assert.equal(l["Rally.rar"].a, "Rar Person");
+    assert.ok(!env.LEVELS.m.has(`zip/${by["locked.7z"].id}.zip`));
+    const s = await job.status();
+    assert.deepEqual(s.jkdf2.packed, [{ st: "bad", n: 2 }, { st: "big", n: 1 }, { st: "ok", n: 3 }]);
+    assert.deepEqual([s.jkdf2.unpack_mb, s.jkdf2.unpacking], [80, []]);
+    // The next look at the folder: none asked for again, the too big one
+    // only once LEVELS_UNPACK_MB is raised past what it had.
+    job.kv("list_at:df2jkmp", 0);
+    seen.length = 0;
+    await runUntilIdle(job, 20);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp")]);
+    env.LEVELS_UNPACK_MB = "100";
+    job.kv("list_at:df2jkmp", 0);
+    seen.length = 0;
+    await runUntilIdle(job, 20);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), [DF2_DIR("jkmp"), DF2_FILE("jkmp", "huge.7z")]);
+    // (Not there, in this check.)
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE name = 'huge.7z'").toArray()[0].zip_st, "gone");
+});
+
+await check("jkdf2.net: an archive that stopped the job twice as it unpacked is too big, and its folders are read again once", async () => {
+    const seen = fakeDf2({
+        [DF2_DIR("jkmp")]: () => new Response(df2Folder("jkmp", [{ name: "crash.7z", size: kb(RALLY_RAR) }])),
+        [DF2_DIR("motsmp")]: () => new Response(df2Folder("motsmp", [{ name: "again.7z", size: kb(PACKED_7Z) }])),
+        // A .rar named .7z: libarchive goes by what's inside.
+        [DF2_FILE("jkmp", "crash.7z")]: () => res(RALLY_RAR),
+        [DF2_FILE("motsmp", "again.7z")]: () => res(PACKED_7Z),
+    });
+    const { job } = newJob({ LEVELS_DF2: "1" });
+    // Folders are read in order, jkmp's first: its file is the first row.
+    job.kv("unpacking:1000001", 2);
+    await runUntilIdle(job, 120);
+    const rows = job.sql.exec("SELECT id, name, zip_st, err FROM lv WHERE id > 1000000 ORDER BY id").toArray();
+    assert.deepEqual(rows.map(r => [r.id, r.name, r.zip_st]), [[1000001, "crash.7z", "big"], [1000002, "again.7z", "ok"]]);
+    assert.equal(rows[0].err, "too big to unpack here (80 MB): the job stopped 2 times as it unpacked it");
+    assert.ok(!seen.includes(DF2_FILE("jkmp", "crash.7z")));
+    assert.deepEqual((await job.status()).jkdf2.unpacking, []);
+    // Stopped once: tried again.
+    job.sql.exec("UPDATE lv SET zip_st = NULL, err = NULL WHERE id = 1000001");
+    job.kv("unpacking:1000001", 1);
+    assert.deepEqual((await job.status()).jkdf2.unpacking, [[1000001, 1]]);
+    await runUntilIdle(job, 20);
+    assert.equal(job.sql.exec("SELECT zip_st FROM lv WHERE id = 1000001").toArray()[0].zip_st, "ok");
+    assert.deepEqual((await job.status()).jkdf2.unpacking, []);
+    // A job from before: each of jkdf2.net's folders read again, once.
+    job.kv("df2_packed", 0);
+    seen.length = 0;
+    const again = new LevelJob(job.ctx, job.env);
+    await runUntilIdle(again, 40);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")).sort(), ["jkmp", "jkctf", "motsmp", "motskfy", "jkmod", "motsmod"].map(DF2_DIR).sort());
+    seen.length = 0;
+    await runUntilIdle(new LevelJob(job.ctx, job.env), 20);
+    assert.deepEqual(seen.filter(p => p.startsWith("df2:")), []);
+});
+
 await check("levels: a GOB too big to unpack has its episode.jk read as it streams, before or after the table", async () => {
     const EP = `"Huge One"\nTYPE 2\n10: 0 0 LEVEL huge.jkl 0 0 -1 -1\n`;
     const filler = new Uint8Array(41 * 1024 * 1024).fill(120);
@@ -1706,7 +1950,7 @@ function fakeDf2Mods(extra) {
         [DF2_DIR("jkmod")]: () => new Response(df2ModFolder("jkmod", [
             // Massassi's by name; Massassi's under another name; a new one; one it can't open.
             { name: "blackyellow.zip", size: kb(MOD_ZIP) }, { name: "renamed.zip", size: kb(MOD_ZIP) },
-            { name: "SABERS.ZIP", size: kb(SABERS_ZIP) }, { name: "pack.rar", size: "1.00KB" },
+            { name: "SABERS.ZIP", size: kb(SABERS_ZIP) }, { name: "setup.exe", size: "1.00KB" },
         ], ["skins", "Old Mod (prior versions)"])),
         [DF2_DIR("jkmod/skins")]: () => new Response(df2Folder("jkmod/skins", [{ name: "ninja.zip", size: kb(NINJA_ZIP) }])),
         [DF2_DIR("motsmod")]: () => new Response(df2Folder("motsmod", [{ name: "Fhealmots.zip", size: kb(HEAL_ZIP) }])),
@@ -1798,7 +2042,7 @@ await check("jkdf2.net mods: the ones Massassi doesn't have, in the levels' queu
     assert.ok(!df2.some(p => /info|prior/.test(p)), df2.join(" "));
     // Never Massassi's by name, nor one it can't open.
     assert.ok(!df2.includes(DF2_FILE("jkmod", "blackyellow.zip")));
-    assert.ok(!df2.some(p => p.endsWith(".rar")));
+    assert.ok(!df2.some(p => p.endsWith(".exe")));
     // Jedi Knight's only once Massassi's mods have had their download page read.
     const dl = seen.indexOf("/levels/download/634/");
     assert.ok(dl > 0);

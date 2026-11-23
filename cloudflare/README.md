@@ -859,6 +859,16 @@ bound for now (`LEVELJOB` and `LEVELS` under `[env.beta]` in `wrangler.toml`, an
   it stops copying, under the 10 GB a month R2 stores without charge, which the screenshots share.
 - The zips are read with the page's own unzipper for the old zip methods (`src/vendor/jkunzip.js`, made by
   `tools/vendor-unzip.sh` from OpenJKDF2's `packaging/wasm/unzip.js`).
+- **.7z, .rar and loose GOBs** (jkdf2.net's, since kit 184): each is made into a zip as it's downloaded
+  (`src/levels-unpack.js`), deflated, and that zip is what the bucket keeps and the routes serve, as for any other;
+  the index's `z` and the detail's `zip` keep the file's own name, and the detail's `packed` its size and SHA-256.
+  They have no 3D data: Massassi's preview opens only zips (and would download the file from jkdf2.net again).
+  Archives are unpacked with libarchive (`src/vendor/libarchive.js` and `.wasm`, made by `tools/vendor-libarchive.sh`
+  from the npm package libarchive-wasm; their licenses in `src/vendor/libarchive-LICENSES.txt`) in a wasm memory of `LEVELS_UNPACK_MB` (80 unset) inside the Durable
+  Object's 128 MB: one that needs more is `big`, with "too big to unpack here (80 MB)" in its `err`, and is asked
+  for again only when that's raised past it; so is one that unpacks to over 320 MB, or that stopped the job twice
+  as it was unpacked. A damaged one, or one locked with a password, is `bad`. `jkdf2.packed` in `/levels/status`
+  counts them by state.
 - **Mods (the Mod Library):** the same job also copies Massassi's `jkmod` and `motsmod` lists (540 and 58 mods on
   2026-11-15) into the same table and bucket, ranked with the multiplayer levels by downloads. A mod's page has no 3D
   Preview, so the job asks its Download link (`/levels/download/<id>/`) once, which adds one to its download count
