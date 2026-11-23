@@ -446,11 +446,12 @@ DELETE FROM ladder_cache;
 ### A new browser under a known name
 
 A browser that lost its key (cleared cookies and site data, another browser, another computer) gets
-a new one. When a match is saved, a key D1 has never had becomes another key of an existing record
-(`merged_into`) if all of this holds:
+a new one, and a desktop game has a key of its own. Players are matched by name: when a match is
+saved, a key D1 has never had becomes another key of an existing record (`merged_into`) if all of
+this holds:
 
-- the name it played under is the name exactly one record on the pages last used, whatever the
-  letters' case;
+- the name it played under is the name a record on the pages last used, whatever the letters'
+  case; when more than one record has it, the first of them (the lowest id, the oldest) is the one;
 - the name has three characters or more and isn't one many players would have (`COMMON_NAMES` in
   `src/ladder.js`: "Player", "Kyle", "Jedi" and the like);
 - no other player in that match has the same name;
@@ -458,6 +459,24 @@ a new one. When a match is saved, a key D1 has never had becomes another key of 
 
 From then on that browser's matches count for the record, under either key. The lobby logs each
 join (`a new browser joins record <id> by its name`).
+
+Until 2026-11-23 a name had to be exactly one record's, so once two records had a name (two players
+of that name in one match, or one player's key joined while they rejoined a match from the same
+browser), every new key under it became yet another record. The first match a lobby saves after
+that rule went folds those once: the records on the pages that have one name (not a common one)
+become keys of the first of them, with their own keys and stand-ins, and the first takes the name
+last played under. A record that played in a match beside the first, or beside one already folded,
+stays its own: two of them in one match are two players. The lobby logs each fold (`record <id>
+folded into record <id> by its name (with its rows ...)`) and keeps the list in its own storage
+(`ladder:folded`: `[record, into, [its rows]]`), so it never folds again and a record put back by
+hand stays back:
+
+```
+-- 46 was folded into 45 with its rows 47 and 48: make them a player of their own again
+UPDATE players SET merged_into = NULL WHERE id = 46;
+UPDATE players SET merged_into = 46 WHERE id IN (47, 48);
+DELETE FROM ladder_cache;
+```
 
 It means a name is all it takes: someone who plays one match under another player's name, from a
 browser the lobby hasn't seen, adds that match to their record, good or bad. There are no accounts,
@@ -478,7 +497,8 @@ player with no key is nobody's, and two records are joined only by hand.
 A player whose game sent no key is in a match by name only (`match_players.player_id` is empty). The
 same rule gives such a line to a record, whichever came first, the line or the record:
 
-- its name is the name exactly one record on the pages last used, whatever the letters' case;
+- its name is the name a record on the pages last used, whatever the letters' case (the first of
+  them when more than one has it);
 - the name has three characters or more and isn't one many players would have;
 - no other player in that match has the same name;
 - that record's player isn't in that match under a key.
