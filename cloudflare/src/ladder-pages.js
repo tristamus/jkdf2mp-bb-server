@@ -21,6 +21,9 @@
 //                      periods and their records in it, who they met most,
 //                      their form and the days they played lately, the
 //                      screenshots they took, and their latest matches
+//   GET /player/<id>/shots  a page of the screenshots a player took, as
+//                      their page's section alone (?game=, ?page=), which
+//                      the page's script swaps in for Newer and Older
 //
 // Standings and a player's numbers are added up from the matches that count
 // (ladder.js: long enough, confirmed by two games, no password). A week
@@ -161,7 +164,8 @@ export async function ladderRoute(request, env, url) {
         return keyRoute(request);
     const m = /^\/match\/([1-9][0-9]{0,8})$/.exec(path);
     const pl = /^\/player\/([1-9][0-9]{0,8})$/.exec(path);
-    if ((path.startsWith("/match/") && !m) || (path.startsWith("/player/") && !pl))
+    const ps = /^\/player\/([1-9][0-9]{0,8})\/shots$/.exec(path);
+    if ((path.startsWith("/match/") && !m) || (path.startsWith("/player/") && !pl && !ps))
         return null;
     if (request.method !== "GET" && request.method !== "HEAD")
         return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
@@ -172,6 +176,7 @@ export async function ladderRoute(request, env, url) {
     const shots = shotsOn(env);
     const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer, { shots, origin: url.origin, contact: env.SHOTS_CONTACT || "", now })
                      : pl ? playerPage(env.LADDER, Number(pl[1]), url, viewer, now, { shots, contact: env.SHOTS_CONTACT || "" })
+                     : ps ? playerShotsPart(env.LADDER, Number(ps[1]), url, viewer, { shots, contact: env.SHOTS_CONTACT || "" })
                      : path === "/players" ? playersPage(env.LADDER, url, viewer, now)
                      : path === "/matches" ? matchesPage(env.LADDER, url) : recentMatches(env.LADDER, viewer, now, shots);
     try {
@@ -1090,11 +1095,59 @@ function formCard(rows, days) {
           </div></section>`;
 }
 
-// The screenshots a player took in a game's matches, the newest match's
-// first: each opens full size on the page (SHOT_VIEW), and its level's name
-// goes to its match. total and matches: how many of them there are, and in
-// how many matches. you: whether it's the viewer's own page.
-function playerShotsCard(shots, total, matches, name, contact, you) {
+// The pictures a player took in a game's matches, a page of PLAYER_SHOTS at
+// a time (at, from 1), the newest match's first, and how many there are. A
+// picture shows where its match's page does, and never the final
+// scoreboard, which is the game's, not theirs. id is a record's own.
+function playerShotsQueries(db, id, game, at) {
+    const theirs = `FROM match_shots s JOIN matches m ON m.id = s.match_id
+                    WHERE s.player_id IN (SELECT id FROM players WHERE id = ? OR merged_into = ?)
+                          AND s.hidden = 0 AND s.final = 0 AND m.game = ? AND m.hidden = 0 AND m.locked = 0`;
+    return [
+        db.prepare(`SELECT s.id, s.match_id, s.secs, s.w, s.h, m.title, m.ended_at ${theirs}
+                    ORDER BY s.match_id DESC, s.secs, s.added_at, s.id LIMIT ${PLAYER_SHOTS} OFFSET ?`)
+            .bind(id, id, game, (at - 1) * PLAYER_SHOTS),
+        db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT s.match_id) AS matches ${theirs}`).bind(id, id, game),
+    ];
+}
+
+// Their answers as a page: one past the last (pictures taken off since its
+// link was made) is the last.
+async function playerShots(db, id, game, at, [rows, counted]) {
+    const total = Number(counted.results[0]?.n) || 0, matches = Number(counted.results[0]?.matches) || 0;
+    const pages = Math.max(1, Math.ceil(total / PLAYER_SHOTS));
+    let shots = rows.results;
+    if (at > pages) {
+        at = pages;
+        shots = (await playerShotsQueries(db, id, game, at)[0].all()).results;
+    }
+    return { shots, total, matches, at, pages };
+}
+
+// A page number asked for: 1 when it's none or nonsense.
+function pageAsked(v) {
+    const n = Math.floor(Number(v));
+    return n >= 1 ? Math.min(n, 1e6) : 1;
+}
+
+// Where a page of a player's pictures is: on their whole page (?shots=, for
+// a browser without the script and a link opened in a new tab), and alone
+// (/player/<id>/shots), for the page's script to put in place of the last.
+function shotPageLinks(id, game, period) {
+    const g = game === "mots" ? "mots" : "jk";
+    return {
+        page: n => `/player/${id}` + query({ game: g, period, shots: n > 1 ? n : "" }) + "#screenshots",
+        part: n => `/player/${id}/shots` + query({ game: g, period, page: n }),
+    };
+}
+
+// The screenshots a player took in a game's matches, a page of them (from
+// playerShots), the newest match's first: each opens full size on the page
+// (SHOT_VIEW), and its level's name goes to its match. With more than a
+// page, Newer and Older swap the next page in where it is (SCRIPT), or
+// without the script load the player's page with it. you: whether it's the
+// viewer's own page.
+function playerShotsCard({ shots, total, matches, at, pages }, links, name, contact, you) {
     if (!shots.length && !you)
         return "";
     const clock = secs => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
@@ -1110,14 +1163,52 @@ function playerShotsCard(shots, total, matches, name, contact, you) {
               <span class="cap">${time(s.ended_at, "day")}</span>
             </li>`;
     }).join("");
+    const step = (n, label, rel) => n >= 1 && n <= pages
+        ? `<a href="${links.page(n)}" data-shots-page="${links.part(n)}" rel="${rel}">${label}</a>`
+        : `<span class="off" aria-disabled="true">${label}</span>`;
+    const pager = pages > 1 ? `
+            <nav class="shot-pager" aria-label="Pages of screenshots">
+              ${step(at - 1, "&lsaquo; Newer", "prev")}
+              <span class="at">Page ${at} of ${pages}</span>
+              ${step(at + 1, "Older &rsaquo;", "next")}
+            </nav>` : "";
     return `
-        <div class="cards">
           <section class="card wide" id="screenshots"><h3>Screenshots${total ? ` <span class="count">${num(total)} from ${count(matches, "match", "matches")}</span>` : ""}</h3><div class="body">
             ${shots.length ? `<ul class="shot-grid">${tiles}
-            </ul>` : `<p class="none">None yet. A screenshot you take in the game (F8 or F12) shows up here and on its match's page.</p>`}
-            <p class="later">${shots.length ? `${total > shots.length ? `The latest ${shots.length} of ${num(total)}. ` : ""}Taken in the game and sent from ${you ? "your" : "their"} own browser; each match's page has the rest of its pictures. ` : ""}${contact ? `To have a picture taken down: ${contactLink(contact)}` : ""}</p>
-          </div></section>
-        </div>`;
+            </ul>${pager}` : `<p class="none">None yet. A screenshot you take in the game (F8 or F12) shows up here and on its match's page.</p>`}
+            <p class="later">${shots.length ? `${pages > 1 ? `${PLAYER_SHOTS} a page, the newest first. ` : ""}Taken in the game and sent from ${you ? "your" : "their"} own browser; each match's page has the rest of its pictures. ` : ""}${contact ? `To have a picture taken down: ${contactLink(contact)}` : ""}</p>
+          </div></section>`;
+}
+
+// GET /player/<id>/shots: a page of a player's pictures (?game=, ?page=), as
+// their page's Screenshots section alone, for its script to swap in. 404
+// for an id that isn't a record's own (its page goes to the record's), a
+// hidden record, and a player with none. opts as playerPage's.
+export async function playerShotsPart(db, id, url, viewerHash, opts = {}) {
+    const game = GAME_PARAM[url.searchParams.get("game") || ""] || "jk1";
+    const asked = url.searchParams.get("period") || "";
+    const at = pageAsked(url.searchParams.get("page"));
+    const answers = await db.batch([
+        db.prepare("SELECT id, name, hidden, merged_into FROM players WHERE id = ?").bind(id),
+        ...playerShotsQueries(db, id, game, at),
+        ...(viewerHash ? [viewerQuery(db, viewerHash)] : []),
+    ]);
+    const who = answers[0].results[0];
+    const you = viewerHash && answers[3].results[0] ? answers[3].results[0].id : 0;
+    const part = who && !who.hidden && !who.merged_into && opts.shots
+        ? playerShotsCard(await playerShots(db, id, game, at, answers.slice(1, 3)), shotPageLinks(id, game, PERIODS[asked] ? asked : ""),
+                          who.name, opts.contact || "", you === id)
+        : "";
+    return new Response(part || "No such pictures", {
+        status: part ? 200 : 404,
+        headers: {
+            "Content-Type": part ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+            "Cache-Control": part ? "private, max-age=30" : "no-store",
+            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+            "X-Content-Type-Options": "nosniff",
+            "X-Robots-Tag": "noindex",
+        },
+    });
 }
 
 // GET /player/<id>. opts: shots (the lobby takes screenshots), contact (where
@@ -1175,11 +1266,7 @@ export async function playerPage(db, id, url, viewerHash, now, opts = {}) {
     const args = [id, id, game, from];
     const latest = `SELECT m.id ${mine} ORDER BY m.id DESC LIMIT ${RIVAL_MATCHES}`;
     const days = lastDays(now, ACTIVE_DAYS);
-    // A picture shows where its match's page does, and never the final
-    // scoreboard, which is the game's, not theirs.
-    const theirShots = `FROM match_shots s JOIN matches m ON m.id = s.match_id
-                        WHERE s.player_id IN (SELECT id FROM players WHERE id = ? OR merged_into = ?)
-                              AND s.hidden = 0 AND s.final = 0 AND m.game = ? AND m.hidden = 0 AND m.locked = 0`;
+    const shotsAt = pageAsked(url.searchParams.get("shots"));
     const answers = await db.batch([
         db.prepare(`SELECT SUM(json_extract(mp.kinds, '$[0]')) AS k0, SUM(json_extract(mp.kinds, '$[1]')) AS k1,
                            SUM(json_extract(mp.kinds, '$[2]')) AS k2, SUM(json_extract(mp.kinds, '$[3]')) AS k3,
@@ -1221,12 +1308,8 @@ export async function playerPage(db, id, url, viewerHash, now, opts = {}) {
                     WHERE ${MINE} AND m.game = ? AND m.hidden = 0 AND m.locked = 0 AND m.ended_at >= ?`)
             .bind(id, id, game, days[0].from),
         // Last, so the others stay where they are: the pictures they sent
-        // from their games in this game's matches, and how many there are.
-        ...(opts.shots ? [
-            db.prepare(`SELECT s.id, s.match_id, s.secs, s.w, s.h, m.title, m.ended_at ${theirShots}
-                        ORDER BY s.match_id DESC, s.secs, s.added_at, s.id LIMIT ${PLAYER_SHOTS}`).bind(id, id, game),
-            db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT s.match_id) AS matches ${theirShots}`).bind(id, id, game),
-        ] : []),
+        // from their games in this game's matches.
+        ...(opts.shots ? playerShotsQueries(db, id, game, shotsAt) : []),
     ]);
     const board = standing(boards[game][period].rows).sort(byScore);
     const rank = board.findIndex(r => r.id === id);
@@ -1241,8 +1324,9 @@ export async function playerPage(db, id, url, viewerHash, now, opts = {}) {
         if (day)
             day.n++;
     }
-    const shots = opts.shots ? answers[13].results : [];
-    const shotCount = opts.shots ? answers[14].results[0] || {} : {};
+    const shotPage = opts.shots ? await playerShots(db, id, game, shotsAt, answers.slice(13, 15)) : { shots: [] };
+    const shots = shotPage.shots;
+    const shotCard = opts.shots ? playerShotsCard(shotPage, shotPageLinks(id, game, asked), who.name, opts.contact || "", you === id) : "";
 
     // Who they met: from each match's kills, by the others' records where
     // they have one and by the name they played under where not.
@@ -1359,7 +1443,8 @@ export async function playerPage(db, id, url, viewerHash, now, opts = {}) {
       <div class="ladder-main full">
         ${head}
         ${stats}
-        ${playerShotsCard(shots, Number(shotCount.n) || 0, Number(shotCount.matches) || 0, who.name, opts.contact || "", opts.shots && you === id)}
+        ${shotCard ? `<div class="cards">${shotCard}
+        </div>` : ""}
         ${recent.length ? `<h3 class="part">Latest ${GAMES[game]} matches</h3>
         <div class="scroll">
           <table class="ladder-table">
@@ -1573,6 +1658,14 @@ ${Array.from({ length: FORM_STEPS }, (_, i) => `.kbar.h${i + 1} { height: ${2 + 
 .style-2001 .kbar.won { background-color: var(--gold); }
 .style-2001 .days li.l1 { background-color: #12405e; }
 .style-2001 .days li.l2 { background-color: #2a78a8; }
+.shot-pager { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 12px 0 0; }
+.shot-pager a, .shot-pager .off { padding: 2px 10px; border: 1px solid var(--gold); color: var(--gold);
+  font: bold 12px Verdana, Geneva, sans-serif; text-decoration: none; white-space: nowrap; }
+.shot-pager a:hover { background-color: var(--gold); color: #000; }
+.shot-pager .off { border-color: var(--card-edge); color: #5f7a7a; }
+.shot-pager .at { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#screenshots[aria-busy] .shot-grid { opacity: 0.5; }
+#screenshots h3:focus { outline: none; }
 .hide { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .card td.soft:first-child { white-space: nowrap; padding-right: 8px; }
 .card table.versus { font-size: 12px; }
@@ -1652,6 +1745,7 @@ h3.part { margin: 18px 0 6px; color: var(--gold); font: bold 14px Verdana, Genev
 }
 @media (pointer: coarse) {
   .style-pick button, .shot-view .bar button { min-height: 26px; }
+  .shot-pager a, .shot-pager .off { padding: 6px 14px; }
   .tabs a { padding: 4px 10px; }
 }
 `;
@@ -1693,11 +1787,12 @@ const SCRIPT = `
   }
   // A match's screenshots: a click on one shows it full size on the page,
   // with the others an arrow away. A click with a key held, or in a browser
-  // without <dialog>, follows the link to the picture itself.
+  // without <dialog>, follows the link to the picture itself. The pictures
+  // are the ones on the page at the click (a player's page swaps them).
   function shotView() {
     var view = document.getElementById('shot-view');
     if (!view || !view.showModal) return;
-    var links = Array.prototype.slice.call(document.querySelectorAll('a[data-shot]'));
+    var links = [];
     var img = document.getElementById('shot-img');
     var at = 0;
     function show(i) {
@@ -1719,6 +1814,7 @@ const SCRIPT = `
       var a = t.closest('a[data-shot]');
       if (a && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey || ev.button)) {
         ev.preventDefault();
+        links = Array.prototype.slice.call(document.querySelectorAll('a[data-shot]'));
         show(links.indexOf(a));
         if (!view.open) view.showModal();
         return;
@@ -1756,7 +1852,39 @@ const SCRIPT = `
       });
     });
   }
-  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); shotView(); shotOff(); });
+  // A player's screenshots, a page at a time: Newer and Older get the next
+  // page alone and put it in place of this one, so the player's page stays
+  // where it is. If that fails, the link loads the player's page with it.
+  function shotPages() {
+    document.addEventListener('click', function(ev) {
+      var a = ev.target.closest && ev.target.closest('a[data-shots-page]');
+      if (!a || ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey || ev.button) return;
+      var card = document.getElementById('screenshots');
+      if (!card || !window.fetch || !('content' in document.createElement('template'))) return;
+      ev.preventDefault();
+      if (card.getAttribute('aria-busy')) return;
+      card.setAttribute('aria-busy', 'true');
+      fetch(a.dataset.shotsPage, { credentials: 'same-origin' }).then(function(res) {
+        if (res.status !== 200) throw new Error(res.status);
+        return res.text();
+      }).then(function(html) {
+        var t = document.createElement('template');
+        t.innerHTML = html;
+        var next = t.content.getElementById('screenshots');
+        if (!next) throw new Error('none');
+        card.replaceWith(next);
+        showTimes();
+        try { history.replaceState(null, '', a.href); } catch (e) {}
+        var h = next.querySelector('h3');
+        h.tabIndex = -1;
+        h.focus({ preventScroll: true });
+        if (next.getBoundingClientRect().top < 0) next.scrollIntoView();
+      }).catch(function() {
+        location.href = a.href;
+      });
+    });
+  }
+  document.addEventListener('DOMContentLoaded', function() { showStyle(); showTimes(); shotView(); shotOff(); shotPages(); });
   document.addEventListener('click', function(ev) {
     var b = ev.target.closest && ev.target.closest('[data-page-style]');
     if (!b) return;

@@ -374,6 +374,7 @@ it, a key D1 has never had becomes another key of a record when it plays under t
 | `/matches` | The matches, newest first; `?game=jk` or `mots` for one game's |
 | `/players` | The standings of a game: `?game=`, `?period=week`, `month` or `all` (all three without), `?sort=` a column, `?dir=asc` |
 | `/player/<id>` | A player: what they did in a game over a period and their records in it, their form and the days they played lately, their rivals, what they play, the screenshots they took and their latest matches |
+| `/player/<id>/shots` | A page of the screenshots a player took (`?game=`, `?page=`): their page's Screenshots section alone, for its Newer and Older |
 | `/ladder/recent` | For the landing page, as JSON: the latest matches of each game, each game's top ten over each period, and who's asking |
 | `/ladder/key` | `POST`: the page's player's key |
 
@@ -433,11 +434,14 @@ of a key that was joined to a record goes to that record's page. It also has:
   and how many matches of the game they played on each of the last 14 days (`ACTIVE_DAYS`), counted
   or not, but not one with a password. A day there starts at 3 in the morning Pacific time, as a
   week does, so a match after midnight is on the evening's day.
-- **Screenshots**, with the lobby's pictures on (`SHOTS`): the latest twelve they took in the game's
-  matches (`PLAYER_SHOTS`), the newest match's first, each opening full size on the page and naming
-  its match, with how many there are in all. Not the final scoreboards, which are the game's, and
-  none of a hidden picture or of a match that's hidden or had a password. Their own page with none
-  yet says how to take one; anyone else's shows nothing.
+- **Screenshots**, with the lobby's pictures on (`SHOTS`): the ones they took in the game's matches,
+  twelve a page (`PLAYER_SHOTS`), the newest match's first, each opening full size on the page and
+  naming its match, with how many there are in all. Not the final scoreboards, which are the game's,
+  and none of a hidden picture or of a match that's hidden or had a password. Their own page with
+  none yet says how to take one; anyone else's shows nothing. With more than a page, Newer and Older
+  get the next page alone from `/player/<id>/shots?game=&page=` and the page's script puts it in place
+  of the section, so the rest of the page stays as it is (the address gets `?shots=<page>`). Without
+  the script, the same links load the player's page with that page of pictures.
 
 The landing page shows the top ten of each game in a section under the rooms and the top five in a
 box in its sidebar, from `/ladder/recent`. That answer also says who's asking, by the `jkpk` cookie:

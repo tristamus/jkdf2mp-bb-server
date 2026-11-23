@@ -2387,6 +2387,7 @@ await check("without the bucket the lobby takes no pictures, and its pages are a
         const theirs = await w.page("/player/1?game=jk", { Cookie: `jkpk=${KEYS.maw}` });
         assert.equal(theirs.body.includes("Screenshots"), false);
         assert.match(theirs.headers["Content-Security-Policy"], /; img-src data:;/);
+        assert.equal((await w.page("/player/1/shots?game=jk")).status, 404);
     }
     // With the bucket, the landing page hears the limits.
     const on = await new World(shotEnv()).start();
@@ -2503,10 +2504,48 @@ await check("a player's picture goes on the page of the match it was taken in, o
     for (let n = 0; n < 12; n++)
         env.LADDER.db.exec(`INSERT INTO match_shots (id, match_id, slot, player_id, taken, secs, w, h, bytes, thumb_bytes, added_at)
                             VALUES ('y${n}', ${id}, 0, 1, ${n}, ${10 + n}, 640, 480, 10, 5, 0)`);
-    const many = await w.page("/player/1?game=jk");
-    assert.equal(many.body.match(/<li class="shot">/g).length, 12);
-    assert.ok(textOf(many.body).includes("Screenshots 13 from 1 match") && textOf(many.body).includes("The latest 12 of 13."));
+    // With more than a page, a page at a time: the pager's links load the
+    // player's page with the next one, or its section alone for the script.
+    const many = await w.page("/player/1?game=jk&period=all");
+    const tilesOf = html => [...html.matchAll(/<a href="\/shot\/([0-9a-z]+)\.jpg" data-shot=/g)].map(m => m[1]);
+    assert.deepEqual(tilesOf(many.body), [...Array(12).keys()].map(n => `y${n}`), "the first page: twelve, in the order they were taken");
+    assert.ok(textOf(many.body).includes("Screenshots 13 from 1 match"));
+    assert.ok(textOf(many.body).includes("Newer Page 1 of 2 Older"), textOf(many.body));
+    assert.ok(many.body.includes('<span class="off" aria-disabled="true">&lsaquo; Newer</span>'));
+    assert.ok(many.body.includes('<a href="/player/1?game=jk&amp;period=all&amp;shots=2#screenshots" data-shots-page="/player/1/shots?game=jk&amp;period=all&amp;page=2" rel="next">Older &rsaquo;</a>'));
+    assert.ok(textOf(many.body).includes("12 a page, the newest first."));
+    const second = await w.page("/player/1?game=jk&period=all&shots=2");
+    assert.deepEqual(tilesOf(second.body), [sent.id]);
+    assert.ok(second.body.includes('<a href="/player/1?game=jk&amp;period=all#screenshots" data-shots-page="/player/1/shots?game=jk&amp;period=all&amp;page=1" rel="prev">&lsaquo; Newer</a>'));
+    assert.ok(textOf(second.body).includes("Page 2 of 2 Older"));
+    assert.ok(textOf(second.body).includes("Personal records"), "the rest of the page is the same");
+    assert.deepEqual(tilesOf((await w.page("/player/1?game=jk&shots=9")).body), [sent.id], "past the last is the last");
+    assert.deepEqual(tilesOf((await w.page("/player/1?game=jk&shots=x")).body).length, 12);
+    // The section alone: only it, for the page's own script to swap in.
+    const part = await w.page("/player/1/shots?game=jk&period=all&page=2", { Cookie: `jkpk=${KEYS.maw}` });
+    assert.equal(part.status, 200);
+    assert.equal(part.headers["Content-Type"], "text/html; charset=utf-8");
+    assert.equal(part.headers["Cache-Control"], "private, max-age=30");
+    assert.equal(part.headers["Content-Security-Policy"], "default-src 'none'; frame-ancestors 'none'");
+    assert.match(part.body, /^\s*<section class="card wide" id="screenshots">[^]*<\/section>$/);
+    assert.deepEqual(tilesOf(part.body), [sent.id]);
+    assert.ok(textOf(part.body).includes("Page 2 of 2") && textOf(part.body).includes("sent from your own browser"));
+    assert.equal(/<script|<html|<head| style="| on[a-z]+="/.test(part.body), false);
+    assert.deepEqual(tilesOf((await w.page("/player/1/shots?game=jk&page=9")).body), [sent.id]);
+    assert.ok((await w.page("/player/1/shots?game=jk")).body.includes("Page 1 of 2"));
+    // None for a player with none, another game, a record taken off the
+    // pages, or one that isn't there.
+    for (const path of ["/player/2/shots?game=jk", "/player/1/shots?game=mots", "/player/999/shots"])
+        assert.equal((await w.page(path)).status, 404, path);
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE id = 1");
+    assert.equal((await w.page("/player/1/shots?game=jk")).status, 404);
+    env.LADDER.db.exec("UPDATE players SET hidden = 0 WHERE id = 1");
+    env.ASSETS = { fetch: async () => new Response("asset", { status: 200 }) };
+    assert.equal((await w.page("/player/1/shotsx")).body, "asset");
+    assert.equal((await w.page("/player/1/shots/2")).body, "asset");
+    // A page that fits on one has no pager.
     env.LADDER.db.exec("DELETE FROM match_shots WHERE id LIKE 'y%'");
+    assert.equal((await w.page("/player/1?game=jk")).body.includes('<nav class="shot-pager"'), false);
 
     // Hidden by hand, a picture is off the pages and no longer served; a
     // hidden match's aren't either.
