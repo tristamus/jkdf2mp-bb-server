@@ -125,11 +125,14 @@ await check("the keys: one to a line or comma, as <key> <game> <address> <name>;
 });
 
 await check("what a server may ask", async () => {
-    assert.deepEqual(readAsk({ end: true }), { end: true });
-    assert.deepEqual(readAsk({ episode: "JK1CTF", map: "c3.jkl", delay: 60 }), { episode: "JK1CTF", map: "c3.jkl", delay: 60 });
-    assert.deepEqual(readAsk({}), { episode: "", map: "", delay: 0 });
-    for (const bad of [null, [], "x", { end: 1 }, { map: "../x" }, { episode: 5 }, { delay: -1 }, { delay: 1.5 },
-                       { delay: 4000 }, { map: "a".repeat(65) }])
+    assert.deepEqual(readAsk({ end: true }), { end: true, off: false });
+    assert.deepEqual(readAsk({ end: true, off: true }), { end: true, off: true });
+    assert.deepEqual(readAsk({ episode: "JK1CTF", map: "c3.jkl", delay: 60 }),
+                     { episode: "JK1CTF", map: "c3.jkl", delay: 60, files: false, say: false });
+    assert.deepEqual(readAsk({}), { episode: "", map: "", delay: 0, files: false, say: false });
+    assert.deepEqual(readAsk({ files: true, say: false }), { episode: "", map: "", delay: 0, files: true, say: false });
+    for (const bad of [null, [], "x", { end: 1 }, { end: true, off: 1 }, { map: "../x" }, { episode: 5 }, { delay: -1 },
+                       { delay: 1.5 }, { delay: 4000 }, { map: "a".repeat(65) }, { files: 1 }, { say: "yes" }])
         assert.equal(readAsk(bad), null, JSON.stringify(bad));
 });
 
@@ -209,7 +212,7 @@ await check("the status lists it by its sid for the page, with how many watch", 
 await check("ending it: the feed ends and it's no longer listed; a feed that ended itself isn't either", async () => {
     const w = await new World().start();
     const { room } = (await w.ask({})).json;
-    const r = await w.ask({ end: true });
+    const r = await w.ask({ end: true, off: true });
     assert.deepEqual([r.status, r.json], [200, { ended: true }]);
     for (let i = 0; i < 3; i++)
         await new Promise(res => setImmediate(res));
@@ -274,6 +277,96 @@ await check("its feed takes wide chunks (3) from it; a lobby room's feed doesn't
     const h = ctx.sockets.at(-1);
     await plain.webSocketMessage(h, wide);
     assert.deepEqual(h.closed, [1003, "bad chunk"]);
+});
+
+// A page watching an Imperial server's feed, from its start.
+async function watcher(feed, room) {
+    assert.equal((await feed.fetch(new Request(`https://jediknight.zone/feed/${room}`, { headers: { Upgrade: "websocket" } }))).status, 101);
+    const p = feed.ctx.sockets.at(-1);
+    p.take();
+    return p;
+}
+async function hostOf(feed, room, token) {
+    const up = new Request(`https://jediknight.zone/feed/${room}?up=${token}`, { headers: { Upgrade: "websocket" } });
+    assert.equal((await feed.fetch(up)).status, 101);
+    const g = feed.ctx.sockets.at(-1);
+    g.take();
+    return g;
+}
+const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(res => setImmediate(res)); };
+
+await check("the server empties: pages watching get the match's last seconds, then \"room ended\"; off ends at once", async () => {
+    const w = await new World().start();
+    const { room, token } = (await w.ask({ delay: 30 })).json;
+    const feed = w.feeds.of(room);
+    const g = await hostOf(feed, room, token);
+    const p = await watcher(feed, room);
+    const head = new TextEncoder().encode('JKF1{"v":1,"game":"jk1","episode":"JK1CTF","map":"c3.jkl","host":1}');
+    const key = new Uint8Array(1 + head.length);
+    key[0] = 1;
+    key.set(head, 1);
+    await feed.webSocketMessage(g, key.buffer);
+    await feed.webSocketMessage(g, new Uint8Array([3, 2, 0, 0, 0, 2, 0, 0xaa, 0xbb]).buffer);
+    assert.equal((await w.ask({ end: true })).status, 200);
+    await settle();
+    assert.equal((await w.status()).imp, undefined, "no longer listed");
+    assert.equal(feed.ending, "room ended", "still playing out what it has");
+    assert.ok(!p.take().some(l => typeof l === "string" && l.startsWith("feed ended")));
+    // Its last chunk comes of age: the page gets it, then the end.
+    const realNow = Date.now;
+    try {
+        const t = realNow() + 31 * 1000;
+        Date.now = () => t;
+        feed.flush();
+    } finally {
+        Date.now = realNow;
+    }
+    const got = p.take();
+    assert.ok(got.some(l => typeof l !== "string"), "the match's last seconds");
+    assert.ok(got.includes("feed ended room ended"));
+    // Asked for again (someone joined): a new room while that one played out.
+    const again = (await w.ask({})).json;
+    assert.notEqual(again.room, room);
+    // Watching turned off: the pages are told at once.
+    const f2 = w.feeds.of(again.room);
+    const g2 = await hostOf(f2, again.room, again.token);
+    const p2 = await watcher(f2, again.room);
+    await f2.webSocketMessage(g2, key.buffer);
+    await w.ask({ end: true, off: true });
+    await settle();
+    assert.ok(p2.take().includes("feed ended watching off"));
+});
+
+await check("a server that didn't say it sends files or takes messages: games watching are told at once", async () => {
+    const w = await new World().start();
+    const { room, token } = (await w.ask({})).json;
+    const feed = w.feeds.of(room);
+    const g = await hostOf(feed, room, token);
+    const p = await watcher(feed, room);
+    const FP = "ab".repeat(32);
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.deepEqual(p.take(), ["feed no-files"]);
+    const heard = () => g.take().filter(l => l !== "key");   // a page with no keyframe yet asks for one
+    assert.deepEqual(heard(), [], "the server hears nothing");
+    await feed.webSocketMessage(p, "say Kyle\thello");
+    assert.deepEqual(p.take(), ["feed no-say"]);
+    assert.deepEqual(heard(), []);
+    // It says it does (asking again): as a lobby room's host.
+    await w.ask({ files: true, say: true });
+    assert.equal(g.closed, null, "its socket stays open on asking again");
+    const host = { take: heard };
+    await feed.webSocketMessage(p, "mod " + FP);
+    assert.deepEqual(host.take(), ["mod " + FP]);
+    const later = Date.now() + 10 * 1000;
+    const realNow = Date.now;
+    try {
+        Date.now = () => later;
+        await feed.webSocketMessage(p, "say Kyle\thello");
+    } finally {
+        Date.now = realNow;
+    }
+    assert.deepEqual(host.take(), ["say Kyle (watching): hello"]);
+    assert.deepEqual(p.take(), []);
 });
 
 console.log(failed ? `${failed} failed, ${passed} passed` : `all ${passed} passed`);

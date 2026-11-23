@@ -22,16 +22,29 @@
 //     host>/feed/<id>?up=<token>", "delay": <s>}, the delay as asked,
 //     30 to 300 s (30 when it doesn't say). Asking again while its feed is
 //     on gets the same room and token, with the delay as asked now.
+//     "files": true and "say": true, when it can: it sends the match's
+//     level or mod to games watching that don't have them (mod <fp>), and
+//     puts spectators' messages in the match's chat (say). Without them, a
+//     game watching is told at once that this server doesn't ("feed
+//     no-files", "feed no-say" on its socket), and the server hears no mod
+//     or say lines.
 //
 //   {"end": true}
-//     Watching is off, or the server is empty: its feed ends. {"ended": true}
+//     The server is empty, or its match is over: its feed ends, and pages
+//     watching get the match's last delay seconds first, as for a lobby
+//     room that ends ("The match is over."). {"ended": true}
+//   {"end": true, "off": true}
+//     Watching was turned off: its feed ends at once ("The host turned
+//     watching off."). {"ended": true}
+//
+// Asking for its feed again after an end gets a new room, as a new match.
 //
 // The server then sends its chunks to url as src/feed.js says, the host of
 // its feed: kind 3 for its players' messages (with who sent each, since
 // relay player ids don't fit the feed's seat), 0 for its own, 1 and 2 for
-// keyframes. It hears key, mod <fp> and say lines there as a host's game
-// does. A feed nothing is sent to for 10 minutes ends itself, and the lobby
-// stops listing it.
+// keyframes. It hears key lines there as a host's game does, and mod <fp>
+// and say lines when it said it takes them. A feed nothing is sent to for
+// 10 minutes ends itself, and the lobby stops listing it.
 //
 // 401 for no key or one not listed, 400 for a body that isn't one of those,
 // 405 for anything but POST, 413 for a body over MAX_BODY, 503 when the feed
@@ -91,8 +104,12 @@ export async function serverFor(request, servers) {
 export function readAsk(body) {
     if (!body || typeof body !== "object" || Array.isArray(body))
         return null;
-    if (body.end !== undefined)
-        return body.end === true ? { end: true } : null;
+    const flag = v => v === undefined || typeof v === "boolean";
+    if (body.end !== undefined) {
+        if (body.end !== true || !flag(body.off))
+            return null;
+        return { end: true, off: body.off === true };
+    }
     const episode = body.episode === undefined ? "" : body.episode;
     const map = body.map === undefined ? "" : body.map;
     if (typeof episode !== "string" || typeof map !== "string" || (episode && !FILE_RE.test(episode)) ||
@@ -100,7 +117,9 @@ export function readAsk(body) {
         return null;
     if (body.delay !== undefined && !(Number.isInteger(body.delay) && body.delay >= 0 && body.delay <= 3600))
         return null;
-    return { episode, map, delay: body.delay || 0 };
+    if (!flag(body.files) || !flag(body.say))
+        return null;
+    return { episode, map, delay: body.delay || 0, files: body.files === true, say: body.say === true };
 }
 
 const answer = (status, obj) => new Response(JSON.stringify(obj), {
@@ -127,7 +146,7 @@ export async function imperialFeedRoute(request, env) {
     } catch (e) {
     }
     if (!ask)
-        return answer(400, { error: "Send {episode, map, delay} or {end: true}" });
+        return answer(400, { error: "Send {episode, map, delay, files, say} or {end, off}" });
     const lobby = env.LOBBY.get(env.LOBBY.idFromName("lobby"));
     let r = null;
     try {

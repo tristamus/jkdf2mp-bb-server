@@ -70,6 +70,11 @@
 // A spectator can talk to the match's players: its game says "say
 // <name>\t<text>", and the feed sends the host's game "say <name>
 // (watching): <text>", which it puts in the match's chat (spectatorSays).
+//
+// An Imperial relay server's feed (src/imperial-feed.js) passes those on
+// only when the server said it takes them (hostTakes). Otherwise the game
+// watching is told at once: "feed no-files" for a mod or level it asked for,
+// "feed no-say" for a message.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -189,7 +194,8 @@ export class Feed extends DurableObject {
     // ({token: seat}). Called again whenever any of it changes; a game whose
     // token is gone is closed. opts.wide: its host's game may send packets
     // with who sent each (kind 3), as an Imperial relay's dedicated server
-    // does.
+    // does; such a host takes mod <fp> lines only with opts.files and say
+    // lines only with opts.say (hostTakes).
     async arm(room, delay, tokens, opts) {
         const clean = {};
         for (const [t, seat] of Object.entries(tokens || {})) {
@@ -198,7 +204,7 @@ export class Feed extends DurableObject {
         }
         const began = this.cfg && this.cfg.room === room ? this.cfg.began : Date.now();
         this.cfg = { room, delay: Math.max(0, Number(delay) || 0), tokens: clean, began,
-                     ...(opts && opts.wide ? { wide: true } : {}) };
+                     ...(opts && opts.wide ? { wide: true, files: opts.files === true, say: opts.say === true } : {}) };
         this.ending = null;
         this.lastUp = Date.now();
         await this.ctx.storage.put("cfg", this.cfg);
@@ -562,7 +568,14 @@ export class Feed extends DurableObject {
             return;
         }
         const m = /^mod ([0-9a-f]{64})$/.exec(text);
-        if (!m || !this.cfg || this.ending || now - (this.modAsked.get(m[1]) || 0) < MOD_ASK_MS)
+        if (!m || !this.cfg || this.ending)
+            return;
+        // A host that doesn't send them: the game watching needn't wait.
+        if (!this.hostTakes("files")) {
+            this.sendTo(ws, "feed no-files");
+            return;
+        }
+        if (now - (this.modAsked.get(m[1]) || 0) < MOD_ASK_MS)
             return;
         for (const [host, s] of this.socks) {
             if (s.seat === SEAT_HOST) {
@@ -588,6 +601,13 @@ export class Feed extends DurableObject {
         const words = sayClean(said.substring(tab + 1), SAY_TEXT_MAX);
         if (!words)
             return;
+        // A host that doesn't put them in its match's chat: the spectator is
+        // told so, rather than waiting for their message to show.
+        if (!this.hostTakes("say")) {
+            s.saidAt = now;
+            this.sendTo(ws, "feed no-say");
+            return;
+        }
         for (const [host, h] of this.socks) {
             if (h.seat === SEAT_HOST) {
                 s.saidAt = now;
@@ -595,6 +615,12 @@ export class Feed extends DurableObject {
                 return;
             }
         }
+    }
+
+    // Whether the host's game takes mod <fp> ("files") or say lines ("say"):
+    // a lobby room's always does, an Imperial server's when it said so.
+    hostTakes(what) {
+        return !this.cfg || !this.cfg.wide || this.cfg[what] === true;
     }
 
     // Ending, with no page left that has anything to get: over.

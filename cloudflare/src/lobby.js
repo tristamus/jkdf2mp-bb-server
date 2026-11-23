@@ -1856,15 +1856,17 @@ export class Lobby extends DurableObject {
     // From the Worker (/imperial-feed, src/imperial-feed.js), over RPC: a
     // dedicated server on the Imperial relay asks for its match's feed, or
     // ends it. server: {sid, game, name}, as IMPERIAL_FEED_KEYS names it;
-    // ask: {episode, map, delay} or {end: true}. Answers {room, token,
-    // delay}, {ended: true}, or null when its feed didn't answer.
+    // ask: {episode, map, delay, files, say} or {end: true, off}. Answers
+    // {room, token, delay}, {ended: true}, or null when its feed didn't
+    // answer. An end plays the pages watching the match's last seconds
+    // first, as a room's end does; with off (watching turned off), not.
     async imperialFeed(server, ask) {
         if (!this.env.FEED || !server || !server.sid)
             return null;
         let f = this.imperial.get(server.sid);
         if (ask.end) {
             if (f)
-                this.impEnd(f, "watching off");
+                this.impEnd(f, ask.off ? "watching off" : "room ended");
             return { ended: true };
         }
         const delay = Math.min(SPECT_MAX_DELAY_S, Math.max(SPECT_MIN_DELAY_S, ask.delay || SPECT_DELAY_S));
@@ -1877,9 +1879,11 @@ export class Lobby extends DurableObject {
         this.imperial.set(f.sid, f);
         this.impSave(f);
         // Armed every time it asks: a feed that ended itself (nothing sent
-        // for a while) starts again, with the same token.
+        // for a while) starts again, with the same token. files and say:
+        // whether the server takes mod <fp> and say lines (src/feed.js).
         const stub = this.env.FEED.get(this.env.FEED.idFromName("room:" + f.id));
-        const next = (f.chain || Promise.resolve()).then(() => stub.arm(f.id, delay, { [f.token]: 1 }, { wide: true }))
+        const opts = { wide: true, files: !!ask.files, say: !!ask.say };
+        const next = (f.chain || Promise.resolve()).then(() => stub.arm(f.id, delay, { [f.token]: 1 }, opts))
                                                     .then(() => true, e => {
             console.log(`relay: imperial ${server.name}: its feed didn't answer: ${e && e.message || e}`);
             return false;
