@@ -19,6 +19,10 @@
 //   0  packets sent to everyone since its last chunk
 //   1  the start of a keyframe: the state a game joining now would be sent
 //   2  more of the keyframe started by the last 1
+//   3  packets sent to everyone, each with who sent it: a u32 player id (LE)
+//      before each packet's length. Only in a feed armed wide: a dedicated
+//      server on the Imperial relay sends its players' messages along with
+//      its own, and their ids don't fit the seat (src/imperial-feed.js).
 // A page gets "feed <delay s>" on connect, then binary batches, each one or
 // more records of
 //   u32 length of what follows the length (LE), u32 ms since the feed began
@@ -86,6 +90,7 @@ const TICK_MS = 250;
 const KIND_DELTA = 0;
 const KIND_KEY = 1;
 const KIND_KEY_MORE = 2;
+const KIND_WIDE = 3;
 const SEAT_MAX = 64;
 const TOKEN_RE = /^[0-9a-f]{32}$/;
 const RECORD_HEAD = 10;
@@ -139,8 +144,8 @@ export function sayClean(text, max) {
 export class Feed extends DurableObject {
     constructor(ctx, env) {
         super(ctx, env);
-        // {room, delay (s), tokens: {token: seat}, began (ms)}, null until
-        // the Lobby arms it. Kept in storage, so a feed that was evicted
+        // {room, delay (s), tokens: {token: seat}, began (ms), wide}, null
+        // until the Lobby arms it. Kept in storage, so a feed that was evicted
         // still knows who may send; what it held is gone (pages wait for
         // the next keyframe).
         this.cfg = null;
@@ -182,15 +187,18 @@ export class Feed extends DurableObject {
 
     // From the Lobby: the feed's room, delay and the games that may send
     // ({token: seat}). Called again whenever any of it changes; a game whose
-    // token is gone is closed.
-    async arm(room, delay, tokens) {
+    // token is gone is closed. opts.wide: its host's game may send packets
+    // with who sent each (kind 3), as an Imperial relay's dedicated server
+    // does.
+    async arm(room, delay, tokens, opts) {
         const clean = {};
         for (const [t, seat] of Object.entries(tokens || {})) {
             if (TOKEN_RE.test(t) && Number.isInteger(seat) && seat >= 1 && seat <= SEAT_MAX)
                 clean[t] = seat;
         }
         const began = this.cfg && this.cfg.room === room ? this.cfg.began : Date.now();
-        this.cfg = { room, delay: Math.max(0, Number(delay) || 0), tokens: clean, began };
+        this.cfg = { room, delay: Math.max(0, Number(delay) || 0), tokens: clean, began,
+                     ...(opts && opts.wide ? { wide: true } : {}) };
         this.ending = null;
         this.lastUp = Date.now();
         await this.ctx.storage.put("cfg", this.cfg);
@@ -381,10 +389,21 @@ export class Feed extends DurableObject {
         if (!this.cfg)
             return;
         const now = Date.now();
-        if (now - this.lastUp < IDLE_MS)
+        if (now - this.lastUp < IDLE_MS) {
             await this.ctx.storage.setAlarm(this.lastUp + IDLE_MS);
-        else
-            await this.end("idle");
+            return;
+        }
+        const room = this.cfg.room;
+        await this.end("idle");
+        // The Lobby hears, for a feed only it and its sender know of (an
+        // Imperial server's): a lobby room's games ask again by themselves.
+        if (this.env && this.env.LOBBY) {
+            try {
+                await this.env.LOBBY.get(this.env.LOBBY.idFromName("lobby")).feedEnded(room, "idle");
+            } catch (e) {
+                console.log(`feed: room ${room}: the lobby didn't hear it ended: ${e && e.message || e}`);
+            }
+        }
     }
 
     // What the feed holds, for tests and the log.
@@ -497,7 +516,8 @@ export class Feed extends DurableObject {
             return;
         }
         const data = new Uint8Array(message);
-        if (data.length < 2 || data.length > MAX_CHUNK || data[0] > KIND_KEY_MORE) {
+        const top = this.cfg && this.cfg.wide && s.seat === SEAT_HOST ? KIND_WIDE : KIND_KEY_MORE;
+        if (data.length < 2 || data.length > MAX_CHUNK || data[0] > top) {
             this.closeWs(ws, 1003, "bad chunk");
             return;
         }

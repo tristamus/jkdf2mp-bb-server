@@ -42,7 +42,8 @@ see Address below), with nothing running at home. It speaks the same protocol, s
 - When a game leaves a match, its page posts a summary of it to `/summary`: counts only, with no
   names, kept for three months (see Match summaries below).
 - `/imperial-games` gives the page the games on the Imperial Network Protocol relay (sithmartyr's),
-  to show beside the lobby's, outside the lobby itself (see Imperial relay games below).
+  to show beside the lobby's, outside the lobby itself (see Imperial relay games below), and
+  `/imperial-feed` lets a dedicated server there send its match's feed for pages to watch.
 
 ## Free plan limits
 
@@ -826,6 +827,23 @@ node test/imperial-route.mjs http://127.0.0.1:8797 8799
 ```
 
 With the real relay: `npx wrangler dev`, then http://127.0.0.1:8787/imperial-games.
+
+### Watching an Imperial server's match
+
+A dedicated server on the relay can send its match's feed here, so pages watch it as they watch a
+lobby room's (`src/imperial-feed.js`). Only servers named in the `IMPERIAL_FEED_KEYS` secret may,
+one to a line: `<key> <game> <a.b.c.d:port> <name>`, the key 32 to 64 hex digits that only that
+server's owner gets. Set it with `npx wrangler secret put IMPERIAL_FEED_KEYS` (and `--env beta`);
+without it `/imperial-feed` answers 404. The server sends `POST /imperial-feed` with
+`Authorization: Bearer <key>` and `{"episode", "map", "delay"}` when a match starts, and gets
+`{"room", "token", "url", "delay"}` (the delay 30 to 300 s); `{"end": true}` ends its feed. It sends
+to `url` as a host's game does (`src/feed.js`), and its players' messages as kind 3, each with the
+u32 id of who sent it, since relay player ids don't fit the feed's seat. The lobby's status lists
+each such feed in `imp`, by the server's `sid` (which `/imperial-games` gives its card), so the page
+can put Watch on the card; the feed's room number comes from the lobby's own count. A feed nothing
+is sent to for 10 minutes ends itself and is no longer listed.
+
+`node test/imperial-feed.mjs` checks it.
 
 ## The Level Library
 
