@@ -28,8 +28,10 @@
 //     anon: 1,               its player asked not to be recorded by name
 //     idle: 1,               its player isn't playing (a host that only serves)
 //     build: "<commit>",     the engine's build
-//     rules: { mode, sl, tl },   the host's: the game's multiplayer mode
-//                            flags, score limit and time limit (minutes)
+//     rules: { mode, sl, tl, duels },   the host's: the game's multiplayer
+//                            mode flags, score limit and time limit
+//                            (minutes), and duels: 1 when its host allows
+//                            private duels (Host > Advanced)
 //     ev: [[n, ago, victim, killer, kind], ...],
 //                            the kills it has seen since its last report: n
 //                            counts them from 1 in this level, ago is ms
@@ -482,6 +484,8 @@ export function cleanReport(b64) {
     if (isObject(r.rules)) {
         out.rules = { mode: whole(r.rules.mode, 0xffffff) ?? 0, sl: whole(r.rules.sl, 99999) ?? 0,
                       tl: whole(r.rules.tl, 99999) ?? 0 };
+        if (r.rules.duels === 1)
+            out.rules.duels = 1;
     }
     if (Array.isArray(r.ev)) {
         for (const e of r.ev.slice(0, MAX_EVENTS)) {
@@ -552,6 +556,7 @@ function mapFile(map) {
 //                            limit is up tl minutes after that)
 //     over,                  when its level ended, once it has
 //     pl: { i, n, loop, next },   the host's playlist, when it hosts one
+//     duels: 1,              its host allows private duels
 //     nocount: "password" | "coop",   why it won't count for standings, or
 //     count: 120,            how long it has to run to (what else it takes
 //                            is only known at its end: buildRecord)
@@ -582,6 +587,8 @@ export function liveView(m, over = 0) {
         out.over = Math.round(over);
     if (m.pl)
         out.pl = { ...m.pl };
+    if (r.duels)
+        out.duels = 1;
     if (m.locked)
         out.nocount = "password";
     else if (coopLevel(m.game, m.map, m.mod, m.episode))

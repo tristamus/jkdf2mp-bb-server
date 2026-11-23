@@ -2006,6 +2006,13 @@ await check("the page's status has a room's match as it's played: its rules, clo
     await w.settle();
     live = (await w.status()).games[0].live;
     assert.deepEqual([live.mode, live.sb[0][1]], [0x18, 3], "not 99");
+    assert.equal("duels" in live, false, "no private duels unless the host says");
+    await K.report({ rules: { mode: 0x18, sl: 1, tl: 1, duels: 1 } });
+    await w.settle();
+    assert.equal("duels" in (await w.status()).games[0].live, false, "nor from a joiner");
+    await H.report({ rules: { mode: 0x18, sl: 20, tl: 15, duels: 1 } });
+    await w.settle();
+    assert.equal((await w.status()).games[0].live.duels, 1, "its host allows private duels");
     // A playlist, as the host says.
     await H.report({ pl: { i: 1, n: 3, loop: 1, next: "Bespin Mining Station" } });
     await w.settle();
@@ -2169,6 +2176,9 @@ await check("a report's playlist and clock are taken as they should be, and noth
     assert.equal(rep({ pl: { i: 0, n: 0 } }).pl, null);
     assert.equal(rep({ pl: [1, 2] }).pl, null);
     assert.deepEqual(rep({ pl: { i: 0, n: 2, loop: true, next: 5 } }).pl, { i: 0, n: 2, loop: 0, next: "" });
+    assert.deepEqual(rep({ rules: { mode: 0x18, sl: 20, tl: 15, duels: 1 } }).rules, { mode: 0x18, sl: 20, tl: 15, duels: 1 });
+    for (const duels of [true, 2, "1", 0, null])
+        assert.deepEqual(rep({ rules: { mode: 0x18, sl: 20, tl: 15, duels } }).rules, { mode: 0x18, sl: 20, tl: 15 }, String(duels));
 });
 
 // ---- Screenshots on match pages (src/ladder-shots.js).
