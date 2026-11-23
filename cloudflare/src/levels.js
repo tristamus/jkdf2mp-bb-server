@@ -137,6 +137,18 @@
 //
 //   GET /levels/mods/all/jk1.json, /levels/mods/all/mots.json
 //
+// jkdf2.net's .7z and .rar files, and its loose GOBs (.gob, .goo), are taken
+// too since kit 184 (Antonio, 2026-11-22: "Yes, add .7z and .rar"): each is
+// made into a zip (src/levels-unpack.js), which is what the library keeps
+// and serves for it, as for any other (its index entry's z is still the
+// file's own name), with no 3D data (Massassi's preview opens only zips).
+// An archive is unpacked in a wasm memory of
+// LEVELS_UNPACK_MB (UNPACK_MB when it isn't set): one that needs more is
+// "big" (its err says so, with the MB it had), and asked for again only once
+// that's raised past it; a damaged one, or one locked with a password, is
+// "bad". One that stopped the job twice while it was unpacking (a Durable
+// Object out of memory or time, say: "unpacking:<id>" in the kv) is "big" too.
+//
 // Variables (wrangler.toml): LEVELS_FETCH = "0" stops the job (what it has
 // stays served); LEVELS_PREVIEW = "0" stops it getting 3D data, and
 // LEVELS_PREVIEW_GB (3 when it isn't set) once it has that much of it;
@@ -250,6 +262,17 @@ const DF2_PER_DAY = null;
 // jkdf2.net's zips have Massassi's MAX_ZIP since 2026-11-17 (Antonio: "Lift both
 // caps"); LEVELS_DF2_MAX_MB sets a lower one. It was 32.
 const DF2_MAX_MB = null;
+// jkdf2.net's files the job takes: zips, and .7z, .rar and loose GOBs, which
+// it makes into zips (src/levels-unpack.js, loaded only for one of them).
+const DF2_FILES = /\.(zip|7z|rar|gob|goo)$/i;
+const PACKED = /\.(7z|rar|gob|goo)$/i;
+const ARCHIVE = /\.(7z|rar)$/i;
+// The wasm memory an archive is unpacked in, MB (LEVELS_UNPACK_MB): the
+// archive and what unpacking it takes. A Durable Object has 128 MB; a 24 MB
+// .7z with a 32 MB dictionary took 64.
+const UNPACK_MB = 80;
+const unpackBig = mb => `too big to unpack here (${mb} MB)`;
+const UNPACK_BIG = /^too big to unpack here \((\d+) MB\)/;
 // A Massassi level whose zip is in one of these states has none in the
 // library, so a zip of the same name on jkdf2.net is still worth having.
 const MAS_LOST = ["gone", "none", "error", "bad"];
@@ -545,6 +568,12 @@ export class LevelJob extends DurableObject {
             this.kv("caps_lifted", 1);
             this.dirty();
         }
+        // Once, when the job began to take jkdf2.net's .7z, .rar and loose
+        // GOBs (kit 184): its folders read again now, not in up to a day.
+        if (this.kv("df2_packed") !== "1") {
+            this.sql.exec("DELETE FROM kv WHERE k LIKE 'list_at:df2%'");
+            this.kv("df2_packed", 1);
+        }
     }
 
     // Each level's place in its own game's list (and priority), most
@@ -781,6 +810,22 @@ export class LevelJob extends DurableObject {
         return mb ? Math.min(MAX_ZIP, mb * 1024 * 1024) : MAX_ZIP;
     }
 
+    unpackMb() {
+        return Number(this.env.LEVELS_UNPACK_MB) || UNPACK_MB;
+    }
+
+    unpacked(row) {
+        this.sql.exec("DELETE FROM kv WHERE k = ?", "unpacking:" + row.id);
+    }
+
+    // jkdf2.net's file that's too big to unpack: "big", with why.
+    unpackTooBig(row, now, why) {
+        const mb = this.unpackMb();
+        this.sql.exec("UPDATE lv SET zip_st = 'big', zip_at = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
+                      now, why ? `${unpackBig(mb)}: ${why}` : unpackBig(mb), row.id);
+        this.dirty();
+    }
+
     // jkdf2.net's zips asked for today (UTC).
     df2Today() {
         return this.kv("df2_day") === new Date().toISOString().slice(0, 10) ? Number(this.kv("df2_today") || 0) : 0;
@@ -936,7 +981,7 @@ export class LevelJob extends DurableObject {
             this.kv("list_at:" + key, now - DF2_LIST_MS + HOUR);
             throw e;
         }
-        const files = parseArchive(html).filter(f => /\.zip$/i.test(f.name));
+        const files = parseArchive(html).filter(f => DF2_FILES.test(f.name));
         this.kv("list_at:" + key, now);
         this.kv("list_n:" + key, files.length);
         if (list.subs && !f0.sub)
@@ -945,7 +990,7 @@ export class LevelJob extends DurableObject {
         if (!files.length && !f0.sub)
             this.kv("last_error", `${new Date().toISOString()} no zips in jkdf2.net's ${list.dir} folder (has its page changed?)`);
         const mas = this.massassiZips();
-        const rows = this.sql.exec(`SELECT id, zip_url, size_txt, zip_st FROM lv WHERE id > ${DF2_ID}`).toArray();
+        const rows = this.sql.exec(`SELECT id, zip_url, size_txt, zip_st, err FROM lv WHERE id > ${DF2_ID}`).toArray();
         const have = new Map(rows.map(r => [r.zip_url, r]));
         const copies = new Set(rows.map(r => zipKey(nameOf(r.zip_url)) + "|" + r.size_txt));
         let next = rows.reduce((n, r) => Math.max(n, r.id), DF2_ID) + 1;
@@ -956,8 +1001,11 @@ export class LevelJob extends DurableObject {
             const onMas = onMassassi(mas, f.name, f.size, list);
             const row = have.get(zip);
             if (row) {
-                // A new file there, or one that waited for the size cap.
-                const again = row.size_txt !== f.size || (row.zip_st === "big" && sizeBytes(f.size) <= max);
+                // A new file there, or one that waited for the size cap (an
+                // archive too big to unpack: for LEVELS_UNPACK_MB).
+                const unpack = UNPACK_BIG.exec(row.err || "");
+                const again = row.size_txt !== f.size || (row.zip_st === "big" && sizeBytes(f.size) <= max &&
+                                                          (!unpack || Number(unpack[1]) < this.unpackMb()));
                 if (onMas && (row.zip_st == null || again))
                     this.sql.exec("UPDATE lv SET size_txt = ?, zip_st = 'dupe', zip_at = ?, info = ? WHERE id = ?",
                                   f.size, now, JSON.stringify({ name: f.name, mas: onMas }), row.id);
@@ -1146,6 +1194,22 @@ export class LevelJob extends DurableObject {
             this.sql.exec("UPDATE lv SET zip_st = 'full', zip_at = ? WHERE id = ?", now, row.id);
             return df2 ? LOCAL : undefined;
         }
+        // jkdf2.net's .7z, .rar or loose GOB, made into a zip: an archive in
+        // LEVELS_UNPACK_MB of memory, so not one that's bigger than that, nor
+        // one that stopped the job twice as it was unpacked.
+        const name = nameOf(row.zip_url);
+        const packed = df2 && PACKED.test(name);
+        const archive = packed && ARCHIVE.test(name);
+        const heap = this.unpackMb() * 1024 * 1024;
+        // Each time it's unpacked counts in the kv until it's done: what's
+        // there before is the times the job stopped as it did.
+        const stopKey = "unpacking:" + row.id;
+        const stopped = archive ? Number(this.kv(stopKey) || 0) : 0;
+        if (archive && ((declared && declared > heap) || stopped >= 2)) {
+            this.unpacked(row);
+            this.unpackTooBig(row, now, stopped >= 2 ? `the job stopped ${stopped} times as it unpacked it` : null);
+            return LOCAL;
+        }
         if (df2) {
             // Massassi's, by name, since its list was read: not asked for.
             const onMas = onMassassi(this.massassiZips(), row.name, row.size_txt, BY_CAT[row.cat]);
@@ -1163,10 +1227,18 @@ export class LevelJob extends DurableObject {
             this.kv("df2_today", Number(this.kv("df2_today") || 0) + 1);
             this.kv("df2_total", Number(this.kv("df2_total") || 0) + 1);
         }
+        if (archive)
+            this.kv(stopKey, stopped + 1);
         let res;
         try {
-            res = await this.get(row.zip_url, df2 ? cap + sizeSlack(row.size_txt) : MAX_ZIP);
+            res = await this.get(row.zip_url, archive ? heap + sizeSlack(row.size_txt) : df2 ? cap + sizeSlack(row.size_txt) : MAX_ZIP);
         } catch (e) {
+            if (archive)
+                this.unpacked(row);
+            if (e.tooBig && archive) {
+                this.unpackTooBig(row, now);
+                return;
+            }
             if (e.tooBig) {
                 this.sql.exec("UPDATE lv SET zip_st = 'big', zip_at = ?, tries = 0, retry_at = NULL, err = NULL WHERE id = ?", now, row.id);
                 this.dirty();
@@ -1181,11 +1253,42 @@ export class LevelJob extends DurableObject {
             throw e;
         }
         const key = `zip/${row.id}.zip`;
-        const name = nameOf(row.zip_url);
         const len = Number(res.headers.get("Content-Length") || 0);
         const memZip = Number(this.env.LEVELS_MEM_ZIP) || MEM_ZIP;
-        let zip, sha, size;
-        if (len && len > memZip) {
+        let zip, sha, size, from = null;
+        if (packed) {
+            // Made into a zip as it comes: into the bucket, or held when it's small.
+            const { unpack } = await import("./levels-unpack.js");
+            let out;
+            try {
+                out = await unpack(res, { name, bucket: this.env.LEVELS, key, meta: { name }, maxHeap: heap });
+            } catch (e) {
+                if (e.tooBig) {
+                    this.unpackTooBig(row, now, e.message);
+                    return;
+                }
+                if (!e.bad)
+                    throw e;
+                this.sql.exec("UPDATE lv SET zip_st = 'bad', zip_at = ?, info = ?, tries = 0, retry_at = NULL, err = ? WHERE id = ?",
+                              now, JSON.stringify({ name, bad: e.message }), e.message, row.id);
+                if (isMod(row))
+                    this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ? WHERE id = ?", now, row.id);
+                this.dirty();
+                return;
+            } finally {
+                if (archive)
+                    this.unpacked(row);
+            }
+            ({ sha, size } = out);
+            from = { size: out.archive.size, sha256: out.archive.sha256, files: out.files, unpacked: out.unpacked };
+            if (out.bytes) {
+                zip = memReader(out.bytes);
+                zip.stream = async (at, n) => new Blob([out.bytes.subarray(at, at + n)]).stream();
+                zip.bytes = out.bytes;
+            } else {
+                zip = this.bucketZip(key, size);
+            }
+        } else if (len && len > memZip) {
             // Into the bucket as it comes, then read from there in parts.
             const h = hashing();
             const body = typeof FixedLengthStream === "function"
@@ -1193,10 +1296,7 @@ export class LevelJob extends DurableObject {
             await this.env.LEVELS.put(key, body, { httpMetadata: { contentType: "application/zip" } });
             sha = await h.sha();
             size = h.size();
-            zip = { size, read: async (at, n) => {
-                const o = await this.env.LEVELS.get(key, { range: { offset: at, length: Math.max(0, Math.min(n, size - at)) } });
-                return new Uint8Array(await o.arrayBuffer());
-            }, stream: async (at, n) => (await this.env.LEVELS.get(key, { range: { offset: at, length: n } })).body };
+            zip = this.bucketZip(key, size);
         } else {
             const bytes = new Uint8Array(await res.arrayBuffer());
             if (bytes.length > MEM_ZIP * 2)
@@ -1289,6 +1389,9 @@ export class LevelJob extends DurableObject {
                 id: row.id, title: row.title, author: row.author, desc: row.descr || "",
                 massassi: df2 ? undefined : `${MASSASSI}/levels/files/${row.id}.shtml`,
                 from: df2 ? "jkdf2.net" : undefined, url: df2 ? row.zip_url : undefined, zip: name, size, sha256: sha,
+                // A .7z, .rar or GOB made into this zip: the file's own size
+                // and SHA-256, and the files and bytes it unpacked to.
+                packed: from || undefined,
                 date: found.date, files: found.files, texts: found.texts, gobs: info.gobs,
             };
             if (mod)
@@ -1309,10 +1412,24 @@ export class LevelJob extends DurableObject {
         this.sql.exec(
             `UPDATE lv SET zip_st = ?, zip_at = ?, zip_size = ?, zip_sha = ?, info = ?, tries = 0, retry_at = NULL, err = ?
              WHERE id = ?`, status, now, size, sha, JSON.stringify(info), found.bad || null, row.id);
-        // Mods have no 3D data: no level to show (and no address for the preview).
-        if (mod)
+        // Mods have no 3D data: no level to show (and no address for the
+        // preview). Nor has a .7z, .rar or loose GOB: Massassi's preview opens
+        // only zips, and would download it from jkdf2.net again.
+        if (mod || packed)
             this.sql.exec("UPDATE lv SET pv_st = 'none', pv_at = ? WHERE id = ?", now, row.id);
         this.dirty();
+    }
+
+    // A zip in the bucket, read from there in parts.
+    bucketZip(key, size) {
+        return {
+            size,
+            read: async (at, n) => {
+                const o = await this.env.LEVELS.get(key, { range: { offset: at, length: Math.max(0, Math.min(n, size - at)) } });
+                return new Uint8Array(await o.arrayBuffer());
+            },
+            stream: async (at, n) => (await this.env.LEVELS.get(key, { range: { offset: at, length: n } })).body,
+        };
     }
 
     // The level in the library (not id) that has every one of these GOBs
@@ -1806,6 +1923,10 @@ export class LevelJob extends DurableObject {
             `SELECT game, cat IN (${DF2_MOD_SQL}) AS mods, SUM(json_extract(info, '$.mas') IS NOT NULL) AS by_name,
                     SUM(json_extract(info, '$.same') IS NOT NULL) AS by_gobs, SUM(json_extract(info, '$.same_zip') IS NOT NULL) AS by_zip
              FROM lv WHERE id > ${DF2_ID} AND zip_st = 'dupe' GROUP BY game, mods`).toArray();
+        // Its .7z, .rar and loose GOBs, by state (null: waiting).
+        const packed = this.sql.exec(
+            `SELECT zip_st AS st, COUNT(*) AS n FROM lv WHERE id > ${DF2_ID} AND (lower(zip_url) LIKE '%.7z' OR lower(zip_url) LIKE '%.rar'
+                 OR lower(zip_url) LIKE '%.gob' OR lower(zip_url) LIKE '%.goo') GROUP BY zip_st ORDER BY zip_st`).toArray();
         return {
             on: this.on(), alarm: await this.ctx.storage.getAlarm(), pace_ms: this.pace(),
             backoff_until: Number(this.kv("backoff_until") || 0) || null, fails: Number(this.kv("fails") || 0),
@@ -1820,7 +1941,9 @@ export class LevelJob extends DurableObject {
                 on: this.df2On(), mods: this.df2ModsOn(), per_day: this.df2PerDay(), max_mb: this.df2MaxBytes() / 1048576,
                 today: this.df2Today(), total: Number(this.kv("df2_total") || 0),
                 backoff_until: Number(this.kv("df2_backoff_until") || 0) || null, fails: Number(this.kv("df2_fails") || 0),
-                dupes,
+                dupes, unpack_mb: this.unpackMb(), packed,
+                // Archives being unpacked, or that stopped the job as they were: [id, times].
+                unpacking: this.sql.exec("SELECT k, v FROM kv WHERE k LIKE 'unpacking:%'").toArray().map(r => [Number(r.k.slice(10)), Number(r.v)]),
             },
         };
     }
