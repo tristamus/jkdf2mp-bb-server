@@ -373,7 +373,8 @@ it, a key D1 has never had becomes another key of a record when it plays under t
 | `/match/<id>` | A match: scoreboard, who killed whom, mod and map, and how many games reported it |
 | `/matches` | The matches, newest first; `?game=jk` or `mots` for one game's |
 | `/players` | The standings of a game: `?game=`, `?period=week`, `month` or `all` (all three without), `?sort=` a column, `?dir=asc` |
-| `/player/<id>` | A player: what they did in a game over a period, their rivals, what they play and their latest matches |
+| `/player/<id>` | A player: what they did in a game over a period and their records in it, their form and the days they played lately, their rivals, what they play, the screenshots they took and their latest matches |
+| `/player/<id>/shots` | A page of the screenshots a player took (`?game=`, `?page=`): their page's Screenshots section alone, for its Newer and Older |
 | `/ladder/recent` | For the landing page, as JSON: the latest matches of each game, each game's top ten over each period, and who's asking |
 | `/ladder/key` | `POST`: the page's player's key |
 
@@ -423,7 +424,24 @@ but a kill to death ratio takes its place only with 30 kills and deaths or more 
 A player's page has their totals for a game and a period, who killed them most and whom they killed
 most (from their latest 50 matches of the period), how their kills came, the levels and mods they
 play, and their latest ten matches. A record taken off the pages (`hidden`) answers 404, and the id
-of a key that was joined to a record goes to that record's page.
+of a key that was joined to a record goes to that record's page. It also has:
+
+- **Personal records** in the game and period, each linked to the match it was set in: the most
+  kills in a match, the longest run of kills in one life, the best K/D of a match with 10 kills or
+  more (`KD_RECORD_KILLS`), and the longest match. Of two matches the same, the latest holds it.
+- **Form**, whatever the period: their latest ten matches that count in the game (`FORM_MATCHES`),
+  oldest first, each a bar as tall as its kills (gold for a win) over the place they finished in,
+  and how many matches of the game they played on each of the last 14 days (`ACTIVE_DAYS`), counted
+  or not, but not one with a password. A day there starts at 3 in the morning Pacific time, as a
+  week does, so a match after midnight is on the evening's day.
+- **Screenshots**, with the lobby's pictures on (`SHOTS`): the ones they took in the game's matches,
+  twelve a page (`PLAYER_SHOTS`), the newest match's first, each opening full size on the page and
+  naming its match, with how many there are in all. Not the final scoreboards, which are the game's,
+  and none of a hidden picture or of a match that's hidden or had a password. Their own page with
+  none yet says how to take one; anyone else's shows nothing. With more than a page, Newer and Older
+  get the next page alone from `/player/<id>/shots?game=&page=` and the page's script puts it in place
+  of the section, so the rest of the page stays as it is (the address gets `?shots=<page>`). Without
+  the script, the same links load the player's page with that page of pictures.
 
 The landing page shows the top ten of each game in a section under the rooms and the top five in a
 box in its sidebar, from `/ladder/recent`. That answer also says who's asking, by the `jkpk` cookie:
@@ -434,7 +452,8 @@ Adding up the standings reads every match's rows, and D1 counts the rows a query
 added up once and kept in D1, in `ladder_cache`: six rows, one for each game and period, under a
 stamp of what they depend on (the latest match, when the week and the month began, and the day). A
 page reads the six rows, and the first page after a match is saved adds them up again. A player's
-page reads, besides, that player's own matches of the period.
+page reads, besides, that player's own matches of the period, their latest ten that count, those of
+the last 14 days, and their own pictures.
 
 So a change made by hand doesn't show in the standings at once. It shows after the next saved
 match, the next day (UTC), or at once after:

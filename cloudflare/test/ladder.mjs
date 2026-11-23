@@ -363,6 +363,16 @@ async function playMatch(w, players, kills, opts = {}) {
 }
 
 // A page's text: its tags gone, its spaces single.
+// The day a time was on as the pages count days, which start at three in the
+// morning Pacific time, and the day it was there by the clock.
+function dayName(ms) {
+    return new Date(ms - 3 * 60 * 60 * 1000).toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" });
+}
+
+function clockDay(ms) {
+    return new Date(ms).toLocaleDateString("en-US", { timeZone: "America/Los_Angeles", month: "short", day: "numeric" });
+}
+
 function textOf(html) {
     return html.replace(/<(script|style)[^>]*>[^]*?<\/\1>/g, "").replace(/<[^>]+>/g, " ").replace(/&middot;/g, "|")
         .replace(/&nbsp;/g, " ").replace(/&dagger;/g, "+").replace(/&times;/g, "x").replace(/&[a-z]+;/g, " ").replace(/\s+/g, " ");
@@ -1652,9 +1662,34 @@ await check("the standings add up the matches that count, one game and one perio
     assert.equal(page.body.includes("<b>Boc"), false);
     assert.equal(/ style="/.test(page.body), false);
     assert.equal(/ on[a-z]+="/.test(page.body), false);
-    // Without a game it's the one they played last; this week Kyle has one match.
-    const now = textOf((await w.page(`/player/${kyle}`)).body);
+    // Their records over the period, each with its match: a K/D takes a match
+    // of ten kills or more, and of two the same the latest is the record.
+    assert.match(text, /Personal records Most kills 3 Nar Shaddaa Loading Terminal , [^|]+ \| 1st of 3 Longest run 3 Nar Shaddaa Loading Terminal , [^|]+ \| in one life Best K\/D None yet with 10 kills or more in a match Longest match 3 min Canyon Oasis , [^|]+ From the 2 matches that count, all time\./);
+    assert.ok(page.body.includes(`<td class="where"><a href="/match/${second}">Canyon Oasis</a>, <time`));
+    // Their form: their latest that count, oldest first, the kills in each
+    // over their place, gold for a win; a tie for first isn't one.
+    const barsOf = html => [...html.matchAll(/<a href="\/match\/(\d+)" title="[^"]*"><span class="kbar (h\d+)( won)?"><\/span><span\s+class="kn">(\d+)<\/span><span class="place (p\d|px)">(\d+)<\/span>/g)]
+        .map(m => [Number(m[1]), m[2], !!m[3], Number(m[4]), m[5], Number(m[6])]);
+    assert.deepEqual(barsOf(page.body), [[first, "h12", false, 3, "p1", 1], [second, "h8", true, 2, "p1", 1]]);
+    assert.ok(text.includes("Form 1 win in the last 2 matches that count | kills in each, oldest first"), text);
+    // And the days they played: the last 14, today last, with the short match
+    // and without the one with a password.
+    const daysOf = html => [...html.matchAll(/<li class="l(\d)" title="([A-Z][a-z]{2} \d+): (\d+) match/g)].map(m => [Number(m[1]), m[2], Number(m[3])]);
+    const days = daysOf(page.body);
+    assert.equal(days.length, 14);
+    assert.equal(days.at(-1)[1], dayName(Date.now()));
+    assert.equal(days.reduce((n, d) => n + d[2], 0), 3);
+    assert.ok(days.every(d => d[0] === (d[2] ? 1 : 0)));
+    assert.ok(text.includes(`Played ${days.filter(d => d[2]).length} of the last 14 days`));
+    // Without a game it's the one they played last; this week Kyle has one
+    // match, and their form is the same whatever the period.
+    const thisWeek = await w.page(`/player/${kyle}`);
+    const now = textOf(thisWeek.body);
     assert.ok(now.includes("1st of 2 this week | Jedi Knight"), now.slice(0, 900));
+    assert.match(now, /Most kills 2 Canyon Oasis , [^|]+ \| 1st of 2 Longest run 2 Canyon Oasis/);
+    assert.ok(now.includes("From the one match that counts, this week."));
+    assert.deepEqual(barsOf(thisWeek.body), barsOf(page.body));
+    assert.deepEqual(daysOf(thisWeek.body), days);
     assert.ok(textOf((await w.page(`/player/${maw}?game=mots`)).body).includes("2nd of 2 this week | Mysteries of the Sith"));
     const none = await w.page(`/player/${jan}?game=jk`);
     assert.ok(textOf(none.body).includes("Jan has no Jedi Knight matches that count all time."));
@@ -1685,6 +1720,60 @@ await check("the standings add up the matches that count, one game and one perio
     env.ASSETS = { fetch: async () => new Response("asset", { status: 200 }) };
     assert.equal((await w.page("/player/abc")).body, "asset");
     assert.equal((await w.page("/playersx")).body, "asset");
+});
+
+await check("a player's page has their records, their latest ten matches that count, and the days they played on", async () => {
+    const env = newEnv();
+    const w = await new World(env).start();
+    // From twenty to two in the morning, Pacific time.
+    const clock = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", minute: "numeric", hourCycle: "h23" });
+    const [h, m] = clock.formatToParts(new Date(Date.now())).filter(p => p.type !== "literal").map(p => Number(p.value));
+    skew += ((100 - (h * 60 + m)) + 1440) % 1440 * MIN;
+    const players = [["Kyle_K", KEYS.kyle], ["Maw", KEYS.maw]];
+    // 10 kills to 2 deaths; 12 to 6 in a longer match; 9 to none, too few
+    // kills for a K/D record; then eight that Maw wins, after three o'clock.
+    const most = await playMatch(w, players, [...Array(10).fill([2, 1]), [1, 2], [1, 2]], { title: "Ten" });
+    const longer = await playMatch(w, players, Array(6).fill([[2, 1], [2, 1], [1, 2]]).flat(), { title: "Twelve", secs: 600 });
+    const clean = await playMatch(w, players, Array(9).fill([2, 1]), { title: "Nine" });
+    const night = Date.now();
+    skew += 60 * MIN;
+    const lost = [];
+    for (let n = 0; n < 8; n++)
+        lost.push(await playMatch(w, players, [[1, 2]], { title: "Lost" }));
+    assert.ok(most && longer && clean && lost.every(Boolean));
+    assert.equal(env.LADDER.rows("SELECT COUNT(*) AS n FROM matches WHERE counted = 1")[0].n, 11);
+    const kyle = env.LADDER.rows("SELECT id FROM players WHERE name = 'Kyle_K'")[0].id;
+
+    const page = await w.page(`/player/${kyle}?game=jk&period=all`);
+    const text = textOf(page.body);
+    assert.match(text, /Personal records Most kills 12 Twelve , [^|]+ \| 1st of 2 Longest run 10 Ten , [^|]+ \| in one life Best K\/D 5\.00 Ten , [^|]+ \| 10 kills, 2 deaths Longest match 10 min Twelve , [^|]+ From the 11 matches that count, all time\./, text);
+    for (const [label, id] of [["Most kills", longer], ["Longest run", most], ["Best K/D", most], ["Longest match", longer]])
+        assert.match(page.body, new RegExp(`<td class="soft">${label}</td><td class="num"><b>[^<]+</b></td><td class="where"><a href="/match/${id}">`), label);
+    // The ten latest, oldest first: the bars' heights go by the most kills.
+    const bars = [...page.body.matchAll(/<a href="\/match\/(\d+)" title="([^"]*)"><span class="kbar (h\d+)( won)?"><\/span><span\s+class="kn">(\d+)<\/span><span class="place (p\d|px)">(\d+)<\/span>/g)];
+    assert.deepEqual(bars.map(b => Number(b[1])), [longer, clean, ...lost]);
+    assert.deepEqual(bars.map(b => [b[3], !!b[4], Number(b[5]), b[6]]),
+                     [["h12", true, 12, "p1"], ["h9", true, 9, "p1"], ...Array(8).fill(["h0", false, 0, "p2"])]);
+    assert.ok(text.includes("Form 2 wins in the last 10 matches that count"));
+    // A match before three in the morning is the evening's.
+    assert.notEqual(dayName(night), clockDay(night));
+    assert.equal(bars[0][2], `Twelve, ${dayName(night)}: 1st of 2, 12 kills`);
+    const days = [...page.body.matchAll(/<li class="l(\d)" title="([A-Z][a-z]{2} \d+): (\d+) match/g)].map(d => [Number(d[1]), d[2], Number(d[3])]);
+    assert.deepEqual(days.slice(-2), [[2, dayName(night), 3], [3, dayName(Date.now()), 8]]);
+    assert.deepEqual(days.slice(0, -2).map(d => d[2]), Array(12).fill(0));
+    assert.ok(text.includes("Played 2 of the last 14 days"));
+    assert.equal(/ style="/.test(page.body), false);
+    // Two weeks on, the days are empty and the form is the same.
+    skew += 14 * 24 * 60 * MIN;
+    const later = await w.page(`/player/${kyle}?game=jk&period=all`);
+    assert.ok(textOf(later.body).includes("No matches in the last 14 days"));
+    assert.equal(later.body.match(/<span class="kbar /g).length, 10);
+    // Somebody with no matches that count has no records or form.
+    env.LADDER.db.exec("UPDATE matches SET counted = 0");
+    env.LADDER.db.exec("DELETE FROM ladder_cache");
+    const none = await w.page(`/player/${kyle}?game=jk&period=all`);
+    assert.equal(none.status, 200);
+    assert.equal(/Personal records|class="form"/.test(none.body), false);
 });
 
 await check("a browser never seen before joins the record that has its name, and can be taken off it again", async () => {
@@ -2295,6 +2384,10 @@ await check("without the bucket the lobby takes no pictures, and its pages are a
         assert.equal(page.body.includes("Screenshots"), false);
         assert.equal(page.body.includes("og:image"), false);
         assert.match(page.headers["Content-Security-Policy"], /; img-src data:;/);
+        const theirs = await w.page("/player/1?game=jk", { Cookie: `jkpk=${KEYS.maw}` });
+        assert.equal(theirs.body.includes("Screenshots"), false);
+        assert.match(theirs.headers["Content-Security-Policy"], /; img-src data:;/);
+        assert.equal((await w.page("/player/1/shots?game=jk")).status, 404);
     }
     // With the bucket, the landing page hears the limits.
     const on = await new World(shotEnv()).start();
@@ -2383,13 +2476,86 @@ await check("a player's picture goes on the page of the match it was taken in, o
     // A link to the match shows its first picture where it's pasted.
     assert.ok(html.includes(`<meta property="og:image" content="https://lobby.test/shot/${sent.id}.jpg">`));
 
-    // Hidden by hand, a picture is off the page and no longer served; a
+    // Their players' pages: each has the pictures they took, going to the
+    // match, and loads pictures from this site only.
+    const mine = await w.page("/player/1?game=jk"), mineText = textOf(mine.body);
+    assert.match(mine.headers["Content-Security-Policy"], /; img-src 'self' data:;/);
+    assert.ok(mineText.includes("Screenshots 1 from 1 match"), mineText);
+    assert.ok(mine.body.includes(`<a href="/shot/${sent.id}.jpg" data-shot="0" data-what="Nar Shaddaa Loading Terminal \u00b7 2:16 in"><img`));
+    assert.ok(mine.body.includes(`src="/shot/${sent.id}.t.jpg" width="480" height="270"`));
+    assert.ok(mine.body.includes('alt="Screenshot by Maw in Nar Shaddaa Loading Terminal, 2:16 into the match"'));
+    assert.ok(mine.body.includes(`<span class="who"><b><a href="/match/${id}">Nar Shaddaa Loading Terminal</a></b> <span class="at">2:16 in</span></span>`));
+    assert.equal(mine.body.includes(bocs.id), false, "only their own");
+    assert.ok(mine.body.includes('<dialog class="shot-view" id="shot-view"'));
+    assert.ok(mineText.includes("Taken in the game and sent from their own browser; each match's page has the rest of its pictures. To have a picture taken down: example.test/ask"), mineText);
+    assert.equal(/ style="/.test(mine.body), false);
+    assert.equal(/ on[a-z]+="/.test(mine.body), false);
+    assert.equal((await w.page("/player/1?game=mots")).body.includes(sent.id), false, "another game's page has none");
+    const bocPage = await w.page("/player/3?game=jk", { Cookie: `jkpk=${KEYS.boc}` });
+    assert.ok(bocPage.body.includes('alt="Screenshot by &lt;b&gt;Boc`s&lt;/b&gt; in Nar Shaddaa Loading Terminal, 3:00 into the match"'));
+    assert.ok(textOf(bocPage.body).includes("sent from your own browser"));
+    // Kyle took none: nothing on their page, and on their own a word on how.
+    const kyles = await w.page("/player/2?game=jk");
+    assert.equal(kyles.body.includes("Screenshots"), false);
+    assert.match(kyles.headers["Content-Security-Policy"], /; img-src data:;/);
+    const kylesOwn = textOf((await w.page("/player/2?game=jk", { Cookie: `jkpk=${KEYS.kyle}` })).body);
+    assert.ok(kylesOwn.includes("Screenshots None yet. A screenshot you take in the game (F8 or F12) shows up here and on its match's page."), kylesOwn);
+    // With more than it shows, it says so (rows put in by hand).
+    for (let n = 0; n < 12; n++)
+        env.LADDER.db.exec(`INSERT INTO match_shots (id, match_id, slot, player_id, taken, secs, w, h, bytes, thumb_bytes, added_at)
+                            VALUES ('y${n}', ${id}, 0, 1, ${n}, ${10 + n}, 640, 480, 10, 5, 0)`);
+    // With more than a page, a page at a time: the pager's links load the
+    // player's page with the next one, or its section alone for the script.
+    const many = await w.page("/player/1?game=jk&period=all");
+    const tilesOf = html => [...html.matchAll(/<a href="\/shot\/([0-9a-z]+)\.jpg" data-shot=/g)].map(m => m[1]);
+    assert.deepEqual(tilesOf(many.body), [...Array(12).keys()].map(n => `y${n}`), "the first page: twelve, in the order they were taken");
+    assert.ok(textOf(many.body).includes("Screenshots 13 from 1 match"));
+    assert.ok(textOf(many.body).includes("Newer Page 1 of 2 Older"), textOf(many.body));
+    assert.ok(many.body.includes('<span class="off" aria-disabled="true">&lsaquo; Newer</span>'));
+    assert.ok(many.body.includes('<a href="/player/1?game=jk&amp;period=all&amp;shots=2#screenshots" data-shots-page="/player/1/shots?game=jk&amp;period=all&amp;page=2" rel="next">Older &rsaquo;</a>'));
+    assert.ok(textOf(many.body).includes("12 a page, the newest first."));
+    const second = await w.page("/player/1?game=jk&period=all&shots=2");
+    assert.deepEqual(tilesOf(second.body), [sent.id]);
+    assert.ok(second.body.includes('<a href="/player/1?game=jk&amp;period=all#screenshots" data-shots-page="/player/1/shots?game=jk&amp;period=all&amp;page=1" rel="prev">&lsaquo; Newer</a>'));
+    assert.ok(textOf(second.body).includes("Page 2 of 2 Older"));
+    assert.ok(textOf(second.body).includes("Personal records"), "the rest of the page is the same");
+    assert.deepEqual(tilesOf((await w.page("/player/1?game=jk&shots=9")).body), [sent.id], "past the last is the last");
+    assert.deepEqual(tilesOf((await w.page("/player/1?game=jk&shots=x")).body).length, 12);
+    // The section alone: only it, for the page's own script to swap in.
+    const part = await w.page("/player/1/shots?game=jk&period=all&page=2", { Cookie: `jkpk=${KEYS.maw}` });
+    assert.equal(part.status, 200);
+    assert.equal(part.headers["Content-Type"], "text/html; charset=utf-8");
+    assert.equal(part.headers["Cache-Control"], "private, max-age=30");
+    assert.equal(part.headers["Content-Security-Policy"], "default-src 'none'; frame-ancestors 'none'");
+    assert.match(part.body, /^\s*<section class="card wide" id="screenshots">[^]*<\/section>$/);
+    assert.deepEqual(tilesOf(part.body), [sent.id]);
+    assert.ok(textOf(part.body).includes("Page 2 of 2") && textOf(part.body).includes("sent from your own browser"));
+    assert.equal(/<script|<html|<head| style="| on[a-z]+="/.test(part.body), false);
+    assert.deepEqual(tilesOf((await w.page("/player/1/shots?game=jk&page=9")).body), [sent.id]);
+    assert.ok((await w.page("/player/1/shots?game=jk")).body.includes("Page 1 of 2"));
+    // None for a player with none, another game, a record taken off the
+    // pages, or one that isn't there.
+    for (const path of ["/player/2/shots?game=jk", "/player/1/shots?game=mots", "/player/999/shots"])
+        assert.equal((await w.page(path)).status, 404, path);
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE id = 1");
+    assert.equal((await w.page("/player/1/shots?game=jk")).status, 404);
+    env.LADDER.db.exec("UPDATE players SET hidden = 0 WHERE id = 1");
+    env.ASSETS = { fetch: async () => new Response("asset", { status: 200 }) };
+    assert.equal((await w.page("/player/1/shotsx")).body, "asset");
+    assert.equal((await w.page("/player/1/shots/2")).body, "asset");
+    // A page that fits on one has no pager.
+    env.LADDER.db.exec("DELETE FROM match_shots WHERE id LIKE 'y%'");
+    assert.equal((await w.page("/player/1?game=jk")).body.includes('<nav class="shot-pager"'), false);
+
+    // Hidden by hand, a picture is off the pages and no longer served; a
     // hidden match's aren't either.
     env.LADDER.db.exec(`UPDATE match_shots SET hidden = 1 WHERE id = '${bocs.id}'`);
     assert.equal((await w.page(`/shot/${bocs.id}.jpg`)).status, 404);
     assert.equal((await w.page(`/match/${id}`)).body.includes(bocs.id), false);
+    assert.equal((await w.page("/player/3?game=jk")).body.includes(bocs.id), false);
     env.LADDER.db.exec(`UPDATE matches SET hidden = 1 WHERE id = ${id}`);
     assert.equal((await w.page(`/shot/${sent.id}.t.jpg`)).status, 404);
+    assert.equal((await w.page("/player/1?game=jk")).body.includes(sent.id), false);
     assert.equal((await askShot(w, KEYS.maw, 62 * SEC, 1002)).no, "none");
 });
 
@@ -2606,6 +2772,11 @@ await check("the final scoreboard: one a match, taken as its level ended, and no
     assert.ok(html.includes('alt="The final scoreboard, as the game showed it"'));
     assert.ok(text.includes("the final scoreboard is the game's own picture"), text);
     assert.ok(html.includes(`<meta property="og:image" content="https://lobby.test/shot/${final.id}.jpg">`));
+    // A player's page has the pictures they took, and not the game's.
+    const kyles = await w.page("/player/2?game=jk", { Cookie: `jkpk=${KEYS.kyle}` });
+    assert.equal(kyles.body.includes(final.id), false);
+    assert.ok(textOf(kyles.body).includes("Screenshots None yet."));
+    assert.ok((await w.page("/player/1?game=jk")).body.includes(theirs.id));
     // Two sent at the same moment: the table lets one in.
     env.LADDER.db.exec(`DELETE FROM match_shots WHERE id = '${final.id}'`);
     env.SHOTS.slow = 30;
