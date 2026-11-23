@@ -18,7 +18,9 @@
 //                      week, a month or all time (?period=week, month or
 //                      all), by any of its columns (?sort=, ?dir=asc)
 //   GET /player/<id>   a player: what they did in one game over one of those
-//                      periods, who they met most, and their latest matches
+//                      periods and their records in it, who they met most,
+//                      their form and the days they played lately, the
+//                      screenshots they took, and their latest matches
 //
 // Standings and a player's numbers are added up from the matches that count
 // (ladder.js: long enough, confirmed by two games, no password). A week
@@ -70,6 +72,15 @@ const KD_MIN = 30;
 const RIVAL_MATCHES = 50;
 const RIVALS = 6;
 const PLAYER_MATCHES = 10;
+// A player's page: its form (their latest matches that count), the days it
+// shows they played on, the fewest kills a match's K/D record takes, and the
+// screenshots it shows.
+const FORM_MATCHES = 10;
+const ACTIVE_DAYS = 14;
+const KD_RECORD_KILLS = 10;
+const PLAYER_SHOTS = 12;
+// The heights a form bar comes in: the class names it can have (STYLE).
+const FORM_STEPS = 12;
 const HOUR_MS = 60 * 60 * 1000, DAY_MS = 24 * HOUR_MS;
 const MODE_TIME_LIMIT = 0x8;
 const MODE_SCORE_LIMIT = 0x10;
@@ -160,7 +171,7 @@ export async function ladderRoute(request, env, url) {
     const now = Date.now();
     const shots = shotsOn(env);
     const show = () => m ? matchPage(env.LADDER, Number(m[1]), viewer, { shots, origin: url.origin, contact: env.SHOTS_CONTACT || "", now })
-                     : pl ? playerPage(env.LADDER, Number(pl[1]), url, viewer, now)
+                     : pl ? playerPage(env.LADDER, Number(pl[1]), url, viewer, now, { shots, contact: env.SHOTS_CONTACT || "" })
                      : path === "/players" ? playersPage(env.LADDER, url, viewer, now)
                      : path === "/matches" ? matchesPage(env.LADDER, url) : recentMatches(env.LADDER, viewer, now, shots);
     try {
@@ -402,13 +413,11 @@ function shotsCard(shots, rows, names, linked, kills, contact, recent, you) {
               <span class="mine">Sent from your browser. <button type="button" data-shot-off="${s.id}">Take it off</button></span>` : ""}
             </li>`;
     }).join("");
-    const link = /^https:\/\/[^\s"'<>]+$/.test(contact) ? `<a href="${esc(contact)}" rel="noopener">${esc(contact.replace(/^https:\/\//, ""))}</a>`
-                                                         : esc(contact);
     return `
           <section class="card wide" id="screenshots"><h3>Screenshots${tally ? ` <span class="count">${tally}</span>` : ""}</h3><div class="body">
             ${shots.length ? `<ul class="shot-grid">${tiles}
             </ul>` : `<p class="none">None yet. A screenshot one of its players takes in the game (F8 or F12) shows up here.</p>`}
-            <p class="later">${shots.length ? `Taken in this match by its players and sent from their own browsers${final ? "; the final scoreboard is the game's own picture" : ""}. ` : ""}${contact ? `To have a picture taken down: ${link}` : ""}</p>
+            <p class="later">${shots.length ? `Taken in this match by its players and sent from their own browsers${final ? "; the final scoreboard is the game's own picture" : ""}. ` : ""}${contact ? `To have a picture taken down: ${contactLink(contact)}` : ""}</p>
           </div></section>`;
 }
 
@@ -996,8 +1005,124 @@ export async function playersPage(db, url, viewerHash, now) {
     });
 }
 
-// GET /player/<id>
-export async function playerPage(db, id, url, viewerHash, now) {
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// The day a time was on, as the standings count days: in their zone, with the
+// hours before TURN_HOUR still the day before, so an evening's late games are
+// on the evening's day. m from 1.
+function siteDay(ms) {
+    const c = zoneClock(ms);
+    const day = new Date(Date.UTC(c.year, c.month - 1, c.day) - (c.hour < TURN_HOUR ? DAY_MS : 0));
+    return { y: day.getUTCFullYear(), m: day.getUTCMonth() + 1, d: day.getUTCDate() };
+}
+
+function dayName(day) {
+    return `${MONTHS[day.m - 1]} ${day.d}`;
+}
+
+// The last n of those days, today last, each with when it began.
+function lastDays(now, n) {
+    const today = siteDay(now);
+    const base = Date.UTC(today.y, today.m - 1, today.d);
+    return Array.from({ length: n }, (_, i) => {
+        const at = new Date(base - (n - 1 - i) * DAY_MS);
+        const day = { y: at.getUTCFullYear(), m: at.getUTCMonth() + 1, d: at.getUTCDate() };
+        return { ...day, from: zoneTime(day.y, day.m, day.d, TURN_HOUR), n: 0 };
+    });
+}
+
+// Where to ask for a picture to be taken down, as a link when it's one.
+function contactLink(contact) {
+    return /^https:\/\/[^\s"'<>]+$/.test(contact) ? `<a href="${esc(contact)}" rel="noopener">${esc(contact.replace(/^https:\/\//, ""))}</a>`
+                                                   : esc(contact);
+}
+
+// A player's records in a game over a period, each with the match it was
+// set in: the most kills in a match, the longest run of kills in one life,
+// the best K/D of a match with KD_RECORD_KILLS kills or more, and the longest
+// match. kills, run, kd and long are that match's row, or undefined.
+function recordsCard({ kills, run, kd, long }, matches, period) {
+    const where = (r, more) => `<a href="/match/${r.id}">${esc(r.title)}</a>, ${time(r.ended_at, "day")}${more ? ` &middot; ${more}` : ""}`;
+    const line = (label, value, where) => `
+            <tr><td class="soft">${label}</td><td class="num">${value}</td><td class="where">${where}</td></tr>`;
+    const rows = [
+        kills ? line("Most kills", `<b>${num(kills.kills)}</b>`, where(kills, `${ordinal(kills.won ? 1 : kills.place)} of ${kills.players}`)) : "",
+        run ? line("Longest run", `<b>${num(run.streak)}</b>`, where(run, "in one life")) : "",
+        line("Best K/D", kd ? `<b>${ratio(kd.kills / Math.max(1, kd.deaths))}</b>` : "&ndash;",
+             kd ? where(kd, `${count(kd.kills, "kill")}, ${count(kd.deaths, "death")}`) : `None yet with ${KD_RECORD_KILLS} kills or more in a match`),
+        long ? line("Longest match", `<b>${length(long.secs)}</b>`, where(long)) : "",
+    ];
+    return `
+          <section class="card" id="records"><h3>Personal records</h3><div class="body"><table class="records">${rows.join("")}
+          </table>
+            <p class="later">From ${matches === 1 ? "the one match that counts" : `the ${num(matches)} matches that count`}, ${PERIODS_LC[period]}.</p>
+          </div></section>`;
+}
+
+// How a player has done lately in a game: their latest matches that count,
+// oldest first, each the kills in it as a bar (gold for a win) over their
+// place, and how many matches they played on each of the last days. rows:
+// those matches, newest first; days: lastDays with n counted.
+function formCard(rows, days) {
+    const shown = rows.slice().reverse();
+    const top = Math.max(1, ...shown.map(r => r.kills));
+    const wins = shown.filter(r => r.won).length;
+    const bars = shown.map(r => {
+        const place = r.won ? 1 : r.place;
+        const step = r.kills ? Math.max(1, Math.round(FORM_STEPS * r.kills / top)) : 0;
+        const what = `${r.title}, ${dayName(siteDay(r.ended_at))}: ${ordinal(place)} of ${r.players}, ${count(r.kills, "kill")}`;
+        return `<li><a href="/match/${r.id}" title="${esc(what)}"><span class="kbar h${step}${r.won ? " won" : ""}"></span><span
+          class="kn">${num(r.kills)}</span><span class="place ${place >= 1 && place <= 3 ? `p${place}` : "px"}">${place}</span><span
+          class="hide">${esc(what)}</span></a></li>`;
+    }).join("");
+    const played = days.filter(d => d.n).length;
+    const cells = days.map(d => {
+        const what = `${dayName(d)}: ${count(d.n, "match", "matches")}`;
+        return `<li class="l${d.n >= 6 ? 3 : d.n >= 3 ? 2 : d.n ? 1 : 0}" title="${what}"><span aria-hidden="true">${d.d}</span><span class="hide">${what}</span></li>`;
+    }).join("");
+    const last = shown.length === 1 ? "their one match that counts" : `the last ${shown.length} matches that count`;
+    return `
+          <section class="card" id="form"><h3>Form</h3><div class="body">
+            <p class="form-sum"><b>${count(wins, "win")}</b> in ${last} &middot; kills in each, oldest first</p>
+            <ol class="form">${bars}</ol>
+            <p class="form-sum"><b>${played ? `Played ${played} of the last ${days.length} days` : `No matches in the last ${days.length} days`}</b></p>
+            <ol class="days" aria-label="Matches on each of the last ${days.length} days">${cells}</ol>
+          </div></section>`;
+}
+
+// The screenshots a player took in a game's matches, the newest match's
+// first: each opens full size on the page (SHOT_VIEW), and its level's name
+// goes to its match. total and matches: how many of them there are, and in
+// how many matches. you: whether it's the viewer's own page.
+function playerShotsCard(shots, total, matches, name, contact, you) {
+    if (!shots.length && !you)
+        return "";
+    const clock = secs => `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+    const tiles = shots.map((s, n) => {
+        const at = `${clock(s.secs)} in`;
+        const scale = SHOTS.thumbEdge / Math.max(s.w, s.h, 1);
+        return `
+            <li class="shot">
+              <a href="/shot/${s.id}.jpg" data-shot="${n}" data-what="${esc(`${s.title} \u00b7 ${at}`)}"><img
+                src="/shot/${s.id}.t.jpg" width="${Math.max(1, Math.round(s.w * scale))}" height="${Math.max(1, Math.round(s.h * scale))}"
+                loading="lazy" decoding="async" alt="${esc(`Screenshot by ${name} in ${s.title}, ${clock(s.secs)} into the match`)}"></a>
+              <span class="who"><b><a href="/match/${s.match_id}">${esc(s.title)}</a></b> <span class="at">${at}</span></span>
+              <span class="cap">${time(s.ended_at, "day")}</span>
+            </li>`;
+    }).join("");
+    return `
+        <div class="cards">
+          <section class="card wide" id="screenshots"><h3>Screenshots${total ? ` <span class="count">${num(total)} from ${count(matches, "match", "matches")}</span>` : ""}</h3><div class="body">
+            ${shots.length ? `<ul class="shot-grid">${tiles}
+            </ul>` : `<p class="none">None yet. A screenshot you take in the game (F8 or F12) shows up here and on its match's page.</p>`}
+            <p class="later">${shots.length ? `${total > shots.length ? `The latest ${shots.length} of ${num(total)}. ` : ""}Taken in the game and sent from ${you ? "your" : "their"} own browser; each match's page has the rest of its pictures. ` : ""}${contact ? `To have a picture taken down: ${contactLink(contact)}` : ""}</p>
+          </div></section>
+        </div>`;
+}
+
+// GET /player/<id>. opts: shots (the lobby takes screenshots), contact (where
+// to ask for a picture to be taken down).
+export async function playerPage(db, id, url, viewerHash, now, opts = {}) {
     const games = Object.keys(GAMES);
     const week = periodStart("week", now), month = periodStart("month", now);
     // Who it is (a key's own number goes on to its record), and when they
@@ -1049,6 +1174,12 @@ export async function playerPage(db, id, url, viewerHash, now) {
     const mine = `FROM match_players mp JOIN matches m ON m.id = mp.match_id WHERE ${MINE} AND ${COUNTED}`;
     const args = [id, id, game, from];
     const latest = `SELECT m.id ${mine} ORDER BY m.id DESC LIMIT ${RIVAL_MATCHES}`;
+    const days = lastDays(now, ACTIVE_DAYS);
+    // A picture shows where its match's page does, and never the final
+    // scoreboard, which is the game's, not theirs.
+    const theirShots = `FROM match_shots s JOIN matches m ON m.id = s.match_id
+                        WHERE s.player_id IN (SELECT id FROM players WHERE id = ? OR merged_into = ?)
+                              AND s.hidden = 0 AND s.final = 0 AND m.game = ? AND m.hidden = 0 AND m.locked = 0`;
     const answers = await db.batch([
         db.prepare(`SELECT SUM(json_extract(mp.kinds, '$[0]')) AS k0, SUM(json_extract(mp.kinds, '$[1]')) AS k1,
                            SUM(json_extract(mp.kinds, '$[2]')) AS k2, SUM(json_extract(mp.kinds, '$[3]')) AS k3,
@@ -1057,7 +1188,9 @@ export async function playerPage(db, id, url, viewerHash, now) {
         db.prepare(`SELECT MAX(m.id) AS latest, m.title, m.episode, COUNT(*) AS n ${mine}
                     GROUP BY m.episode, m.map ORDER BY n DESC, latest DESC LIMIT 3`).bind(...args),
         db.prepare(`SELECT m.mod, m.pack, COUNT(*) AS n ${mine} GROUP BY m.mod, m.pack ORDER BY n DESC, MAX(m.id) DESC LIMIT 3`).bind(...args),
-        db.prepare(`SELECT m.id, m.title, mp.kills ${mine} ORDER BY mp.kills DESC, m.id DESC LIMIT 1`).bind(...args),
+        // Their records: best is the stats' best match too.
+        db.prepare(`SELECT m.id, m.title, m.ended_at, m.players, mp.kills, mp.place, mp.won ${mine}
+                    ORDER BY mp.kills DESC, m.id DESC LIMIT 1`).bind(...args),
         // own: in a match scored by its level's script, the host's
         // scoreboard row for them, which is what its page shows.
         db.prepare(`SELECT m.id, m.title, m.episode, m.mod, m.pack, m.players, m.secs, m.ended_at, m.counted, m.mode,
@@ -1075,6 +1208,25 @@ export async function playerPage(db, id, url, viewerHash, now) {
         db.prepare(`SELECT id, detail FROM matches WHERE id IN (${latest})`).bind(...args),
         db.prepare(`SELECT mp.match_id, mp.slot, mp.name, c.id AS pid, c.name AS known, COALESCE(c.hidden, 0) AS hidden
                     FROM match_players mp ${RECORD_JOIN} WHERE mp.match_id IN (${latest})`).bind(...args),
+        db.prepare(`SELECT m.id, m.title, m.ended_at, mp.streak ${mine} AND mp.streak > 0
+                    ORDER BY mp.streak DESC, m.id DESC LIMIT 1`).bind(...args),
+        db.prepare(`SELECT m.id, m.title, m.ended_at, mp.kills, mp.deaths ${mine} AND mp.kills >= ${KD_RECORD_KILLS}
+                    ORDER BY CAST(mp.kills AS REAL) / MAX(1, mp.deaths) DESC, mp.kills DESC, m.id DESC LIMIT 1`).bind(...args),
+        db.prepare(`SELECT m.id, m.title, m.ended_at, m.secs ${mine} ORDER BY m.secs DESC, m.id DESC LIMIT 1`).bind(...args),
+        // Their form, whatever the period: the latest that count.
+        db.prepare(`SELECT m.id, m.title, m.ended_at, m.players, mp.kills, mp.place, mp.won ${mine}
+                    ORDER BY m.id DESC LIMIT ${FORM_MATCHES}`).bind(id, id, game, 0),
+        // And when they played lately, counted or not.
+        db.prepare(`SELECT m.ended_at FROM match_players mp JOIN matches m ON m.id = mp.match_id
+                    WHERE ${MINE} AND m.game = ? AND m.hidden = 0 AND m.locked = 0 AND m.ended_at >= ?`)
+            .bind(id, id, game, days[0].from),
+        // Last, so the others stay where they are: the pictures they sent
+        // from their games in this game's matches, and how many there are.
+        ...(opts.shots ? [
+            db.prepare(`SELECT s.id, s.match_id, s.secs, s.w, s.h, m.title, m.ended_at ${theirShots}
+                        ORDER BY s.match_id DESC, s.secs, s.added_at, s.id LIMIT ${PLAYER_SHOTS}`).bind(id, id, game),
+            db.prepare(`SELECT COUNT(*) AS n, COUNT(DISTINCT s.match_id) AS matches ${theirShots}`).bind(id, id, game),
+        ] : []),
     ]);
     const board = standing(boards[game][period].rows).sort(byScore);
     const rank = board.findIndex(r => r.id === id);
@@ -1082,6 +1234,15 @@ export async function playerPage(db, id, url, viewerHash, now) {
     const extra = answers[0].results[0] || {};
     const maps = answers[1].results, mods = answers[2].results, best = answers[3].results[0];
     const names = answers[5].results.map(r => r.name).filter(n => n.toLowerCase() !== who.name.toLowerCase());
+    const records = { kills: best, run: answers[8].results[0], kd: answers[9].results[0], long: answers[10].results[0] };
+    const form = answers[11].results;
+    for (const r of answers[12].results) {
+        const day = days.findLast(d => d.from <= r.ended_at);
+        if (day)
+            day.n++;
+    }
+    const shots = opts.shots ? answers[13].results : [];
+    const shotCount = opts.shots ? answers[14].results[0] || {} : {};
 
     // Who they met: from each match's kills, by the others' records where
     // they have one and by the name they played under where not.
@@ -1152,6 +1313,9 @@ export async function playerPage(db, id, url, viewerHash, now) {
           <div><dt>Best match</dt><dd>${best ? `<a href="/match/${best.id}">${count(best.kills, "kill")}</a>` : "&ndash;"}</dd></div>
           <div><dt>Best streak</dt><dd>${me.streak}</dd></div>
         </dl>
+        <div class="cards${form.length ? " two" : ""}">
+          ${recordsCard(records, me.matches, period)}${form.length ? formCard(form, days) : ""}
+        </div>
         <div class="cards ${kindRows ? "three" : "two"}">
           <section class="card"><h3>Rivals</h3><div class="body"><table>
             <tr><td class="soft">Nemesis</td><td class="num">${nemesis ? `${rival(nemesis)}, killed by them ${num(nemesis.by)}&times;` : "&ndash;"}</td></tr>
@@ -1195,6 +1359,7 @@ export async function playerPage(db, id, url, viewerHash, now) {
       <div class="ladder-main full">
         ${head}
         ${stats}
+        ${playerShotsCard(shots, Number(shotCount.n) || 0, Number(shotCount.matches) || 0, who.name, opts.contact || "", opts.shots && you === id)}
         ${recent.length ? `<h3 class="part">Latest ${GAMES[game]} matches</h3>
         <div class="scroll">
           <table class="ladder-table">
@@ -1209,12 +1374,13 @@ export async function playerPage(db, id, url, viewerHash, now) {
         </div>` : ""}
         <p class="foot">${me && !me.qualified ? `&dagger; Fewer than ${KD_MIN} kills and deaths ${PERIODS_LC[period]}: K/D is shown but takes no place in the standings. ` : ""}${HOW_COUNTED}
           A player here is a browser, together with any new browser that later played under the same name${who.browsers > 1 ? ` (this record has matches from ${who.browsers} browsers)` : ""}.
-          Where a player's game didn't say which browser it was, the match counts by their name alone${who.keyless ? ` (${count(who.keyless, "match", "matches")} of this record)` : ""}.</p>
-      </div>`;
+          Where a player's game didn't say which browser it was, the match counts by their name alone${who.keyless ? ` (${count(who.keyless, "match", "matches")} of this record)` : ""}.
+          ${me && form.length ? "Form is their latest matches that count, whatever the period; a day in it starts at 3 in the morning Pacific time, as a week does." : ""}</p>
+      </div>${shots.length ? SHOT_VIEW : ""}`;
     const line = me ? `${num(me.kills)} kills, ${num(me.deaths)} deaths, ${count(me.matches, "match", "matches")}, ${span(me.secs)} played ${PERIODS_LC[period]}.` : "";
     return page(200, `${who.name} - ${GAMES[game]} - jediknight.zone`, `${GAMES_LONG[game]} - ${who.name}`, main, {
         description: `${who.name} in the ${GAMES[game]} game rooms. ${line}`.trim(),
-        ogTitle: `${who.name} - jediknight.zone Game Rooms`, path: `/player/${id}`,
+        ogTitle: `${who.name} - jediknight.zone Game Rooms`, path: `/player/${id}`, images: shots.length > 0,
     });
 }
 
@@ -1382,6 +1548,32 @@ main { padding: 12px 8px 24px; }
 .shot-view .step { flex: none; align-self: stretch; width: 34px; border: 0; font-size: 24px; }
 .shot-view .step[disabled] { visibility: hidden; }
 .card td.count { white-space: nowrap; }
+/* A player's records: what and how many on a line, the match it was in below. */
+.records tr { display: grid; grid-template-columns: 1fr auto; }
+.records td.num b { color: var(--gold); }
+.records td.where { grid-column: 1 / -1; padding: 0 0 4px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.form-sum { margin: 0 0 6px; color: var(--muted); font-size: 11px; }
+.form-sum b { color: var(--ink); }
+.form { display: flex; align-items: flex-end; gap: 6px; margin: 0 0 12px; padding: 0; list-style: none; }
+.form li { flex: 1; min-width: 0; }
+.form a { display: flex; flex-direction: column; align-items: center; gap: 3px; text-decoration: none; }
+.form a:hover .kn { color: var(--gold); }
+.kbar { display: block; width: 100%; max-width: 18px; height: 2px; background-color: var(--teal-light); }
+.kbar.won { background-color: var(--gold); }
+${Array.from({ length: FORM_STEPS }, (_, i) => `.kbar.h${i + 1} { height: ${2 + 4 * (i + 1)}px; }`).join("\n")}
+.kn { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.place.px { background-color: #2a3a3a; color: #ccdddd; }
+.days { display: grid; grid-template-columns: repeat(${ACTIVE_DAYS}, minmax(0, 1fr)); gap: 3px; margin: 0; padding: 0; list-style: none; }
+.days li { display: grid; place-items: center; aspect-ratio: 1; max-width: 26px; border: 1px solid var(--card-edge);
+  color: #99aaaa; font-size: 9px; font-variant-numeric: tabular-nums; }
+.days li.l1 { background-color: #1d4d4d; color: #ccdddd; }
+.days li.l2 { background-color: #3d7f7f; color: #fff; }
+.days li.l3 { background-color: var(--gold); color: #000; border-color: #000; }
+.style-2001 .kbar { background-color: #2a78a8; }
+.style-2001 .kbar.won { background-color: var(--gold); }
+.style-2001 .days li.l1 { background-color: #12405e; }
+.style-2001 .days li.l2 { background-color: #2a78a8; }
+.hide { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .card td.soft:first-child { white-space: nowrap; padding-right: 8px; }
 .card table.versus { font-size: 12px; }
 .versus th { padding: 2px 0 4px; color: #9aa; font-weight: normal; text-align: left; white-space: nowrap; }
