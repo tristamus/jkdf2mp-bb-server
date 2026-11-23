@@ -812,7 +812,7 @@ route answers 404 and the page shows no Imperial games. The game's own Imperial 
 depend on any of this.
 
 `IMPERIAL_PINNED` lists dedicated servers the page always shows first (`jk1 162.248.94.121:27960
-Coruscant`), matched by address, since anyone hosting on the relay can name a game anything. A pinned
+Coruscant, mots 162.248.94.121:27961 Bespin`), matched by address, since anyone hosting on the relay can name a game anything. A pinned
 server the relay doesn't list, or a relay that doesn't answer, still gets a card, without Join. A
 dedicated server's player count has its own slot taken off.
 
@@ -836,9 +836,14 @@ one to a line: `<key> <game> <a.b.c.d:port> <name>`, the key 32 to 64 hex digits
 server's owner gets. Set it with `npx wrangler secret put IMPERIAL_FEED_KEYS` (and `--env beta`);
 without it `/imperial-feed` answers 404. The server sends `POST /imperial-feed` with
 `Authorization: Bearer <key>` and `{"episode", "map", "delay"}` when a match starts, and gets
-`{"room", "token", "url", "delay"}` (the delay 30 to 300 s); `{"end": true}` ends its feed. It sends
+`{"room", "token", "url", "delay"}` (the delay 30 to 300 s). `{"end": true}` ends its feed when the
+server empties: pages watching get the match's last delay seconds first, as for a lobby room that
+ends. `{"end": true, "off": true}` ends it at once, for watching turned off. It sends
 to `url` as a host's game does (`src/feed.js`), and its players' messages as kind 3, each with the
-u32 id of who sent it, since relay player ids don't fit the feed's seat. The lobby's status lists
+u32 id of who sent it, since relay player ids don't fit the feed's seat. It hears `mod <fp>` (send
+a game watching the match's level or mod) only after asking with `"files": true`, and spectators'
+`say` lines only with `"say": true`; without them, the game watching is told at once (`feed
+no-files`, `feed no-say`) rather than left waiting. The lobby's status lists
 each such feed in `imp`, by the server's `sid` (which `/imperial-games` gives its card), so the page
 can put Watch on the card; the feed's room number comes from the lobby's own count. A feed nothing
 is sent to for 10 minutes ends itself and is no longer listed.
