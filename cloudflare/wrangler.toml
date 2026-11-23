@@ -135,7 +135,7 @@ MOVED_STATUS = "301"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
 # Dedicated servers on it that the page always shows first, matched by
 # address: "<game> <address:port> <name>", several separated by commas.
-IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
+IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant, mots 162.248.94.121:27961 Bespin"
 # From this time, older games no longer get room passwords (kit 90 README, Settings).
 PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # "0" stops the lobby taking and showing screenshots while the bucket stays
@@ -218,7 +218,7 @@ SITE = ""
 MOVED_FROM = ""
 MOVED_STATUS = "302"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
-IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant"
+IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant, mots 162.248.94.121:27961 Bespin"
 MATCH_LINKS = "https://beta.jediknight.zone"
 # "0" stops the Level Library's job; LEVELS_MAX_GB is how much it copies
 # before it stops (no cap when it isn't set).

@@ -126,18 +126,23 @@
 // Who a player is: their browser's key, which the lobby gives out and the
 // browser keeps in a cookie and in the page's storage. A browser that lost it
 // (its cookies and site data cleared), another browser or another computer
-// comes with a new key, and there are no accounts to say whose it is. So a
-// key never seen before that plays under the name of exactly one record is
-// taken for that record's player (saveRecord; LADDER_JOIN_NAMES = "0" turns
-// it off). A name proves nothing: anyone can add matches to a record by
-// playing under its name. What keeps that mendable is that every match row
-// names the key it came from, so one key's matches can be taken off a record
-// again by hand (README.md, "The match record").
+// (a desktop game, with a key of its own) comes with a new key, and there are
+// no accounts to say whose it is. So players are matched by name: a key never
+// seen before that plays under a record's name is taken for that record's
+// player, the first record of that name when more than one has it
+// (saveRecord; LADDER_JOIN_NAMES = "0" turns it off). Records that came apart
+// under one name before that (one browser's key after another while two
+// records had the name, which used to leave each new key a record of its
+// own) are folded into the first, once for a lobby (foldNames). A name proves
+// nothing: anyone can add matches to a record by playing under its name. What
+// keeps that mendable is that every match row names the key it came from, so
+// one key's matches can be taken off a record again by hand (README.md, "The
+// match record").
 //
 // A player whose game sent no key (it reported nothing, or was loaded before
 // its page had one) is in a match by name only. By the same rule their line
-// counts for the one record that has that name (adoptKeyless), whichever came
-// first, the line or the record. Such lines hang on a row of their own in
+// counts for the first record that has that name (adoptKeyless), whichever
+// came first, the line or the record. Such lines hang on a row of their own in
 // players, the record's stand-in for them (key_hash "name:<record>"), so they
 // too can be taken off the record again.
 
@@ -873,10 +878,11 @@ export function joinableName(name) {
 }
 
 // Writes a match and returns its id. Safe to run again for the same match.
-// joinNames: a key D1 has never had, under a name that is exactly one
-// record's (whatever the letters' case), becomes another key of that record,
-// unless the name is too common to say anything, two of the match's players
-// have it, or the record's player is in the match under a key of their own.
+// joinNames: a key D1 has never had, under a name that a record has (whatever
+// the letters' case; the first of them, the oldest, when several have it),
+// becomes another key of that record, unless the name is too common to say
+// anything, two of the match's players have it, or the record's player is in
+// the match under a key of their own.
 // The lines without a key under the names in this match go to their records
 // the same way (adoptKeyless).
 export async function saveRecord(db, rec, opts = {}) {
@@ -915,11 +921,11 @@ export async function saveRecord(db, rec, opts = {}) {
         if (fresh.length) {
             const found = await db.batch(fresh.map(r => db.prepare(
                 `SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL AND hidden = 0
-                 LIMIT 2`).bind(r.name.trim())));
+                 ORDER BY id LIMIT 1`).bind(r.name.trim())));
             const here = new Set([...known.values()].map(k => k.record));
             fresh.forEach((r, i) => {
                 const records = found[i].results;
-                if (records.length === 1 && !here.has(records[0].id)) {
+                if (records.length && !here.has(records[0].id)) {
                     joins.set(r.pk, records[0].id);
                     console.log(`ladder: match ${id}: a new browser joins record ${records[0].id} by its name`);
                 }
@@ -970,8 +976,9 @@ export async function saveRecord(db, rec, opts = {}) {
 // Gives the lines of players whose game sent no key to the record that has
 // their name, and returns how many. names: only lines under these names (a
 // match's, when it's saved); without, every such line. A line goes to a
-// record when the name is exactly one record's on the pages (whatever the
-// letters' case) and isn't too common to say anything, nobody else in that
+// record when the name is a record's on the pages (whatever the letters'
+// case; the first of them when several have it) and isn't too common to say
+// anything, nobody else in that
 // match has it, and the record's player isn't in that match under a key. It
 // then hangs on the record's stand-in row, made here when the record has
 // none. A stand-in taken off its record by hand stays off: the record gets no
@@ -995,14 +1002,14 @@ export async function adoptKeyless(db, names = null) {
     const lines = (await asked.all()).results.filter(l => joinableName(l.name));
     if (!lines.length)
         return 0;
-    // The one record each name has, if it has one.
+    // The first record each name has, if it has one.
     const lineNames = [...new Set(lines.map(l => lower(l.name)))];
     const found = await db.batch(lineNames.map(n => db.prepare(
         `SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL AND hidden = 0
-         LIMIT 2`).bind(n)));
+         ORDER BY id LIMIT 1`).bind(n)));
     const recordOf = new Map();
     lineNames.forEach((n, i) => {
-        if (found[i].results.length === 1)
+        if (found[i].results.length)
             recordOf.set(n, found[i].results[0].id);
     });
     const open = lines.filter(l => recordOf.has(lower(l.name)));
@@ -1056,6 +1063,66 @@ export async function adoptKeyless(db, names = null) {
         }
     }
     return n;
+}
+
+// Folds the records on the pages that have one name (whatever the letters'
+// case) into the first of them, the oldest, and returns what it folded:
+// [[record, into, [its other rows]], ...]. Not a name too common to say
+// anything, and not a record that played in a match beside the first or one
+// already folded into it: two of them in one match are two players. A
+// record's other keys and its stand-in go with it (merged_into is one level
+// only), and the first takes the name last played under. Run once for a lobby
+// (catchUp), so a record taken off by hand afterwards stays off.
+export async function foldNames(db) {
+    const groups = (await db.prepare(
+        `SELECT MIN(name) AS name, GROUP_CONCAT(id) AS ids FROM players
+         WHERE merged_into IS NULL AND hidden = 0 AND key_hash NOT LIKE '${NAME_KEY}%'
+         GROUP BY name COLLATE NOCASE HAVING COUNT(*) > 1`).all()).results.filter(g => joinableName(g.name));
+    const folds = [];
+    for (const g of groups) {
+        const ids = String(g.ids).split(",").map(Number).sort((a, b) => a - b);
+        // Each record's matches and other rows, under any of its keys.
+        const found = await db.batch(ids.flatMap(id => [
+            db.prepare(`SELECT DISTINCT mp.match_id FROM match_players mp JOIN players p ON p.id = mp.player_id
+                        WHERE p.id = ? OR p.merged_into = ?`).bind(id, id),
+            db.prepare("SELECT id FROM players WHERE merged_into = ?").bind(id),
+        ]));
+        const into = ids[0];
+        const beside = new Set(found[0].results.map(r => r.match_id));
+        const statements = [];
+        for (let i = 1; i < ids.length; i++) {
+            const matches = found[2 * i].results.map(r => r.match_id);
+            if (matches.some(m => beside.has(m)))
+                continue;
+            matches.forEach(m => beside.add(m));
+            const record = ids[i];
+            statements.push(
+                // Every SET reads the row as it was.
+                db.prepare(`UPDATE players SET
+                                name = CASE WHEN (SELECT last_at FROM players WHERE id = ?1) > last_at
+                                            THEN (SELECT name FROM players WHERE id = ?1) ELSE name END,
+                                first_at = MIN(first_at, (SELECT first_at FROM players WHERE id = ?1)),
+                                last_at = MAX(last_at, (SELECT last_at FROM players WHERE id = ?1))
+                            WHERE id = ?2`).bind(record, into),
+                db.prepare("UPDATE players SET merged_into = ? WHERE merged_into = ?").bind(into, record),
+                db.prepare("UPDATE players SET merged_into = ? WHERE id = ?").bind(into, record));
+            const rows = found[2 * i + 1].results.map(r => r.id);
+            folds.push([record, into, rows]);
+            console.log(`ladder: record ${record} folded into record ${into} by its name` +
+                        (rows.length ? ` (with its rows ${rows.join(", ")})` : ""));
+        }
+        if (statements.length)
+            await db.batch(statements);
+    }
+    if (folds.length) {
+        try {
+            await db.prepare("DELETE FROM ladder_cache").run();
+        } catch (e) {
+            if (!/no such table/i.test(String(e && e.message)))
+                throw e;
+        }
+    }
+    return folds;
 }
 
 // Who won a match, from its players' rows ({name, team, score, won}) and its
@@ -1150,8 +1217,11 @@ export class Ladder {
         this.hashes = new Map();  // browser key -> its SHA-256
         this.ready = false;       // whether D1 has the tables, as far as this one knows
         // Whether the lines saved before a player with no key could be a
-        // known one by their name have been looked at: once for a lobby.
+        // known one by their name have been looked at, and the records that
+        // came apart under one name before a new key joined the first of
+        // them been folded: each once for a lobby.
         this.caughtUp = false;
+        this.folded = false;
         // Reports and endings are worked through one at a time, in the order
         // they came.
         this.queue = Promise.resolve();
@@ -1167,6 +1237,7 @@ export class Ladder {
         const storage = this.lobby.ctx.storage;
         this.latest = (await storage.get("ladder:latest")) || 0;
         this.caughtUp = !!(await storage.get("ladder:keyless"));
+        this.folded = !!(await storage.get("ladder:folded"));
         for (const [key, m] of await storage.list({ prefix: "match:" }))
             this.matches.set(Number(key.slice(6)), m);
         for (const [, u] of await storage.list({ prefix: "matchdone:" })) {
@@ -1641,7 +1712,7 @@ export class Ladder {
                 // own, and a player with no key out of every record.
                 const joinNames = this.lobby.env.LADDER_JOIN_NAMES !== "0";
                 id = await saveRecord(this.lobby.env.LADDER, u.rec, { joinNames });
-                if (joinNames && !this.caughtUp)
+                if (joinNames && !(this.caughtUp && this.folded))
                     await this.catchUp();
             } catch (e) {
                 // The tables may be gone (another database bound).
@@ -1684,10 +1755,25 @@ export class Ladder {
         this.wake();
     }
 
-    // With the first match a lobby saves: the earlier lines of players with
-    // no key, whatever their names. The match is saved whatever comes of it,
-    // and a failure is tried again with the next match.
+    // With the first match a lobby saves: the records that have one name
+    // folded into the first (foldNames), and the earlier lines of players
+    // with no key, whatever their names. The match is saved whatever comes of
+    // it, and a failure is tried again with the next match. What was folded
+    // is kept ("ladder:folded"), for putting a record back by hand.
     async catchUp() {
+        if (!this.folded) {
+            try {
+                const folds = await foldNames(this.lobby.env.LADDER);
+                this.folded = true;
+                this.lobby.ctx.storage.put("ladder:folded", { at: Date.now(), folds });
+                if (folds.length)
+                    console.log(`ladder: ${folds.length} record(s) folded into the first record of their name`);
+            } catch (e) {
+                console.log(`ladder: the records that have one name weren't folded (${e.message})`);
+            }
+        }
+        if (this.caughtUp)
+            return;
         try {
             const n = await adoptKeyless(this.lobby.env.LADDER);
             this.caughtUp = true;

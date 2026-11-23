@@ -80,6 +80,12 @@
 // (IMPERIAL_LIST), for the page to show beside this lobby's (src/imperial.js).
 // It never touches the lobby.
 //
+// /imperial-feed is a dedicated server on that relay asking for its match's
+// feed, with a key IMPERIAL_FEED_KEYS gives it (src/imperial-feed.js). The
+// lobby gives the feed a room number of its own (from the rooms' count, so it
+// never meets a room's) and lists it in the status (imp), by the server's
+// sid, for the page to put Watch on its card; pages spectate it as a room.
+//
 // /e/ is the engine's files, named by their content and kept by browsers for
 // good, sent brotli-compressed at its best where the browser takes it
 // (src/engine.js).
@@ -89,6 +95,7 @@ import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
 import { imperialGames } from "./imperial.js";
 import { feedRoute } from "./feed.js";
+import { imperialFeedRoute } from "./imperial-feed.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
 import { ladderRoute } from "./ladder-pages.js";
@@ -220,6 +227,8 @@ export default {
             if (feed)
                 return feed;
         }
+        if (url.pathname === "/imperial-feed")
+            return imperialFeedRoute(request, env);
         if (url.pathname === "/summary")
             return takeSummary(request, env);
         if (url.pathname === "/imperial-games")
@@ -594,6 +603,9 @@ export class Lobby extends DurableObject {
         this.lastStatus = null;   // the status the watchers have
         this.stats = this.newStats(Date.now());
         this.ladder = new Ladder(this);
+        // Imperial relay servers' feeds (imperialFeed), by their sid:
+        // {sid, id, token, delay, game, name, episode, map, pages, chain}.
+        this.imperial = new Map();
         // Pages send "ping" every 25 s so proxies keep the socket open. Cloudflare
         // answers it without waking the object; the page ignores the "pong".
         ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -608,6 +620,8 @@ export class Lobby extends DurableObject {
         const pws = await this.ctx.storage.list({ prefix: "pw:" });
         const spects = await this.ctx.storage.list({ prefix: "spect:" });
         const feeds = await this.ctx.storage.list({ prefix: "feed:" });
+        for (const [key, f] of await this.ctx.storage.list({ prefix: "imp:" }))
+            this.imperial.set(key.slice(4), { ...f, pages: f.pages || 0, chain: null });
         for (const [key, entry] of entries) {
             const id = Number(key.slice(5));
             let pw = pws.get("pw:" + id) || null;
@@ -1434,8 +1448,16 @@ export class Lobby extends DurableObject {
             g.online += g.lobby.length;
             g.lobby = g.lobby.sort(byName).slice(0, MAX_STATUS_NAMES);
         }
+        // Imperial relay servers sending their match's feed (imperialFeed):
+        // the page finds each one's card by its sid.
+        const imp = [...this.imperial.values()].sort((a, b) => a.id - b.id).map(f => {
+            const seen = (watching.get(f.id) || 0) + (f.pages || 0);
+            return { id: f.id, sid: f.sid, game: f.game, name: f.name, episode: f.episode, map: f.map, delay: f.delay,
+                     ...(seen ? { watching: seen } : {}) };
+        });
         return JSON.stringify({
             online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
+            ...(imp.length ? { imp } : {}),
             // The last match recorded, for the page to know when to get its
             // lists again (/ladder/recent); not there without the record.
             ...(this.ladder.on() ? { match: this.ladder.latest } : {}),
@@ -1501,7 +1523,7 @@ export class Lobby extends DurableObject {
     // that isn't there, or ended, is none. Watching takes no seat: the page
     // is only counted, in the room's watching.
     spectate(ws, c, roomId) {
-        const id = this.rooms.has(roomId) ? roomId : 0;
+        const id = this.rooms.has(roomId) || this.impById(roomId) ? roomId : 0;
         if ((c.spect || 0) === id)
             return;
         this.saveConn(ws, { ...c, spect: id });
@@ -1651,6 +1673,16 @@ export class Lobby extends DurableObject {
     // match from inside the game now. They're counted in its watching, and
     // keep a feed that's only on while watched (FEED_ONLY_WATCHED) on.
     async feedPages(roomId, n) {
+        const imp = this.impById(Number(roomId));
+        if (imp && Number.isInteger(n) && n >= 0) {
+            n = Math.min(n, MAX_FEED_PAGES);
+            if ((imp.pages || 0) !== n) {
+                imp.pages = n;
+                this.impSave(imp);
+                this.statusChanged();
+            }
+            return true;
+        }
         const room = this.rooms.get(Number(roomId));
         if (!room || !room.feed || !Number.isInteger(n) || n < 0)
             return false;
@@ -1818,6 +1850,87 @@ export class Lobby extends DurableObject {
             this.send(room.host, `peer-back ${id}`);
         }
         console.log(`relay: room ${room.id}: id ${id} took its seat back`);
+        this.statusChanged();
+    }
+
+    // From the Worker (/imperial-feed, src/imperial-feed.js), over RPC: a
+    // dedicated server on the Imperial relay asks for its match's feed, or
+    // ends it. server: {sid, game, name}, as IMPERIAL_FEED_KEYS names it;
+    // ask: {episode, map, delay, files, say} or {end: true, off}. Answers
+    // {room, token, delay}, {ended: true}, or null when its feed didn't
+    // answer. An end plays the pages watching the match's last seconds
+    // first, as a room's end does; with off (watching turned off), not.
+    async imperialFeed(server, ask) {
+        if (!this.env.FEED || !server || !server.sid)
+            return null;
+        let f = this.imperial.get(server.sid);
+        if (ask.end) {
+            if (f)
+                this.impEnd(f, ask.off ? "watching off" : "room ended");
+            return { ended: true };
+        }
+        const delay = Math.min(SPECT_MAX_DELAY_S, Math.max(SPECT_MIN_DELAY_S, ask.delay || SPECT_DELAY_S));
+        if (!f) {
+            f = { sid: server.sid, id: this.nextRoom++, token: newKey(), pages: 0, chain: null };
+            this.ctx.storage.put("nextRoom", this.nextRoom);
+            console.log(`relay: imperial ${server.name}: its feed is room ${f.id}`);
+        }
+        Object.assign(f, { game: server.game, name: server.name, episode: ask.episode || "", map: ask.map || "", delay });
+        this.imperial.set(f.sid, f);
+        this.impSave(f);
+        // Armed every time it asks: a feed that ended itself (nothing sent
+        // for a while) starts again, with the same token. files and say:
+        // whether the server takes mod <fp> and say lines (src/feed.js).
+        const stub = this.env.FEED.get(this.env.FEED.idFromName("room:" + f.id));
+        const opts = { wide: true, files: !!ask.files, say: !!ask.say };
+        const next = (f.chain || Promise.resolve()).then(() => stub.arm(f.id, delay, { [f.token]: 1 }, opts))
+                                                    .then(() => true, e => {
+            console.log(`relay: imperial ${server.name}: its feed didn't answer: ${e && e.message || e}`);
+            return false;
+        });
+        f.chain = next;
+        const ok = await next;
+        this.statusChanged();
+        return ok && this.imperial.get(f.sid) === f ? { room: f.id, token: f.token, delay } : null;
+    }
+
+    // From a feed (src/feed.js), over RPC: it ended by itself (nothing came
+    // for a while). An Imperial server's is no longer listed; a lobby room's
+    // games ask again by themselves.
+    async feedEnded(roomId) {
+        const f = this.impById(Number(roomId));
+        if (f) {
+            this.impForget(f);
+            this.statusChanged();
+        }
+        return true;
+    }
+
+    impById(id) {
+        for (const f of this.imperial.values()) {
+            if (f.id === id)
+                return f;
+        }
+        return null;
+    }
+
+    impSave(f) {
+        const { chain, ...kept } = f;
+        this.ctx.storage.put("imp:" + f.sid, kept);
+    }
+
+    impForget(f) {
+        if (this.imperial.get(f.sid) === f)
+            this.imperial.delete(f.sid);
+        this.ctx.storage.delete("imp:" + f.sid);
+    }
+
+    impEnd(f, why) {
+        this.impForget(f);
+        const stub = this.env.FEED.get(this.env.FEED.idFromName("room:" + f.id));
+        f.chain = (f.chain || Promise.resolve()).then(() => stub.end(why)).catch(e => {
+            console.log(`relay: imperial ${f.name}: its feed didn't hear it ended: ${e && e.message || e}`);
+        });
         this.statusChanged();
     }
 

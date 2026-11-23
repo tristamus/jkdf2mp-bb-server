@@ -27,7 +27,7 @@
 // The answer:
 //   { state: "live" | "down", server, checked,
 //     games: [{ key, name, game, map, episode, mod, locked, players, max,
-//               dedicated, pinned, listed, joinable, why, mode }] }
+//               dedicated, pinned, listed, joinable, why, mode, sid }] }
 // mode is the game's multiplayer mode flags, as its host's game puts them in
 // the session's user data (stdComm_Imperial.c in the fork); a pinned server
 // that isn't listed has none. (The Force rank next to them isn't passed on:
@@ -35,7 +35,10 @@
 // scores, limits or clock.
 // key is the game's session id (32 hex digits; "" for a pinned server that
 // isn't listed), which the page hands the engine to select on its Join
-// screen. why says why a game can't be joined from a browser: "desktop" (its
+// screen. A dedicated server also has sid, the same for it however it's
+// listed (serverSid of its address), which the lobby's status names it by
+// when it sends its match's feed (src/imperial-feed.js), so the page can put
+// Watch on its card without being told its address. why says why a game can't be joined from a browser: "desktop" (its
 // host runs an OpenJKDF2 from before browsers could play with it), "closed"
 // (its host turned joining off), "not-listed" or "relay-down". Everything in
 // it comes from the relay, so names are cleaned as the lobby cleans its own.
@@ -365,6 +368,18 @@ function guessGame(episode) {
     return /^jkm/i.test(episode) ? "mots" : "jk1";
 }
 
+// A dedicated server's id for pages, from its address ("a.b.c.d:port"):
+// 16 hex digits (FNV-1a, 64 bits). Not a secret, as the address isn't (the
+// relay lists it to anyone): only so the page needn't have addresses.
+export function serverSid(addr) {
+    let h = 0xcbf29ce484222325n;
+    for (const ch of new TextEncoder().encode("jkdf2mp-imperial:" + addr)) {
+        h ^= BigInt(ch);
+        h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+    }
+    return h.toString(16).padStart(16, "0");
+}
+
 export function parsePinned(text) {
     const out = [];
     for (const part of (text || "").split(",")) {
@@ -426,7 +441,7 @@ export function gamesAnswer(listing, server, pinned, now) {
             });
         }
     }
-    // The page has no use for addresses.
-    const all = first.concat(games).map(({ addr, ...g }) => g);
+    // The page has no use for addresses: a dedicated server's sid stands in.
+    const all = first.concat(games).map(({ addr, ...g }) => (g.dedicated && addr ? { ...g, sid: serverSid(addr) } : g));
     return { state: listing ? "live" : "down", server, checked: now.toISOString(), games: all };
 }

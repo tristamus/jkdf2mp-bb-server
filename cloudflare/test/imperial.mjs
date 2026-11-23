@@ -7,7 +7,7 @@
 // test/imperial-route.mjs checks the route itself, against a made-up relay.
 
 import assert from "node:assert/strict";
-import { parseListReply, gamesAnswer, parsePinned, relayUrl, splitName, modName, cleanText } from "../src/imperial.js";
+import { parseListReply, gamesAnswer, parsePinned, relayUrl, splitName, modName, cleanText, serverSid } from "../src/imperial.js";
 
 // lobby.jkjunkie.com's LISTREPLY on 31 Oct 2026, 19:0x UTC: one game,
 // Coruscant, a dedicated server at 162.248.94.121:27960, through the gateway.
@@ -79,7 +79,7 @@ test("Coruscant is pinned first, its own slot off the counts", () => {
         state: "live", server: SERVER, checked: "2026-10-31T19:00:00.000Z",
         games: [{ key: "13e5dd93743f59055bbf297508845b2b", name: "Coruscant", game: "jk1", map: "c3.jkl",
                   episode: "JK1CTF", mod: "", locked: false, players: 0, max: 31, dedicated: true, pinned: true,
-                  listed: true, joinable: true, why: "", mode: 0x18 }],
+                  listed: true, joinable: true, why: "", mode: 0x18, sid: "5b238bec1ae6e9cb" }],
     });
 });
 
@@ -88,7 +88,21 @@ test("a relay that didn't answer: the pinned card only, marked down", () => {
     assert.equal(a.state, "down");
     assert.deepEqual(a.games, [{ key: "", name: "Coruscant", game: "jk1", map: "", episode: "", mod: "", locked: false,
                                  players: 0, max: 0, dedicated: true, pinned: true, listed: false, joinable: false,
-                                 why: "relay-down" }]);
+                                 why: "relay-down", sid: "5b238bec1ae6e9cb" }]);
+});
+
+test("a dedicated server's sid is the same however it's listed, and only a dedicated server has one", () => {
+    assert.equal(serverSid("162.248.94.121:27960"), "5b238bec1ae6e9cb");
+    assert.notEqual(serverSid("162.248.94.121:27961"), serverSid("162.248.94.121:27960"));
+    const list = parseListReply(reply([
+        { guid: "bb".repeat(16), flags: WIRE, max: 32, cur: 5, name: "Coruscant:JK1CTF:c3.jkl", addr: "162.248.94.121:27960" },
+        { guid: "cc".repeat(16), flags: WIRE, max: 32, cur: 1, name: "Other:JK1CTF:c3.jkl", addr: "1.2.3.4:5" },
+        { guid: "aa".repeat(16), flags: WIRE, max: 8, cur: 2, name: "Here:JK1MP.gob:01narshadda.jkl" },
+    ]));
+    const a = gamesAnswer(list, SERVER, PINNED, NOW);
+    assert.deepEqual(a.games.map(g => [g.name, g.sid]),
+                     [["Coruscant", "5b238bec1ae6e9cb"], ["Other", serverSid("1.2.3.4:5")], ["Here", undefined]]);
+    assert.deepEqual(gamesAnswer(null, SERVER, PINNED, NOW).games[0].sid, "5b238bec1ae6e9cb");
 });
 
 test("a pinned server the relay doesn't list", () => {

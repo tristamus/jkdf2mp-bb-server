@@ -1715,10 +1715,10 @@ await check("a browser never seen before joins the record that has its name, and
     // Not when the record's own browser is in the match: that's somebody else.
     await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["maw ", NEW(6)]], [[2, 1], [3, 1]]);
     assert.deepEqual(players().slice(3), [[4, "maw", null]]);
-    // Not two of one name in a match, which then are two records, and not a third of that name afterwards.
+    // Not two of one name in a match, which then are two records; a third of that name afterwards is the first of them.
     await playMatch(w, [["Twin", NEW(7)], ["Twin", NEW(8)], ["Kyle_K", KEYS.kyle]], [[3, 1], [3, 2]]);
     await playMatch(w, [["Twin", NEW(9)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
-    assert.deepEqual(players().slice(4), [[5, "Twin", null], [6, "Twin", null], [7, "Twin", null]]);
+    assert.deepEqual(players().slice(4), [[5, "Twin", null], [6, "Twin", null], [7, "Twin", 5]]);
     // Not by a name anyone might have.
     await playMatch(w, [["Player", NEW("a")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
     await playMatch(w, [["Player", NEW("b")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
@@ -1747,7 +1747,7 @@ await check("a browser never seen before joins the record that has its name, and
                      [["Maw", null], ["Kyle_K", null], ["Maw", null]]);
 });
 
-await check("a player whose game sent no key counts for the one record that has their name, whichever came first", async () => {
+await check("a player whose game sent no key counts for the first record that has their name, whichever came first", async () => {
     const env = newEnv();
     const w = await new World(env).start();
     const NEW = n => String(n).repeat(32);
@@ -1807,10 +1807,12 @@ await check("a player whose game sent no key counts for the one record that has 
     await playMatch(w, [["Maw", KEYS.maw], ["Player", NEW(6)]], [[2, 1], [2, 1]]);
     const m6 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Player", null, "silent"]], [[3, 1], [3, 2]]);
     assert.deepEqual(lines(env, "Player").at(-1), [m6, null, null]);
-    // Not a name two records have.
+    // A name two records have: the first of them.
     await playMatch(w, [["Twin", NEW(7)], ["Twin", NEW(8)], ["Kyle_K", KEYS.kyle]], [[3, 1], [3, 2]]);
+    const twins = env.LADDER.rows("SELECT id FROM players WHERE name = 'Twin' ORDER BY id").map(p => p.id);
+    assert.equal(twins.length, 2);
     const m8 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Twin", null, "silent"]], [[3, 1], [3, 2]]);
-    assert.deepEqual(lines(env, "Twin").at(-1), [m8, null, null]);
+    assert.deepEqual(lines(env, "Twin").at(-1), [m8, twins[0], "name"]);
     // Not when the record was in that match under the name it had then: Kyle
     // takes the name of someone who played beside him.
     const m9 = await playMatch(w, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle], ["Ghost", null, "silent"]], [[3, 1], [3, 2]]);
@@ -1838,8 +1840,10 @@ await check("a player whose game sent no key counts for the one record that has 
     assert.deepEqual(lines(env, "Drum").slice(-2), [[m13, null, null], [m14, null, null]]);
 
     // A record is found by its name without reading the table.
-    assert.match(env.LADDER.rows(`EXPLAIN QUERY PLAN SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL
-                                  AND hidden = 0 LIMIT 2`, "x").map(r => r.detail).join(" "), /USING INDEX players_name/);
+    const plan = env.LADDER.rows(`EXPLAIN QUERY PLAN SELECT id FROM players WHERE name = ? COLLATE NOCASE AND merged_into IS NULL
+                                  AND hidden = 0 ORDER BY id LIMIT 1`, "x").map(r => r.detail).join(" ");
+    assert.match(plan, /USING INDEX players_name/);
+    assert.equal(/TEMP B-TREE/.test(plan), false, plan);
 
     // Turned off, a player with no key is nobody's.
     const env2 = newEnv({ LADDER_JOIN_NAMES: "0" });
@@ -1865,6 +1869,55 @@ await check("a player whose game sent no key counts for the one record that has 
     assert.deepEqual(lines(env3, "Drum")[0], [old, null, null]);
     await playMatch(w3, [["Maw", KEYS.maw], ["Drum", NEW(5)]], [[2, 1], [2, 1]]);
     assert.deepEqual(lines(env3, "Drum")[0], [old, 3, "name"]);
+});
+
+await check("records that came apart under one name are folded into the first of them, once", async () => {
+    const NEW = n => String(n).repeat(32);  // 5 and up, a to f: not one of KEYS
+    const players = e => e.LADDER.rows("SELECT id, name, merged_into FROM players ORDER BY id").map(p => [p.id, p.name, p.merged_into]);
+    const board = async world => [...(await world.page("/players?period=all")).body.matchAll(/<td class="name"><a href="\/player\/(\d+)[^"]*">([^<]*)<\/a>[^]*?<\/tr>/g)]
+        .map(r => [Number(r[1]), r[2], Number(textOf(r[0]).trim().split(" ").at(-4))]).sort((a, b) => a[0] - b[0]);
+    // The record as it came apart: every new browser a record of its own.
+    const env = newEnv({ LADDER_JOIN_NAMES: "0" });
+    const w = await new World(env).start();
+    await playMatch(w, [["Trent", NEW(5)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["trent", NEW(6)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["Twin", NEW(7)], ["Twin", NEW(8)], ["Kyle_K", KEYS.kyle]], [[3, 1], [3, 2]]);
+    await playMatch(w, [["Player", NEW(9)], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["Player", NEW("b")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["Ghost", NEW("c")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["Ghost", NEW("d")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    await playMatch(w, [["TRENT", NEW("e")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    // A record taken off the pages, and a key joined by hand to the last Trent.
+    env.LADDER.db.exec("UPDATE players SET hidden = 1 WHERE id = 9");
+    env.LADDER.db.exec("UPDATE players SET merged_into = 10 WHERE id = 3");
+    assert.deepEqual(players(env), [[1, "Trent", null], [2, "Kyle_K", null], [3, "trent", 10], [4, "Twin", null], [5, "Twin", null],
+                                    [6, "Player", null], [7, "Player", null], [8, "Ghost", null], [9, "Ghost", null], [10, "TRENT", null]]);
+
+    // A lobby that matches by name folds them with the first match it saves,
+    // whoever played in that one: Trent's into the first, under the name last
+    // played, with the key joined to it. Not the two who played each other,
+    // a name anyone might have, or a record taken off the pages.
+    const env2 = { ...env, LADDER_JOIN_NAMES: "1" };
+    const w2 = await new World(env2).start();
+    await playMatch(w2, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players(env2).slice(0, 10), [[1, "TRENT", null], [2, "Kyle_K", null], [3, "trent", 1], [4, "Twin", null], [5, "Twin", null],
+                                                  [6, "Player", null], [7, "Player", null], [8, "Ghost", null], [9, "Ghost", null], [10, "TRENT", 1]]);
+    assert.ok(logged.some(l => l.includes("ladder: record 10 folded into record 1 by its name (with its rows 3)")));
+    assert.deepEqual(w2.storage.m.get("ladder:folded").folds, [[10, 1, [3]]]);
+    assert.deepEqual((await board(w2)).filter(r => r[1] === "TRENT"), [[1, "TRENT", 3]], "one Trent, with all three matches");
+    assert.deepEqual((await board(w2)).filter(r => r[1] === "Twin").map(r => r[0]), [4, 5]);
+    const moved = await w2.page("/player/10?period=all");
+    assert.deepEqual([moved.status, moved.headers.Location], [302, "/player/1?period=all"]);
+    // A new browser under the name is the first record's.
+    await playMatch(w2, [["trent", NEW("a")], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.deepEqual(players(env2).at(-1).slice(1), ["trent", 1]);
+
+    // Once for a lobby, also after it slept: a record put back by hand stays its own.
+    env2.LADDER.db.exec("UPDATE players SET merged_into = NULL WHERE id = 10");
+    await playMatch(w2, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    const w3 = await new World(env2, w2.storage).start();
+    await playMatch(w3, [["Maw", KEYS.maw], ["Kyle_K", KEYS.kyle]], [[2, 1], [2, 1]]);
+    assert.equal(env2.LADDER.rows("SELECT merged_into FROM players WHERE id = 10")[0].merged_into, null);
 });
 
 await check("a database with no tables yet shows an empty list, and one that's away says so", async () => {

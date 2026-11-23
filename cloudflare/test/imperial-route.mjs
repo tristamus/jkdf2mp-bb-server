@@ -150,7 +150,7 @@ if (off) {
         assert.equal(relay.connections, 0);
     });
 } else {
-    await check("the relay's list, Coruscant pinned first", async () => {
+    await check("the relay's list, Coruscant and Bespin pinned first (wrangler.toml)", async () => {
         const r = await ask();
         assert.equal(r.status, 200);
         assert.match(r.headers["content-type"], /^application\/json/);
@@ -158,7 +158,8 @@ if (off) {
         assert.equal(r.json.state, "live");
         assert.equal(r.json.server, "127.0.0.1:8799");
         assert.deepEqual(r.json.games.map(g => [g.name, g.key, g.pinned, g.listed, g.joinable, g.players, g.max, g.map]),
-                         [["Coruscant", "13e5dd93743f59055bbf297508845b2b", true, true, true, 0, 31, "c3.jkl"]]);
+                         [["Coruscant", "13e5dd93743f59055bbf297508845b2b", true, true, true, 0, 31, "c3.jkl"],
+                          ["Bespin", "", true, false, false, 0, 0, ""]]);
         assert.equal(relay.connections, 1);
         assert.deepEqual(relay.lists, [{ start: 0, flags: 7, guid: "c01306bf79ded01199c900a02476ad4b" }]);
     });
@@ -177,21 +178,22 @@ if (off) {
         const r = await ask();
         assert.equal(r.json.state, "live");
         assert.deepEqual(r.json.games.map(g => [g.name, g.game, g.listed, g.why]), [
-            ["Coruscant", "jk1", false, "not-listed"], ["Duels", "jk1", true, ""], ["Asteroid", "mots", true, ""],
+            ["Coruscant", "jk1", false, "not-listed"], ["Bespin", "mots", false, "not-listed"], ["Duels", "jk1", true, ""],
+            ["Asteroid", "mots", true, ""],
             ["FFA", "jk1", true, ""]]);
         assert.deepEqual(relay.lists.map(l => l.start), [0, 2]);
     });
 
     for (const [mode, what] of [["silent", "a relay that never answers"], ["garbage", "a relay that answers garbage"],
                                 ["oversized", "a reply too big to be one"]]) {
-        await check(what + ": down, Coruscant greyed out", async () => {
+        await check(what + ": down, Coruscant and Bespin greyed out", async () => {
             await fresh();
             relay.mode = mode;
             const r = await ask();
             assert.equal(r.status, 200);
             assert.equal(r.json.state, "down");
             assert.deepEqual(r.json.games.map(g => [g.name, g.listed, g.joinable, g.why]),
-                             [["Coruscant", false, false, "relay-down"]]);
+                             [["Coruscant", false, false, "relay-down"], ["Bespin", false, false, "relay-down"]]);
             assert.ok(r.ms < 5000, `answered in ${r.ms} ms`);
         });
     }
