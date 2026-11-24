@@ -29,7 +29,10 @@
 //   when the chunk came, u8 kind, u8 seat (1 the host, 2.. players), packets
 // starting at a keyframe once there is one at least the delay old, and every
 // chunk after it in order as each comes of age. "feed waiting" says there is
-// none yet, and "feed ended <why>" comes before the feed closes the socket:
+// none yet, and "feed first <ms>" how long until there is, once the feed
+// holds a keyframe that isn't of age yet: when the page comes, or when that
+// keyframe comes (the game watching counts it down; one that doesn't know
+// it leaves it). "feed ended <why>" comes before the feed closes the socket:
 // when the room ended, once the page has had the match's last delay seconds.
 // The host's game sends a keyframe once its feed opens, at each new level and
 // every minute; a page that comes when the feed holds none (it was evicted, or
@@ -493,6 +496,7 @@ export class Feed extends DurableObject {
             if (state.next < 0) {
                 this.sendTo(server, "feed waiting");
                 this.askKey();
+                this.sayFirst();
             }
             if (!state.box)
                 this.pagesChanged();
@@ -530,6 +534,8 @@ export class Feed extends DurableObject {
         this.lastUp = now;
         this.take(now, data[0], s.seat, data.subarray(1));
         this.flush(now);
+        if (data[0] === KIND_KEY)
+            this.sayFirst(now);
     }
 
     async webSocketClose(ws) {
@@ -659,11 +665,43 @@ export class Feed extends DurableObject {
             const c = this.chunks.shift();
             this.bytes -= c.rec.length;
             for (const st of this.socks.values()) {
-                if ("next" in st && st.next >= 0 && st.next <= c.seq)
+                if ("next" in st && st.next >= 0 && st.next <= c.seq) {
                     st.next = -1;
+                    st.told = 0;
+                }
             }
         }
         this.base = this.chunks.length ? this.chunks[0].seq : this.nextSeq;
+    }
+
+    // How long until the first keyframe the feed holds comes of age, -1 for
+    // none. One of age has been sent to every page by then (flush), so a
+    // page still waiting waits for this one.
+    firstIn(now) {
+        const ripe = now - this.cfg.delay * 1000;
+        for (const c of this.chunks) {
+            if (c.kind === KIND_KEY && c.at > ripe)
+                return c.at - ripe;
+        }
+        return -1;
+    }
+
+    // Tells each page waiting for its first keyframe when it comes
+    // ("feed first <ms>"), once: early in a match the wait is the delay, and
+    // a page counts it down rather than only say so (the audit of watching,
+    // 2026-11-24).
+    sayFirst(now = Date.now()) {
+        if (!this.cfg)
+            return;
+        const ms = this.firstIn(now);
+        if (ms < 0)
+            return;
+        for (const [ws, s] of this.socks) {
+            if (!("next" in s) || s.next >= 0 || s.told)
+                continue;
+            s.told = 1;
+            this.sendTo(ws, "feed first " + Math.ceil(ms));
+        }
     }
 
     // Sends every page what came of age, and drops what nobody can need:

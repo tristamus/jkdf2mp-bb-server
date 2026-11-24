@@ -119,11 +119,12 @@ await check("a page that comes with no keyframe here has the feed ask the host's
     clock += 6000;
     await page(feed);
     assert.deepEqual(host.take(), ["key"]);
-    // One on its way (not yet of age) is enough.
+    // One on its way (not yet of age) is enough, and the page is told when
+    // it comes of age.
     await feed.webSocketMessage(host, chunk(1, 1));
     clock += 20_000;
     p = await page(feed);
-    assert.deepEqual(p.take(), ["feed 30", "feed waiting"]);
+    assert.deepEqual(p.take(), ["feed 30", "feed waiting", "feed first 10000"]);
     assert.deepEqual(host.take(), []);
     // No host's game in the feed: nobody to ask.
     const lone = await newFeed();
@@ -132,6 +133,34 @@ await check("a page that comes with no keyframe here has the feed ask the host's
     g.take();
     await page(lone);
     assert.deepEqual(g.take(), []);
+});
+
+await check("a page waiting for its first keyframe is told once when it comes of age, for the countdown", async () => {
+    clock = 3_000_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const host = await game(feed, T1), other = await game(feed, T2);
+    const early = await page(feed);
+    assert.deepEqual(early.take(), ["feed 30", "feed waiting"], "with no keyframe held: no time to tell");
+    host.take();
+    clock += 500;
+    await feed.webSocketMessage(other, chunk(0, 1));
+    assert.deepEqual(early.take(), [], "nor for a joiner's packets");
+    await feed.webSocketMessage(host, chunk(1, 2));
+    assert.deepEqual(early.take(), ["feed first 30000"]);
+    clock += 1000;
+    await feed.webSocketMessage(host, chunk(2, 3));
+    await feed.webSocketMessage(host, chunk(1, 4));
+    assert.deepEqual(early.take(), [], "once: another keyframe doesn't tell it again");
+    clock += 11_400;
+    const later = await page(feed);
+    assert.deepEqual(later.take(), ["feed 30", "feed waiting", "feed first 17600"], "the first one's time, not the newest");
+    clock += 17_600;
+    feed.flush();
+    assert.deepEqual(records(early.take()).map(r => r.packets), [[2]], "the first keyframe, on time");
+    assert.deepEqual(records(later.take()).map(r => r.packets), [[2]]);
+    const now = await page(feed);
+    assert.deepEqual(texts(now.take()), ["feed 30"], "one of age: sent at once, no wait to tell");
 });
 
 await check("only a game with a token the lobby gave sends, as its seat", async () => {
@@ -155,6 +184,7 @@ await check("pages get what was sent once it's the delay old, from a keyframe on
     await feed.webSocketMessage(other, chunk(0, 9, 9));       // before any keyframe: of no use
     clock += 1000;
     await feed.webSocketMessage(host, chunk(1, 1, 2, 3));
+    assert.deepEqual(p.take(), ["feed first 30000"], "told when it comes of age");
     await feed.webSocketMessage(host, chunk(2, 4, 5));
     clock += 250;
     await feed.webSocketMessage(other, chunk(0, 6));
@@ -246,6 +276,7 @@ await check("ending a feed (watching off) tells its pages at once, closes everyt
     const p = await page(feed);
     p.take();
     await feed.webSocketMessage(g, chunk(1, 1));
+    assert.deepEqual(p.take(), ["feed first 30000"]);
     await feed.end("watching off");
     assert.deepEqual(p.take(), ["feed ended watching off"]);
     assert.ok(p.closed && g.closed);
@@ -262,6 +293,7 @@ await check("when the room ends, pages get the match's last seconds as they come
     const p = await page(feed);
     p.take();
     await feed.webSocketMessage(host, chunk(1, 1));
+    assert.deepEqual(p.take(), ["feed first 30000"]);
     clock += 10_000;
     await feed.webSocketMessage(other, chunk(0, 2));
     clock += 10_000;
