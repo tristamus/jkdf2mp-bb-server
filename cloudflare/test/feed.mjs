@@ -451,6 +451,70 @@ await check("the game in a viewing page's box (?box=1) gets the feed but isn't c
     assert.deepEqual(feed.socks.get(feed.ctx.sockets.at(-1)), { next: -1 });
 });
 
+await check("a game watching says its player's name: the lobby hears the names, and every page who watches", async () => {
+    const told = [];
+    const LOBBY = { idFromName: n => n, get: () => ({ feedPages: async (room, count, names) => { told.push([count, names]); return true; } }) };
+    const feed = await newFeed({ LOBBY });
+    await feed.arm(7, 30, { [T1]: 1 });
+    const g = await game(feed, T1);
+    const p = await page(feed);
+    ws101(await feed.fetch(req("/feed/7?box=1")));
+    const b = feed.ctx.sockets.at(-1);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told, [[1, []]], "no names yet");
+    await feed.webSocketMessage(p, "name Rogue");
+    await feed.webSocketMessage(b, "name   Kyle \u0007 Katarn  ");
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told.at(-1), [1, ["Rogue", "Kyle ? Katarn"]], "the box's game is named, not counted; cleaned");
+    assert.deepEqual(feed.socks.get(b), { next: -1, box: 1, name: "Kyle ? Katarn" });
+    assert.deepEqual(b.att, { next: -1, box: 1, name: "Kyle ? Katarn" }, "kept through an eviction");
+    // The same name again is nothing; a game's text is nothing.
+    await feed.webSocketMessage(p, "name Rogue");
+    await feed.webSocketMessage(g, "name Host");
+    assert.equal(feed.pagesTimer, null);
+    // No name, or one too long.
+    await feed.webSocketMessage(p, "name ");
+    await feed.webSocketMessage(b, "name " + "N".repeat(40));
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told.at(-1), [1, ["N".repeat(16)]]);
+    assert.deepEqual(feed.socks.get(p), { next: -1 });
+    // A named box's game leaving is told.
+    await feed.webSocketClose(b);
+    feed.pagesTimer.fn();
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(told.at(-1), [1, []]);
+    // The lobby says who watches in all: every page hears it, a later one as it comes.
+    p.take();
+    assert.equal(await feed.watching(3, ["Rogue", " Kyle\u0001", "", 5]), true);
+    assert.deepEqual(texts(p.take()), ["feed watching 3 Rogue\tKyle?\t5"]);
+    assert.deepEqual(texts(g.take()).filter(t => t.startsWith("feed watching")), [], "not the games sending");
+    await feed.watching(3, ["Rogue", "Kyle?", "5"]);
+    assert.deepEqual(texts(p.take()), [], "nothing new");
+    const late = await page(feed);
+    assert.deepEqual(texts(late.sent).slice(0, 2), ["feed 30", "feed watching 3 Rogue\tKyle?\t5"]);
+    assert.equal(feed.ctx.storage.m.get("watching"), "feed watching 3 Rogue\tKyle?\t5");
+    const again = new Feed(new FakeCtx(feed.ctx.storage, feed.ctx.sockets), { LOBBY });
+    await again.ctx.ready;
+    assert.equal(again.watchingNow, "feed watching 3 Rogue\tKyle?\t5", "kept through an eviction");
+    // Never fewer than the names; nobody; too many names.
+    await feed.watching(1, ["A", "B"]);
+    assert.deepEqual(texts(p.take()), ["feed watching 2 A\tB"]);
+    await feed.watching(0, []);
+    assert.deepEqual(texts(p.take()), ["feed watching 0"]);
+    await feed.watching(-4, "nope");
+    assert.deepEqual(texts(p.take()), []);
+    const many = Array.from({ length: 50 }, (_, i) => "P" + i);
+    await feed.watching(50, many);
+    assert.equal(texts(p.take())[0], "feed watching 50 " + many.slice(0, 32).join("\t"));
+    // Its end forgets it.
+    await feed.end("watching off");
+    assert.equal(feed.watchingNow, null);
+    assert.equal(feed.ctx.storage.m.get("watching"), undefined);
+});
+
 // ---- The lobby's part.
 
 function entry({ name = "t_Room", episode = "JK1MP", map = "m2.jkl", password = "" } = {}) {
@@ -814,6 +878,75 @@ await check("games watching from inside the game count in the room's watching, a
     await w.say(H, "spectators off");
     assert.equal(await w.lobby.feedPages(H.room, 1), false, "its feed has ended");
     assert.equal(await watchingOf(H.room), undefined);
+});
+
+await check("who watches: the lobby's pages see the names, and the match's players and those watching are told", async () => {
+    const w = await new World().start();
+    w.feeds.env.LOBBY = { idFromName: n => n, get: () => w.lobby };
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    const J = await w.joiner("Jan", H.room);
+    await w.say(J, "feed");
+    const feed = w.feeds.of(H.room), room = w.lobby.rooms.get(H.room);
+    const watchLines = ws => ws.take().filter(l => typeof l === "string" && /^(feed )?watching/.test(l));
+    assert.deepEqual(watchLines(H), [], "nobody watching: nothing to tell");
+    // A page watching, with a game in its box; a game watching from inside the game.
+    const p = await w.page();
+    await w.say(p, `spectate ${H.room}`);
+    ws101(await feed.fetch(req(`/feed/${H.room}?box=1`)));
+    const b = feed.ctx.sockets.at(-1);
+    const v = await page(feed);
+    await feed.webSocketMessage(b, "name Kyle");
+    await feed.webSocketMessage(v, "name Rogue");
+    feed.pagesTimer.fn();
+    await w.settle();
+    const g = (await w.status()).games.find(x => x.id === H.room);
+    assert.equal(g.watching, 2, "the page (its box's game is its own) and the game watching");
+    assert.deepEqual(g.watchers, ["Kyle", "Rogue"]);
+    assert.deepEqual(watchLines(H).at(-1), "watching 2 Kyle\tRogue");
+    assert.deepEqual(watchLines(J).at(-1), "watching 2 Kyle\tRogue");
+    assert.deepEqual(watchLines(v).at(-1), "feed watching 2 Kyle\tRogue");
+    assert.deepEqual(watchLines(b).at(-1), "feed watching 2 Kyle\tRogue");
+    assert.deepEqual(w.storage.m.get("feed:" + H.room).names, ["Kyle", "Rogue"], "kept for a restart");
+    // Nothing changed: nobody is told again.
+    await w.say(H, "feed");
+    assert.deepEqual(watchLines(H), []);
+    assert.deepEqual(watchLines(v), []);
+    // A player who comes is told once it takes part.
+    const K = await w.joiner("Kel", H.room);
+    await w.say(K, "feed");
+    assert.deepEqual(watchLines(K), ["watching 2 Kyle\tRogue"]);
+    assert.deepEqual(watchLines(H), []);
+    // A page watching only the scores: counted, no name.
+    const q = await w.page();
+    await w.say(q, `spectate ${H.room}`);
+    assert.deepEqual(watchLines(H), ["watching 3 Kyle\tRogue"]);
+    // The page and its box go; the game watching goes.
+    await w.say(p, "spectate 0");
+    await feed.webSocketClose(b);
+    feed.pagesTimer.fn();
+    await w.settle();
+    assert.deepEqual(watchLines(H).at(-1), "watching 2 Rogue");
+    assert.deepEqual(watchLines(v).at(-1), "feed watching 2 Rogue");
+    await w.say(q, "spectate 0");
+    await feed.webSocketClose(v);
+    feed.pagesTimer.fn();
+    await w.settle();
+    assert.deepEqual(watchLines(H).at(-1), "watching 0");
+    const g0 = (await w.status()).games.find(x => x.id === H.room);
+    assert.equal(g0.watching, undefined);
+    assert.equal(g0.watchers, undefined);
+    // A feed that ended itself, armed again, is told again who watches.
+    const v2 = await page(feed);
+    await feed.webSocketMessage(v2, "name Rogue");
+    feed.pagesTimer.fn();
+    await w.settle();
+    assert.equal(feed.watchingNow, "feed watching 1 Rogue");
+    await feed.end("idle");
+    assert.equal(feed.watchingNow, null);
+    room.feed.rearmAt = 0;
+    await w.say(H, "feed");
+    assert.equal(feed.watchingNow, "feed watching 1 Rogue");
 });
 
 // A bucket like R2's, for the host's mod: objects by key.
