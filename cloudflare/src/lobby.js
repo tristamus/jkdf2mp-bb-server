@@ -94,7 +94,7 @@ import { DurableObject } from "cloudflare:workers";
 import { movedTo, movedStatus } from "./moved.js";
 import { takeSummary } from "./summary.js";
 import { imperialGames } from "./imperial.js";
-import { feedRoute } from "./feed.js";
+import { feedRoute, sayClean, WATCH_NAMES_MAX } from "./feed.js";
 import { imperialFeedRoute } from "./imperial-feed.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
@@ -492,6 +492,13 @@ function netcode(text) {
     return text && NET_RE.test(text) ? Number(text) : 0;
 }
 
+// The names of those watching a match from a game, as its feed says them
+// (feedPages): cleaned as the feed cleans them, at most WATCH_NAMES_MAX.
+function watchNames(names) {
+    return (Array.isArray(names) ? names : []).slice(0, WATCH_NAMES_MAX)
+        .map(x => sayClean(String(x), 16)).filter(x => x);
+}
+
 function newKey() {
     const b = new Uint8Array(16);
     crypto.getRandomValues(b);
@@ -564,8 +571,11 @@ export class Lobby extends DurableObject {
         // {tokens: {player id: token}, idle (when its last page stopped
         // watching, 0 while one does), armed (what the feed was last told),
         // pages (how many games watch it from inside the game, as the feed
-        // last said: feedPages)}, and feedChain the calls to its feed, one
-        // after another.
+        // last said: feedPages), names (the names of the games watching, the
+        // games in viewing pages' boxes too: feedPages), watchLine (what its
+        // feed was last told of who watches, not kept)}, feedChain the calls
+        // to its feed, one after another, and watchTold {player id -> {ws,
+        // line}}, what its games were last told of who watches (watchersTell).
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
@@ -606,6 +616,9 @@ export class Lobby extends DurableObject {
         // Imperial relay servers' feeds (imperialFeed), by their sid:
         // {sid, id, token, delay, game, name, episode, map, pages, chain}.
         this.imperial = new Map();
+        // sid -> the watching line an Imperial server's feed was last told
+        // (watchersTell), not kept.
+        this.impWatchTold = new Map();
         // Pages send "ping" every 25 s so proxies keep the socket open. Cloudflare
         // answers it without waking the object; the page ignores the "pong".
         ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
@@ -636,7 +649,8 @@ export class Lobby extends DurableObject {
             const room = this.newRoom(id, entry, seats.get("seats:" + id), pw);
             room.spect = spects.get("spect:" + id) || null;
             const feed = feeds.get("feed:" + id);
-            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0, told: {}, ok: "" } : null;
+            room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0,
+                                 names: watchNames(feed.names), told: {}, ok: "" } : null;
             this.rooms.set(id, room);
         }
         this.stripPasswords();
@@ -1408,12 +1422,9 @@ export class Lobby extends DurableObject {
         }
         lobby.sort(byName);
         // How many pages watch each room's match; the games watching it from
-        // inside the game are added from its feed (feedPages).
-        const watching = new Map();
-        for (const c of this.conns.values()) {
-            if (c.watch && c.spect)
-                watching.set(c.spect, (watching.get(c.spect) || 0) + 1);
-        }
+        // inside the game are added from its feed (feedPages), with the names
+        // of those watching from a game (roomWatchers).
+        const watching = this.spectPages();
         const games = [];
         let online = lobby.length;
         for (const room of [...this.rooms.values()].sort((a, b) => a.id - b.id)) {
@@ -1435,13 +1446,14 @@ export class Lobby extends DurableObject {
             const live = this.ladder.on() ? this.ladder.live(room.id, info.map, locked) : null;
             // Whether its match can be watched, and by how many pages it is.
             const spect = this.spectOn(room, locked);
-            const seen = spect ? (watching.get(room.id) || 0) + ((room.feed && room.feed.pages) || 0) : 0;
+            const { n: seen, names: watchers } = this.roomWatchers(room, watching, spect);
             games.push({
                 id: room.id, name: info.name, game,
                 map: info.map, ...(title ? { title } : {}), episode: info.episode, mod: info.mod,
                 locked, players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room), rank: info.maxRank, ...(live ? { live } : {}),
-                spect: spect ? 1 : 0, ...(seen ? { watching: seen } : {}), ...(room.feed ? { feed: 1 } : {}),
+                spect: spect ? 1 : 0, ...(seen ? { watching: seen } : {}), ...(watchers.length ? { watchers } : {}),
+                ...(room.feed ? { feed: 1 } : {}),
             });
         }
         for (const g of Object.values(byGame)) {
@@ -1451,9 +1463,9 @@ export class Lobby extends DurableObject {
         // Imperial relay servers sending their match's feed (imperialFeed):
         // the page finds each one's card by its sid.
         const imp = [...this.imperial.values()].sort((a, b) => a.id - b.id).map(f => {
-            const seen = (watching.get(f.id) || 0) + (f.pages || 0);
+            const { n: seen, names: watchers } = this.impWatchers(f, watching);
             return { id: f.id, sid: f.sid, game: f.game, name: f.name, episode: f.episode, map: f.map, delay: f.delay,
-                     ...(seen ? { watching: seen } : {}) };
+                     ...(seen ? { watching: seen } : {}), ...(watchers.length ? { watchers } : {}) };
         });
         return JSON.stringify({
             online, lobby: lobby.slice(0, MAX_STATUS_NAMES), byGame, games: games.slice(0, MAX_STATUS_GAMES),
@@ -1491,6 +1503,7 @@ export class Lobby extends DurableObject {
     // unless they already have this status.
     statusChanged() {
         this.feeds();
+        this.watchersTell();
         const watchers = this.watchers();
         if (!watchers.length) {
             this.lastStatus = null;
@@ -1619,7 +1632,7 @@ export class Lobby extends DurableObject {
             return;
         }
         if (!room.feed)
-            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0, told: {}, ok: "" };
+            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0, names: [], told: {}, ok: "" };
         const idle = always || watched ? 0 : room.feed.idle || now;
         const tokens = {};
         for (const [id] of this.feedGames(room))
@@ -1628,7 +1641,7 @@ export class Lobby extends DurableObject {
         const armed = JSON.stringify([delay, tokens]);
         if (idle !== room.feed.idle) {
             room.feed.idle = idle;
-            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0 });
+            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0, names: room.feed.names || [] });
         }
         if (armed === room.feed.armed) {
             if (room.feed.ok === armed)
@@ -1637,7 +1650,7 @@ export class Lobby extends DurableObject {
         }
         room.feed.tokens = tokens;
         room.feed.armed = armed;
-        this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0 });
+        this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0, names: room.feed.names || [] });
         const byToken = Object.fromEntries(Object.entries(tokens).map(([id, t]) => [t, Number(id)]));
         const feed = room.feed;
         this.feedCall(room, stub => stub.arm(room.id, delay, byToken)).then(ok => {
@@ -1651,6 +1664,10 @@ export class Lobby extends DurableObject {
             }
             feed.ok = armed;
             this.feedTell(room);
+            // A feed armed again may have ended itself and forgotten who
+            // watches: it's told again (the same line changes nothing).
+            feed.watchLine = "";
+            this.watchersTell();
         });
     }
 
@@ -1670,14 +1687,17 @@ export class Lobby extends DurableObject {
     }
 
     // From a room's feed (src/feed.js), over RPC: how many games watch its
-    // match from inside the game now. They're counted in its watching, and
-    // keep a feed that's only on while watched (FEED_ONLY_WATCHED) on.
-    async feedPages(roomId, n) {
+    // match from inside the game now, and the names of the games watching
+    // (those in viewing pages' boxes too). They're counted in its watching,
+    // and keep a feed that's only on while watched (FEED_ONLY_WATCHED) on.
+    async feedPages(roomId, n, names) {
+        const clean = watchNames(names);
         const imp = this.impById(Number(roomId));
         if (imp && Number.isInteger(n) && n >= 0) {
             n = Math.min(n, MAX_FEED_PAGES);
-            if ((imp.pages || 0) !== n) {
+            if ((imp.pages || 0) !== n || (imp.names || []).join("\t") !== clean.join("\t")) {
                 imp.pages = n;
+                imp.names = clean;
                 this.impSave(imp);
                 this.statusChanged();
             }
@@ -1687,12 +1707,83 @@ export class Lobby extends DurableObject {
         if (!room || !room.feed || !Number.isInteger(n) || n < 0)
             return false;
         n = Math.min(n, MAX_FEED_PAGES);
-        if ((room.feed.pages || 0) === n)
+        if ((room.feed.pages || 0) === n && (room.feed.names || []).join("\t") === clean.join("\t"))
             return true;
         room.feed.pages = n;
-        this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle: room.feed.idle || 0, pages: n });
+        room.feed.names = clean;
+        this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle: room.feed.idle || 0, pages: n, names: clean });
         this.statusChanged();
         return true;
+    }
+
+    // Who watches each match, as the pages watching the lobby are told it
+    // (status): how many (the pages watching it here, and the games watching
+    // it from inside the game, as its feed says), and the names of those
+    // watching from a game (its feed's; a page watching only its scores has
+    // none). Its games are told too, and the games watching it through its
+    // feed: "watching <n>", and after a space the names, tab-separated
+    // (Antonio, 2026-11-24: players and those watching see who watches). A
+    // game is told when it changes, and once when it's new to the room.
+    spectPages() {
+        const pages = new Map();
+        for (const c of this.conns.values()) {
+            if (c.watch && c.spect)
+                pages.set(c.spect, (pages.get(c.spect) || 0) + 1);
+        }
+        return pages;
+    }
+
+    roomWatchers(room, pages, spect) {
+        const names = spect && room.feed ? room.feed.names || [] : [];
+        const n = spect ? Math.max((pages.get(room.id) || 0) + ((room.feed && room.feed.pages) || 0), names.length) : 0;
+        return { n, names };
+    }
+
+    impWatchers(f, pages) {
+        const names = f.names || [];
+        return { n: Math.max((pages.get(f.id) || 0) + (f.pages || 0), names.length), names };
+    }
+
+    watchersTell() {
+        const pages = this.spectPages();
+        for (const room of this.rooms.values()) {
+            const info = readEntry(room.entry);
+            const spect = !!info && this.spectOn(room, info.locked || !!room.pw);
+            const { n, names } = this.roomWatchers(room, pages, spect);
+            const line = "watching " + n + (names.length ? " " + names.join("\t") : "");
+            if (!room.watchTold)
+                room.watchTold = new Map();
+            for (const [id, ws] of this.feedGames(room)) {
+                const was = room.watchTold.get(id);
+                if (was ? was.ws === ws && was.line === line : !n)
+                    continue;
+                room.watchTold.set(id, { ws, line });
+                this.send(ws, line);
+            }
+            const feed = room.feed;
+            if (this.env.FEED && feed && feed.ok && feed.watchLine !== line) {
+                feed.watchLine = line;
+                this.feedCall(room, stub => stub.watching(n, names)).then(ok => {
+                    if (!ok && room.feed === feed && feed.watchLine === line)
+                        feed.watchLine = "";
+                });
+            }
+        }
+        if (!this.env.FEED)
+            return;
+        for (const f of this.imperial.values()) {
+            const { n, names } = this.impWatchers(f, pages);
+            const line = "watching " + n + (names.length ? " " + names.join("\t") : "");
+            if (this.impWatchTold.get(f.sid) === line)
+                continue;
+            this.impWatchTold.set(f.sid, line);
+            const stub = this.env.FEED.get(this.env.FEED.idFromName("room:" + f.id));
+            f.chain = (f.chain || Promise.resolve()).then(() => stub.watching(n, names)).catch(e => {
+                if (this.impWatchTold.get(f.sid) === line)
+                    this.impWatchTold.delete(f.sid);
+                console.log(`relay: imperial ${f.name}: its feed didn't hear who watches: ${e && e.message || e}`);
+            });
+        }
     }
 
     feedEnd(room, why) {
@@ -1920,8 +2011,10 @@ export class Lobby extends DurableObject {
     }
 
     impForget(f) {
-        if (this.imperial.get(f.sid) === f)
+        if (this.imperial.get(f.sid) === f) {
             this.imperial.delete(f.sid);
+            this.impWatchTold.delete(f.sid);
+        }
         this.ctx.storage.delete("imp:" + f.sid);
     }
 

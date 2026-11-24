@@ -207,6 +207,17 @@ await check("the status lists it by its sid for the page, with how many watch", 
     await w.lobby.webSocketMessage(p, `spectate ${room + 50}`);
     s = await w.status();
     assert.equal(s.imp[0].watching, 3);
+    // The names of the games watching: listed, and told to its feed's pages.
+    const feed = w.feeds.of(room);
+    const v = feed.ctx.sockets.length;
+    assert.equal((await feed.fetch(new Request(`https://lobby.test/feed/${room}`, { headers: { Upgrade: "websocket" } }))).status, 101);
+    const vs = feed.ctx.sockets[v];
+    assert.equal(await w.lobby.feedPages(room, 3, ["Rogue", "Kyle"]), true);
+    await w.lobby.imperial.get(SID).chain;
+    s = await w.status();
+    assert.deepEqual(s.imp[0].watchers, ["Rogue", "Kyle"]);
+    assert.equal(w.storage.m.get("imp:" + SID).names.length, 2, "kept for a restart");
+    assert.ok(vs.take().includes("feed watching 3 Rogue\tKyle"));
 });
 
 await check("ending it: the feed ends and it's no longer listed; a feed that ended itself isn't either", async () => {

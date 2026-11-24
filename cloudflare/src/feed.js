@@ -74,6 +74,15 @@
 // <name>\t<text>", and the feed sends the host's game "say <name>
 // (watching): <text>", which it puts in the match's chat (spectatorSays).
 //
+// Who's watching: a game watching says its player's name ("name <name>",
+// cleaned as a message's, "name " for none), once its socket opens and when
+// it changes, the game in a viewing page's box too. The Lobby hears the names
+// with how many watch (feedPages), and tells the feed who watches the match
+// in all (watching: how many, and the names it knows; the rest are watching
+// without a game, its scores only). The feed tells every page here: "feed
+// watching <n>" and, tab-separated after a space, the names (Antonio,
+// 2026-11-24: no way to see who else was watching).
+//
 // An Imperial relay server's feed (src/imperial-feed.js) passes those on
 // only when the server said it takes them (hostTakes). Otherwise the game
 // watching is told at once: "feed no-files" for a mod or level it asked for,
@@ -126,7 +135,8 @@ const MOD_PART_MAX = 1024 * 1024 + 64;
 const MOD_MAX_PARTS = 1100;
 const MOD_MAX_BYTES = 1280 * 1024 * 1024;
 const MOD_PUTS_PER_S = 10;
-// A page says little (mod <fp> now and then, a spectator's message): more
+// A page says little (mod <fp> now and then, a spectator's message, its
+// player's name): more
 // than this in RATE_WINDOW_MS and its socket is closed.
 const PAGE_SAYS = 10;
 // A spectator's message for the match's players, from a game watching ("say
@@ -138,6 +148,8 @@ const PAGE_SAYS = 10;
 const SAY_MS = 3000;
 const SAY_NAME_MAX = 16;
 const SAY_TEXT_MAX = 96;
+// The names of those watching the Lobby and the pages are told, at most.
+export const WATCH_NAMES_MAX = 32;
 export const MOD_PREFIX = "feed-mods/";
 
 // As the game watching cleans what it sends (stdComm_WSRelay.c's
@@ -173,6 +185,8 @@ export class Feed extends DurableObject {
         this.keyAsked = 0;        // when the host's game was last asked for a keyframe
         this.ending = null;       // why, while pages get the match's last seconds (end)
         this.pagesTold = -1;      // how many pages the Lobby was last told watch, -1 for not yet
+        this.namesTold = "";      // and the names it was told, as one string
+        this.watchingNow = null;  // the line pages get of who watches (watching), kept in storage
         this.pagesTimer = null;   // the wait before it's told again
         this.mods = {};           // fp -> bytes put of the host's mod or level (modPut), kept in storage
         this.modAt = {};          // fp -> when a part of it was last put, kept in storage
@@ -184,6 +198,7 @@ export class Feed extends DurableObject {
             this.cfg = (await ctx.storage.get("cfg")) || null;
             this.mods = (await ctx.storage.get("mods")) || {};
             this.modAt = (await ctx.storage.get("modAt")) || {};
+            this.watchingNow = (await ctx.storage.get("watching")) || null;
             for (const ws of ctx.getWebSockets())
                 this.socks.set(ws, ws.deserializeAttachment() || { next: -1 });
             for (const s of this.socks.values()) {
@@ -238,6 +253,7 @@ export class Feed extends DurableObject {
         this.mods = {};
         this.modAt = {};
         this.modAsked.clear();
+        this.watchingNow = null;
         await this.ctx.storage.deleteAll();
         if (this.cfg && why === "room ended" && this.unsent()) {
             this.cfg = { ...this.cfg, tokens: {} };
@@ -384,6 +400,8 @@ export class Feed extends DurableObject {
         this.cfg = null;
         this.ending = null;
         this.pagesTold = -1;
+        this.namesTold = "";
+        this.watchingNow = null;
         if (this.timer) {
             clearTimeout(this.timer);
             this.timer = null;
@@ -449,18 +467,66 @@ export class Feed extends DurableObject {
     async pagesSay() {
         if (!this.cfg || !this.env || !this.env.LOBBY)
             return;
-        const room = this.cfg.room, n = this.pageCount(false);
-        if (n === this.pagesTold)
+        const room = this.cfg.room, n = this.pageCount(false), names = this.pageNames();
+        const told = names.join("\t");
+        if (n === this.pagesTold && told === this.namesTold)
             return;
         this.pagesTold = n;
+        this.namesTold = told;
         try {
             const lobby = this.env.LOBBY.get(this.env.LOBBY.idFromName("lobby"));
-            await lobby.feedPages(room, n);
+            await lobby.feedPages(room, n, names);
         } catch (e) {
             // Told again the next time a page comes or goes.
             this.pagesTold = -1;
             console.log(`feed: room ${room}: the lobby didn't hear how many watch: ${e && e.message || e}`);
         }
+    }
+
+    // The names the games watching here said (name), those in a viewing
+    // page's box too, in the order they came.
+    pageNames() {
+        const names = [];
+        for (const s of this.socks.values()) {
+            if ("next" in s && s.name && names.length < WATCH_NAMES_MAX)
+                names.push(s.name);
+        }
+        return names;
+    }
+
+    // From the Lobby: who watches the match, in all: how many, and the names
+    // of those it knows (pageNames, and none for a page watching its scores
+    // only). Every page here is told, and one that comes later as it comes.
+    async watching(n, names) {
+        n = Number.isInteger(n) && n >= 0 ? Math.min(n, 100000) : 0;
+        const clean = (Array.isArray(names) ? names : []).slice(0, WATCH_NAMES_MAX)
+            .map(x => sayClean(String(x), SAY_NAME_MAX)).filter(x => x);
+        const line = "feed watching " + Math.max(n, clean.length) + (clean.length ? " " + clean.join("\t") : "");
+        if (line === this.watchingNow)
+            return true;
+        this.watchingNow = line;
+        await this.ctx.storage.put("watching", line);
+        for (const [ws, s] of this.socks) {
+            if ("next" in s)
+                this.sendTo(ws, line);
+        }
+        return true;
+    }
+
+    // name <name>: the player's name of a game watching (above).
+    pageName(ws, said) {
+        const s = this.socks.get(ws);
+        if (!s || !("next" in s))
+            return;
+        const name = sayClean(said, SAY_NAME_MAX);
+        if ((s.name || "") === name)
+            return;
+        if (name)
+            s.name = name;
+        else
+            delete s.name;
+        try { ws.serializeAttachment(s.box ? { next: -1, box: 1, ...(name ? { name } : {}) } : { next: -1, ...(name ? { name } : {}) }); } catch (e) {}
+        this.pagesChanged();
     }
 
     async fetch(request) {
@@ -492,6 +558,8 @@ export class Feed extends DurableObject {
         this.socks.set(server, state);
         if ("next" in state) {
             this.sendTo(server, "feed " + this.cfg.delay);
+            if (this.watchingNow)
+                this.sendTo(server, this.watchingNow);
             this.flush();
             if (state.next < 0) {
                 this.sendTo(server, "feed waiting");
@@ -508,8 +576,8 @@ export class Feed extends DurableObject {
         const s = this.socks.get(ws);
         if (!s)
             return;
-        // A page says only mod <fp> (its ping is answered without waking the
-        // object), and a game nothing in text.
+        // A page says only mod <fp>, say and name (its ping is answered
+        // without waking the object), and a game nothing in text.
         if (!("seat" in s)) {
             if (typeof message === "string")
                 this.pageSays(ws, message);
@@ -543,7 +611,7 @@ export class Feed extends DurableObject {
         this.socks.delete(ws);
         this.rate.delete(ws);
         try { ws.close(1000, "bye"); } catch (e) {}
-        if (s && "next" in s && !s.box)
+        if (s && "next" in s && (!s.box || s.name))
             this.pagesChanged();
         this.endIfDone();
     }
@@ -552,7 +620,7 @@ export class Feed extends DurableObject {
         const s = this.socks.get(ws);
         this.socks.delete(ws);
         this.rate.delete(ws);
-        if (s && "next" in s && !s.box)
+        if (s && "next" in s && (!s.box || s.name))
             this.pagesChanged();
         this.endIfDone();
     }
@@ -571,6 +639,10 @@ export class Feed extends DurableObject {
         }
         if (text.startsWith("say ")) {
             this.spectatorSays(ws, text.substring(4), now);
+            return;
+        }
+        if (text.startsWith("name ") || text === "name") {
+            this.pageName(ws, text.substring(5));
             return;
         }
         const m = /^mod ([0-9a-f]{64})$/.exec(text);
