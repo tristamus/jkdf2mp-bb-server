@@ -877,6 +877,51 @@ await check("a spectator's message goes to the host's game as the chat shows it,
     assert.deepEqual(host.take().filter(m => typeof m === "string" && m.startsWith("say")), []);
 });
 
+await check("the host's chat reaches every page watching at once, not held back; only the host's, cleaned, at most 20 in 5 s", async () => {
+    clock = 3_800_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1, [T2]: 2 });
+    const host = await game(feed, T1), other = await game(feed, T2);
+    const p = await page(feed), box = (ws101(await feed.fetch(req("/feed/7?box=1"))), feed.ctx.sockets.at(-1));
+    p.take();
+    box.take();
+    host.take();
+    await feed.webSocketMessage(host, "chat Kyle says 'over here'");
+    const got = p.take();
+    assert.deepEqual(texts(got), ["chat Kyle says 'over here'"], "at once, with no time passing");
+    assert.deepEqual(records(got), [], "not as packets");
+    assert.deepEqual(texts(box.take()), ["chat Kyle says 'over here'"], "the box's game too");
+    assert.deepEqual(host.take(), [], "not back to the host");
+    await feed.webSocketMessage(other, "chat Jerec says 'no'");
+    assert.deepEqual(texts(p.take()), [], "a joiner's game sends none (the host's has every line)");
+    await feed.webSocketMessage(host, "chat   Rogue  says 'gg\u00e9'  ");
+    assert.deepEqual(texts(p.take()), ["chat Rogue says 'gg?'"], "cleaned as the game's chat");
+    await feed.webSocketMessage(host, "chat " + "x".repeat(300));
+    assert.deepEqual(texts(p.take()), ["chat " + "x".repeat(127)], "no longer than the game's chat line");
+    await feed.webSocketMessage(host, "chat    ");
+    assert.deepEqual(texts(p.take()), [], "nothing to show");
+    for (let i = 0; i < 25; i++)
+        await feed.webSocketMessage(host, "chat line " + i);
+    assert.equal(texts(p.take()).length, 16, "20 lines in 5 s (4 came before), more dropped");
+    assert.equal(host.closed, null, "the host's game isn't cut off");
+    clock += 5000;
+    await feed.webSocketMessage(host, "chat later");
+    assert.deepEqual(texts(p.take()), ["chat later"]);
+    await feed.end("room ended");
+    await feed.webSocketMessage(host, "chat after");
+    assert.deepEqual(texts(p.take()).filter(m => m.startsWith("chat")), [], "none once the feed is ending");
+});
+
+await check("an Imperial server's feed (wide) passes no chat lines", async () => {
+    clock = 3_900_000;
+    const feed = await newFeed();
+    await feed.arm(7, 30, { [T1]: 1 }, { wide: true });
+    const host = await game(feed, T1), p = await page(feed);
+    p.take();
+    await feed.webSocketMessage(host, "chat hi");
+    assert.deepEqual(texts(p.take()), []);
+});
+
 await check("the host's game puts its mod: only the host's, only one asked for, so much and so often", async () => {
     clock = 4_000_000;
     const shots = new FakeBucket();

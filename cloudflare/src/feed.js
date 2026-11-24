@@ -135,6 +135,19 @@ const PAGE_SAYS = 10;
 const SAY_MS = 3000;
 const SAY_NAME_MAX = 16;
 const SAY_TEXT_MAX = 96;
+// The match's chat, at once: the host's game sends each line its chat shows
+// ("chat <line>", as a game watching shows it), and every page watching gets
+// "chat <line>" straight away, not held back by the delay. A spectator's
+// message reached the players at once, but their answers came with the
+// picture, 30 s later (Antonio, 2026-11-24). Chat tells a watcher nothing
+// about where the players are: every player in the match reads it. The
+// same line still comes later in the packets, and a game watching that had
+// it at once leaves it out (OpenJKDF2's stdComm_WSRelay_ViewerChatSeen).
+// Printable ASCII, at most CHAT_MAX (the game's chat line); at most
+// HOST_CHATS in RATE_WINDOW_MS, more are dropped. Lobby rooms only: an
+// Imperial server's feed (wide) has its own relay.
+const CHAT_MAX = 127;
+const HOST_CHATS = 20;
 export const MOD_PREFIX = "feed-mods/";
 
 // As the game watching cleans what it sends (stdComm_WSRelay.c's
@@ -504,15 +517,19 @@ export class Feed extends DurableObject {
         const s = this.socks.get(ws);
         if (!s)
             return;
-        // A page says only mod <fp> (its ping is answered without waking the
-        // object), and a game nothing in text.
+        // A page says only mod <fp> or a message (its ping is answered
+        // without waking the object), and a game in text only the host's
+        // chat (hostChats).
         if (!("seat" in s)) {
             if (typeof message === "string")
                 this.pageSays(ws, message);
             return;
         }
-        if (typeof message === "string")
+        if (typeof message === "string") {
+            if (s.seat === SEAT_HOST && message.startsWith("chat "))
+                this.hostChats(ws, message.substring(5));
             return;
+        }
         const now = Date.now();
         const times = (this.rate.get(ws) || []).filter(t => now - t < RATE_WINDOW_MS);
         times.push(now);
@@ -614,6 +631,27 @@ export class Feed extends DurableObject {
                 this.sendTo(host, "say " + name + " (watching): " + words);
                 return;
             }
+        }
+    }
+
+    // A line of the match's chat from the host's game (CHAT_MAX above): to
+    // every page watching, at once.
+    hostChats(ws, line) {
+        const s = this.socks.get(ws);
+        if (!s || !this.cfg || this.cfg.wide || this.ending)
+            return;
+        const now = Date.now();
+        const times = (s.chats || []).filter(t => now - t < RATE_WINDOW_MS);
+        if (times.length >= HOST_CHATS)
+            return;
+        times.push(now);
+        s.chats = times;
+        const said = sayClean(line, CHAT_MAX);
+        if (!said)
+            return;
+        for (const [page, st] of this.socks) {
+            if ("next" in st)
+                this.sendTo(page, "chat " + said);
         }
     }
 
