@@ -794,7 +794,10 @@ can't be its rollback: take the `FEED` binding out instead. The games watching i
   told its token again, and the feed is armed again first (at most every 5 s for a room), in case
   it ended itself. A game the feed didn't answer for is told once it does. With the `FEED_ONLY_WATCHED` var `"1"`, a feed runs
   only while a page watches the match, and for 2 minutes after the last one stops (cheaper, but a
-  new viewer waits out the delay). The status has `"feed": 1` for a match whose feed is on.
+  new viewer waits out the delay). The status has `"feed": 1` for a match whose feed is on and whose
+  host's game has sent it a keyframe (the feed tells the lobby, `feedKeyed`), so the page offers the
+  game itself to watch only when there's a picture to start from; a host's game that never sends one
+  (another build, or one from before the feed) has its match watched by its scores.
 - A game connects to `/feed/<room>?up=<token>` and sends binary chunks: a kind byte (0 packets sent
   to everyone, 1 a keyframe's start: what a game joining now would be sent, 2 more of it), then its
   packets. At most 64 KB a chunk and 20 a second (incoming messages are billed, 20 to a request), so

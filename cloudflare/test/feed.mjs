@@ -648,7 +648,8 @@ await check("with FEED_ONLY_WATCHED, a game in a room asks to take part; the fee
     const feed = w.feeds.of(H.room);
     assert.deepEqual(feed.cfg.tokens, { [token]: 1 });
     assert.equal(feed.cfg.delay, 30);
-    assert.equal((await w.status()).games.find(g => g.id === H.room).feed, 1);
+    assert.equal((await w.status()).games.find(g => g.id === H.room).feed, undefined,
+                 "no keyframe from the host's game yet (and no LOBBY binding here to hear of one)");
     // The game can send with it, through the Worker's route.
     const env = w.env;
     const r = await feedRoute(new Request(`https://lobby.test/feed/${H.room}?up=${token}`, { headers: { Upgrade: "websocket" } }), env,
@@ -840,6 +841,82 @@ await check("a room that ends ends its feed; a lobby restart keeps the tokens", 
     await w2.say(H, "leave");
     assert.equal(w.feeds.of(H.room).cfg, null);
     assert.equal(w.storage.m.has("feed:" + H.room), false);
+});
+
+await check("the status offers the game itself only once the host's game has sent its feed a keyframe", async () => {
+    const w = await new World().start();
+    let calls = 0;
+    w.feeds.env.LOBBY = { idFromName: n => n, get: () => ({ feedKeyed: async room => { calls++; return w.lobby.feedKeyed(room); },
+                                                            feedPages: (...a) => w.lobby.feedPages(...a) }) };
+    const feedOf = async room => (await w.status()).games.find(g => g.id === room).feed;
+    const H = await w.host("Maw");
+    await w.say(H, "feed");
+    const J = await w.joiner("Bot_Red", H.room);
+    await w.say(J, "feed");
+    const th = feedLines(H)[0].split(" ")[2], tj = feedLines(J)[0].split(" ")[2];
+    const feed = w.feeds.of(H.room), room = w.lobby.rooms.get(H.room);
+    assert.ok(room.feed, "the feed is on");
+    assert.equal(await feedOf(H.room), undefined, "armed, but nothing to start watching from");
+    ws101(await feed.fetch(req(`/feed/${H.room}?up=${th}`)));
+    const host = feed.ctx.sockets.at(-1);
+    ws101(await feed.fetch(req(`/feed/${H.room}?up=${tj}`)));
+    const joiner = feed.ctx.sockets.at(-1);
+    // A page waiting, as the black screen did (Antonio, 2026-11-25): its
+    // host's game sends packets but never a keyframe.
+    const v = await page(feed);
+    await feed.webSocketMessage(host, chunk(0, 1));
+    await feed.webSocketMessage(joiner, chunk(1, 2));
+    await w.settle();
+    assert.equal(calls, 0, "a player's keyframe isn't the host's");
+    assert.equal(await feedOf(H.room), undefined);
+    assert.ok(texts(v.take()).includes("feed waiting"));
+    // The host's game sends one: the lobby hears once, and says feed: 1.
+    await feed.webSocketMessage(host, chunk(1, 3));
+    await w.settle();
+    assert.equal(calls, 1);
+    assert.equal(room.feed.keyed, 1);
+    assert.equal(await feedOf(H.room), 1);
+    assert.equal(w.storage.m.get("feed:" + H.room).keyed, 1, "kept for a restart");
+    await feed.webSocketMessage(host, chunk(1, 4));
+    await w.settle();
+    assert.equal(calls, 1, "told once");
+    // A lobby that starts again still knows.
+    const w2 = await new World({ FEED: w.feeds }, w.storage).start(w.ctx.sockets);
+    assert.equal(w2.lobby.rooms.get(H.room).feed.keyed, 1);
+    // Only a room with a feed takes it.
+    assert.equal(await w.lobby.feedKeyed(H.room + 99), false);
+    // Watching turned off and on again: a new feed, which waits for a new keyframe.
+    await w.say(H, "spectators off");
+    assert.equal(room.feed, null);
+    assert.equal(feed.keyTold, false, "the feed that ended forgets it told");
+    await w.say(H, "spectators on");
+    assert.ok(room.feed);
+    assert.equal(await feedOf(H.room), undefined);
+    const th2 = feedLines(H).pop().split(" ")[2];
+    ws101(await feed.fetch(req(`/feed/${H.room}?up=${th2}`)));
+    await feed.webSocketMessage(feed.ctx.sockets.at(-1), chunk(1, 5));
+    await w.settle();
+    assert.equal(calls, 2);
+    assert.equal(await feedOf(H.room), 1);
+});
+
+await check("a feed whose lobby doesn't answer tells it at the next keyframe; an Imperial server's never asks", async () => {
+    let up = false, calls = 0;
+    const LOBBY = { idFromName: n => n, get: () => ({ feedKeyed: async () => { calls++; if (!up) throw new Error("away"); return true; } }) };
+    const feed = await newFeed({ LOBBY });
+    await feed.arm(7, 30, { [T1]: 1 });
+    const host = await game(feed, T1);
+    await feed.webSocketMessage(host, chunk(1, 1));
+    assert.equal(calls, 1);
+    assert.equal(feed.keyTold, false);
+    up = true;
+    await feed.webSocketMessage(host, chunk(1, 2));
+    assert.equal(calls, 2);
+    assert.equal(feed.keyTold, true);
+    const wide = await newFeed({ LOBBY });
+    await wide.arm(7, 30, { [T1]: 1 }, { wide: true });
+    await wide.webSocketMessage(await game(wide, T1), chunk(1, 1));
+    assert.equal(calls, 2, "the lobby lists an Imperial server's feed by itself");
 });
 
 await check("games watching from inside the game count in the room's watching, and keep a watched-only feed on", async () => {

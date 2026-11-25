@@ -37,7 +37,12 @@
 // The host's game sends a keyframe once its feed opens, at each new level and
 // every minute; a page that comes when the feed holds none (it was evicted, or
 // has just started) has the feed ask the host's game for one ("key"), at
-// most once every KEY_ASK_MS.
+// most once every KEY_ASK_MS. The first keyframe the host's game sends, the
+// feed tells the Lobby (feedKeyed, over RPC): only then does the room's status
+// say feed: 1, so the lobby page offers the game itself to watch. A host's
+// game that never sends one (another build, one from before the feed) is
+// watched by its scores, rather than on a black screen that waits for a
+// first picture that never comes (Antonio, 2026-11-25: a match with bots).
 //
 // A page watching here is a game watching the match from inside the game
 // (Watch in the game). The feed tells the Lobby how many there are
@@ -183,6 +188,7 @@ export class Feed extends DurableObject {
         this.timer = null;
         this.lastUp = 0;          // when a game last sent, or the feed was armed
         this.keyAsked = 0;        // when the host's game was last asked for a keyframe
+        this.keyTold = false;     // whether the Lobby has heard the host's game sent one (keySay)
         this.ending = null;       // why, while pages get the match's last seconds (end)
         this.pagesTold = -1;      // how many pages the Lobby was last told watch, -1 for not yet
         this.namesTold = "";      // and the names it was told, as one string
@@ -401,6 +407,7 @@ export class Feed extends DurableObject {
         this.ending = null;
         this.pagesTold = -1;
         this.namesTold = "";
+        this.keyTold = false;
         this.watchingNow = null;
         if (this.timer) {
             clearTimeout(this.timer);
@@ -602,8 +609,29 @@ export class Feed extends DurableObject {
         this.lastUp = now;
         this.take(now, data[0], s.seat, data.subarray(1));
         this.flush(now);
-        if (data[0] === KIND_KEY)
+        if (data[0] === KIND_KEY) {
             this.sayFirst(now);
+            if (s.seat === SEAT_HOST)
+                await this.keySay();
+        }
+    }
+
+    // The host's game sent a keyframe: the Lobby hears, once, that the match
+    // can be watched in the game (feedKeyed). Not an Imperial relay server's
+    // feed, which the lobby lists by itself (imp), nor without the LOBBY
+    // binding. One it didn't hear is told at the next keyframe.
+    async keySay() {
+        if (this.keyTold || !this.cfg || this.cfg.wide || !this.env || !this.env.LOBBY)
+            return;
+        this.keyTold = true;
+        const room = this.cfg.room;
+        try {
+            const lobby = this.env.LOBBY.get(this.env.LOBBY.idFromName("lobby"));
+            await lobby.feedKeyed(room);
+        } catch (e) {
+            this.keyTold = false;
+            console.log(`feed: room ${room}: the lobby didn't hear the host's game sent a keyframe: ${e && e.message || e}`);
+        }
     }
 
     async webSocketClose(ws) {

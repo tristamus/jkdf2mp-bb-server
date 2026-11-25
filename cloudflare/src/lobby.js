@@ -66,7 +66,11 @@
 // the game at once (Antonio's choice, 2026-11-19). A game that says feed
 // again has lost its feed, and is told its token again. With the FEED_ONLY_WATCHED
 // var "1", only while a page watches the match, and for FEED_LINGER_MS after
-// the last one stops. The status says feed: 1 for a match whose feed is on.
+// the last one stops. The status says feed: 1 for a match whose feed is on
+// and whose host's game has sent it a keyframe, the picture a game watching
+// starts from (the feed tells, feedKeyed): a host's game that doesn't (another
+// build, or one from before the feed) has its match watched by its scores,
+// not on a black screen waiting for a first picture (Antonio, 2026-11-25).
 //
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
@@ -650,7 +654,7 @@ export class Lobby extends DurableObject {
             room.spect = spects.get("spect:" + id) || null;
             const feed = feeds.get("feed:" + id);
             room.feed = feed ? { tokens: feed.tokens || {}, idle: feed.idle || 0, armed: "", pages: feed.pages || 0,
-                                 names: watchNames(feed.names), told: {}, ok: "" } : null;
+                                 names: watchNames(feed.names), told: {}, ok: "", keyed: feed.keyed ? 1 : 0 } : null;
             this.rooms.set(id, room);
         }
         this.stripPasswords();
@@ -1453,7 +1457,7 @@ export class Lobby extends DurableObject {
                 locked, players: names.length, max: info.max, names: names.slice(0, MAX_STATUS_NAMES),
                 net: this.roomNet(room), rank: info.maxRank, ...(live ? { live } : {}),
                 spect: spect ? 1 : 0, ...(seen ? { watching: seen } : {}), ...(watchers.length ? { watchers } : {}),
-                ...(room.feed ? { feed: 1 } : {}),
+                ...(room.feed && room.feed.keyed ? { feed: 1 } : {}),
             });
         }
         for (const g of Object.values(byGame)) {
@@ -1632,7 +1636,7 @@ export class Lobby extends DurableObject {
             return;
         }
         if (!room.feed)
-            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0, names: [], told: {}, ok: "" };
+            room.feed = { tokens: {}, idle: 0, armed: "", pages: 0, names: [], told: {}, ok: "", keyed: 0 };
         const idle = always || watched ? 0 : room.feed.idle || now;
         const tokens = {};
         for (const [id] of this.feedGames(room))
@@ -1641,7 +1645,7 @@ export class Lobby extends DurableObject {
         const armed = JSON.stringify([delay, tokens]);
         if (idle !== room.feed.idle) {
             room.feed.idle = idle;
-            this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle, pages: room.feed.pages || 0, names: room.feed.names || [] });
+            this.feedSave(room);
         }
         if (armed === room.feed.armed) {
             if (room.feed.ok === armed)
@@ -1650,7 +1654,7 @@ export class Lobby extends DurableObject {
         }
         room.feed.tokens = tokens;
         room.feed.armed = armed;
-        this.ctx.storage.put("feed:" + room.id, { tokens, idle, pages: room.feed.pages || 0, names: room.feed.names || [] });
+        this.feedSave(room);
         const byToken = Object.fromEntries(Object.entries(tokens).map(([id, t]) => [t, Number(id)]));
         const feed = room.feed;
         this.feedCall(room, stub => stub.arm(room.id, delay, byToken)).then(ok => {
@@ -1686,6 +1690,29 @@ export class Lobby extends DurableObject {
         }
     }
 
+    // What's kept of a room's feed, for a lobby that starts again.
+    feedSave(room) {
+        const f = room.feed;
+        this.ctx.storage.put("feed:" + room.id, { tokens: f.tokens, idle: f.idle || 0, pages: f.pages || 0, names: f.names || [],
+                                                  ...(f.keyed ? { keyed: 1 } : {}) });
+    }
+
+    // From a room's feed (src/feed.js), over RPC: its host's game sent it a
+    // keyframe, so a game can watch the match from inside the game, and the
+    // status says feed: 1. Once for each feed; false for a room or feed that
+    // isn't there (an Imperial relay server's, or one that ended).
+    async feedKeyed(roomId) {
+        const room = this.rooms.get(Number(roomId));
+        if (!room || !room.feed)
+            return false;
+        if (room.feed.keyed)
+            return true;
+        room.feed.keyed = 1;
+        this.feedSave(room);
+        this.statusChanged();
+        return true;
+    }
+
     // From a room's feed (src/feed.js), over RPC: how many games watch its
     // match from inside the game now, and the names of the games watching
     // (those in viewing pages' boxes too). They're counted in its watching,
@@ -1711,7 +1738,7 @@ export class Lobby extends DurableObject {
             return true;
         room.feed.pages = n;
         room.feed.names = clean;
-        this.ctx.storage.put("feed:" + room.id, { tokens: room.feed.tokens, idle: room.feed.idle || 0, pages: n, names: clean });
+        this.feedSave(room);
         this.statusChanged();
         return true;
     }
