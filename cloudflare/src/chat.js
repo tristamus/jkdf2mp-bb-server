@@ -33,15 +33,18 @@
 //   chat no <why> [<n>]          it didn't: link, fast (n s), same, muted (n:
 //                                until when, ms), paused, name, taken, long,
 //                                empty, room; badname for a name it didn't
-//                                take (a web address, or "(Enter)..."); mod for
-//                                a key it didn't take
+//                                take (a web address, or "(Enter)..."); crowd
+//                                for one past NAMES_MAX from its address in
+//                                the room; mod for a key it didn't take
 //   chat reported <line id>
 //   chat mods <{mutes, reports}> a moderator's lists, whenever they change
 //
 // Antonio's rules: nothing older than KEEP_MS (48 hours) and at most
 // KEEP_LINES a room is kept, in the lobby's own storage; no web address in
-// any form (linkish); no spamming (BURST, then one every REFILL_MS, the same
-// line not twice in SAME_MS, Enter and Exit at most every SHOW_AGAIN_MS);
+// any form (linkish); no spamming (BURST, then one every REFILL_MS and at
+// most LONG_MAX in LONG_MS, the same line not twice in SAME_MS, Enter and
+// Exit at most every SHOW_AGAIN_MS; a room flooded from several addresses at
+// once goes to slow mode, then pauses, by itself);
 // 400 characters on at most two lines; no other filter. Limits count by the
 // browser's address, so another tab or browser on it doesn't get more. A
 // mute covers the name, the browser and the address its line came from, in
@@ -61,12 +64,33 @@ const MAX_NAME_B64 = 128;
 // Up to BURST lines at once, then one more every REFILL_MS.
 export const BURST = 4;
 export const REFILL_MS = 3000;
+// And at most LONG_MAX lines in LONG_MS: a script that keeps to the pace
+// above still can't push the room's lines away.
+export const LONG_MAX = 30;
+export const LONG_MS = 5 * 60 * 1000;
 // Slow mode: one line every SLOW_MS.
 export const SLOW_MS = 15 * 1000;
+// A room that gets ROOM_MAX lines in ROOM_MS from people who aren't
+// moderators (several addresses at once: one can't, by the limits above)
+// turns on slow mode by itself for AUTO_SLOW_MS; when that still happens in
+// slow mode, it pauses by itself for AUTO_PAUSE_MS. A moderator can end
+// either sooner, and one a moderator turned on stays.
+export const ROOM_MAX = 20;
+export const ROOM_MS = 20 * 1000;
+export const AUTO_SLOW_MS = 5 * 60 * 1000;
+export const AUTO_PAUSE_MS = 2 * 60 * 1000;
+// At most NAMES_MAX names from one address in a room's chat: another page
+// there gets in without one (it reads, but can't talk).
+export const NAMES_MAX = 4;
+// A page that sends more than OPS_MAX chat messages in OPS_MS (a script, not
+// a person) is not listened to for OPS_OFF_MS. Not a moderator's page.
+export const OPS_MAX = 40;
+export const OPS_MS = 10 * 1000;
+export const OPS_OFF_MS = 60 * 1000;
 // The same text again within SAME_MS isn't sent.
 export const SAME_MS = 60 * 1000;
-// Lines turned down for coming too fast, FLOOD_REFUSED of them in
-// FLOOD_WINDOW_MS, keep the address quiet for COOL_MS[0], or COOL_MS[1] when
+// Lines turned down (too fast, the same again, a web address), FLOOD_REFUSED
+// of them in FLOOD_WINDOW_MS, keep the address quiet for COOL_MS[0], or COOL_MS[1] when
 // it happened before in the last COOL_AGAIN_MS.
 export const FLOOD_REFUSED = 8;
 const FLOOD_WINDOW_MS = 60 * 1000;
@@ -327,13 +351,18 @@ export class Chat {
         this.lobby = lobby;
         this.env = lobby.env;
         this.lines = new Map(CHAT_ROOMS.map(r => [r, []]));   // room -> lines, oldest first
-        this.state = new Map(CHAT_ROOMS.map(r => [r, { slow: false, paused: false }]));
+        // room -> {slow, paused, autoSlow, autoPause}: auto* when the room
+        // turned it on by itself, until then.
+        this.state = new Map(CHAT_ROOMS.map(r => [r, { slow: false, paused: false, autoSlow: 0, autoPause: 0 }]));
         this.mutes = new Map();     // id -> {id, n (lowercase name), name, b, h, until, by, at}
         this.reports = new Map();   // id -> {id, at, room, line: {id, name, text}, by, rh, an, ab, ah}
         this.lastId = 0;
         this.salt = "";
         // In memory only, so it starts over when the object is evicted:
-        this.buckets = new Map();   // address -> {tokens, at, said: [{t, at}], refused: [at], cool, cooled}
+        this.buckets = new Map();   // address -> {tokens, at, said: [{t, at}], lines: [at], refused: [at], cool, cooled, last}
+        this.roomLines = new Map(); // room -> [at] of its lines lately, not a moderator's
+        this.autoTimer = null;      // when a room's own slow mode or pause runs out
+        this.opsBy = new WeakMap(); // page -> {at, n, off}: its chat messages lately
         this.shownAt = new Map();   // "room\nname" -> {enter, exit}: when each last showed
         this.exits = new Map();     // "room\nname" -> timer of an Exit waiting
         this.modTries = new Map();  // address -> [at]
@@ -385,10 +414,12 @@ export class Chat {
         for (const [key, s] of await this.store().list({ prefix: "chats:" })) {
             const room = key.slice(6);
             if (this.state.has(room))
-                this.state.set(room, { slow: !!s.slow, paused: !!s.paused });
+                this.state.set(room, { slow: !!s.slow, paused: !!s.paused, autoSlow: s.autoSlow || 0, autoPause: s.autoPause || 0 });
         }
         for (const room of CHAT_ROOMS)
             this.trim(room);
+        this.endAuto(now);
+        this.autoLater();
     }
 
     store() {
@@ -464,11 +495,36 @@ export class Chat {
         return { name: m.name || "", muted: m.mod ? 0 : this.muteOf(m), mod: m.mod ? 1 : 0 };
     }
 
+    // A page past OPS_MAX chat messages in OPS_MS: true, and it hears once
+    // that it can talk again in OPS_OFF_MS.
+    tooMany(ws, now) {
+        let o = this.opsBy.get(ws);
+        if (!o || now - o.at >= OPS_MS) {
+            o = { at: now, n: 0, off: o ? o.off : 0 };
+            this.opsBy.set(ws, o);
+        }
+        if (o.off > now)
+            return true;
+        if (++o.n <= OPS_MAX)
+            return false;
+        o.off = now + OPS_OFF_MS;
+        this.lobby.send(ws, "chat no fast " + OPS_OFF_MS / 1000);
+        return true;
+    }
+
+    // A room's slow mode and pause, as the pages hear them.
+    shownState(room) {
+        const s = this.state.get(room);
+        return { slow: s.slow, paused: s.paused };
+    }
+
     // A page's message about the chat, from a page watching the lobby.
     // Returns a promise when it has to wait (hashing its address, a key).
     op(ws, c, args) {
         const [what, ...rest] = args;
         if (!this.on())
+            return;
+        if (!(c.chat && c.chat.mod) && this.tooMany(ws, Date.now()))
             return;
         if (what === "in")
             return this.come(ws, c, rest);
@@ -528,6 +584,14 @@ export class Chat {
                 name = "";
         }
         const was = this.lobby.conn(ws).chat || null;
+        // NAMES_MAX names from the address in the room already: in without one.
+        let crowd = false;
+        if (name && !(was && was.mod)) {
+            const names = new Set(this.members(room).filter(([w, x]) => w !== ws && x.h === h && x.name).map(([, x]) => x.name.toLowerCase()));
+            crowd = !names.has(name.toLowerCase()) && names.size >= NAMES_MAX;
+            if (crowd)
+                name = "";
+        }
         const sameRoom = was && was.room === room;
         if (was && !sameRoom)
             this.left(ws);
@@ -535,7 +599,7 @@ export class Chat {
         this.lobby.saveConn(ws, { ...this.lobby.conn(ws), chat: m });
         if (!sameRoom) {
             const lines = this.lines.get(room).map(shown);
-            this.lobby.send(ws, this.json("log", { room, lines, ...this.state.get(room), who: this.who(room), you: this.you(m) }));
+            this.lobby.send(ws, this.json("log", { room, lines, ...this.shownState(room), who: this.who(room), you: this.you(m) }));
         } else {
             this.lobby.send(ws, this.json("you", this.you(m)));
         }
@@ -543,6 +607,8 @@ export class Chat {
             this.lobby.send(ws, "chat no taken");
         if (bad)
             this.lobby.send(ws, "chat no badname");
+        if (crowd)
+            this.lobby.send(ws, "chat no crowd");
         if (name && (!sameRoom || (was.name || "").toLowerCase() !== name.toLowerCase()))
             this.came(room, name, m);
         if (sameRoom && was.name && was.name.toLowerCase() !== (name || "").toLowerCase())
@@ -626,7 +692,7 @@ export class Chat {
     bucket(h, now) {
         let b = this.buckets.get(h);
         if (!b) {
-            b = { tokens: BURST, at: now, said: [], refused: [], cool: 0, cooled: 0, last: 0 };
+            b = { tokens: BURST, at: now, said: [], lines: [], refused: [], cool: 0, cooled: 0, last: 0 };
             this.buckets.set(h, b);
         }
         b.tokens = Math.min(BURST, b.tokens + (now - b.at) / REFILL_MS);
@@ -648,45 +714,125 @@ export class Chat {
             return no("empty");
         if (text.length > MAX_TEXT)
             return no("long");
+        this.endAuto(now);
         const state = this.state.get(m.room);
-        if (!m.mod) {
-            const muted = this.muteOf(m, now);
-            if (muted)
-                return no("muted", muted);
-            if (state.paused)
-                return no("paused");
+        if (m.mod) {
+            // Never a web address, from anyone.
+            if (linkish(text))
+                return no("link");
+            return this.goOut(ws, m, text, now);
         }
-        // Never a web address, from anyone.
-        if (linkish(text))
-            return no("link");
-        if (!m.mod) {
-            const b = this.bucket(m.h, now);
-            if (b.cool > now)
+        const muted = this.muteOf(m, now);
+        if (muted)
+            return no("muted", muted);
+        if (state.paused)
+            return no("paused");
+        const b = this.bucket(m.h, now);
+        if (b.cool > now)
+            return no("fast", Math.ceil((b.cool - now) / 1000));
+        // Each line turned down from here counts: FLOOD_REFUSED of them in
+        // FLOOD_WINDOW_MS keep the address quiet a while.
+        const refuse = (why, wait) => {
+            b.refused = b.refused.filter(t => now - t < FLOOD_WINDOW_MS);
+            b.refused.push(now);
+            if (b.refused.length >= FLOOD_REFUSED) {
+                b.cool = now + COOL_MS[now - b.cooled < COOL_AGAIN_MS ? 1 : 0];
+                b.cooled = now;
+                b.refused = [];
                 return no("fast", Math.ceil((b.cool - now) / 1000));
-            const wait = state.slow ? Math.max(0, b.last + SLOW_MS - now) : b.tokens >= 1 ? 0 : (1 - b.tokens) * REFILL_MS;
-            if (wait > 0) {
-                b.refused = b.refused.filter(t => now - t < FLOOD_WINDOW_MS);
-                b.refused.push(now);
-                if (b.refused.length >= FLOOD_REFUSED) {
-                    b.cool = now + COOL_MS[now - b.cooled < COOL_AGAIN_MS ? 1 : 0];
-                    b.cooled = now;
-                    b.refused = [];
-                    return no("fast", Math.ceil((b.cool - now) / 1000));
-                }
-                return no("fast", Math.ceil(wait / 1000));
             }
-            const same = text.toLowerCase().replace(/\s+/g, " ");
-            b.said = b.said.filter(s => now - s.at < SAME_MS);
-            if (b.said.some(s => s.t === same))
-                return no("same");
-            b.said.push({ t: same, at: now });
-            b.tokens -= 1;
-            b.last = now;
-        }
+            return no(why, wait === undefined ? undefined : Math.ceil(wait / 1000));
+        };
+        if (linkish(text))
+            return refuse("link");
+        b.lines = b.lines.filter(t => now - t < LONG_MS);
+        const wait = Math.max(state.slow ? b.last + SLOW_MS - now : b.tokens >= 1 ? 0 : (1 - b.tokens) * REFILL_MS,
+                              b.lines.length >= LONG_MAX ? b.lines[0] + LONG_MS - now : 0);
+        if (wait > 0)
+            return refuse("fast", wait);
+        const same = text.toLowerCase().replace(/\s+/g, " ");
+        b.said = b.said.filter(s => now - s.at < SAME_MS);
+        if (b.said.some(s => s.t === same))
+            return refuse("same");
+        b.said.push({ t: same, at: now });
+        b.tokens -= 1;
+        b.last = now;
+        b.lines.push(now);
+        this.goOut(ws, m, text, now);
+        this.brake(m.room, now);
+    }
+
+    goOut(ws, m, text, now) {
         const line = { id: this.newId(), at: now, name: m.name, text, ...(m.mod ? { mod: 1 } : {}), b: m.b, h: m.h };
         this.keep(m.room, line);
         this.lobby.send(ws, "chat ok");
         this.tell(m.room, this.json("line", shown(line)));
+    }
+
+    // A line went out in a room (not a moderator's): ROOM_MAX in ROOM_MS turn
+    // on its slow mode, or in slow mode pause it, by itself.
+    brake(room, now) {
+        const times = (this.roomLines.get(room) || []).filter(t => now - t < ROOM_MS);
+        times.push(now);
+        this.roomLines.set(room, times);
+        if (times.length < ROOM_MAX)
+            return;
+        this.roomLines.set(room, []);
+        const s = this.state.get(room);
+        if (!s.slow)
+            this.autoState(room, "slow", now + AUTO_SLOW_MS,
+                           `Lots of lines at once: slow mode is on for ${AUTO_SLOW_MS / 60000} minutes, one line every ${SLOW_MS / 1000} seconds.`);
+        else if (!s.paused)
+            this.autoState(room, "paused", now + AUTO_PAUSE_MS,
+                           `Still too many lines at once: the chat is paused for ${AUTO_PAUSE_MS / 60000} minutes.`);
+    }
+
+    autoState(room, what, until, text) {
+        const s = this.state.get(room);
+        s[what] = true;
+        s[what === "slow" ? "autoSlow" : "autoPause"] = until;
+        this.store().put("chats:" + room, s);
+        this.tell(room, this.json("state", this.shownState(room)));
+        this.note(room, text);
+        this.autoLater();
+    }
+
+    // A room's own slow mode or pause that ran out ends.
+    endAuto(now = Date.now()) {
+        let ended = false;
+        for (const room of CHAT_ROOMS) {
+            const s = this.state.get(room);
+            let changed = false;
+            for (const [what, key, text] of [["paused", "autoPause", "The chat is open again."], ["slow", "autoSlow", "Slow mode is off."]]) {
+                if (!s[key] || s[key] > now)
+                    continue;
+                s[key] = 0;
+                s[what] = false;
+                changed = true;
+                this.note(room, text);
+            }
+            if (changed) {
+                this.store().put("chats:" + room, s);
+                this.tell(room, this.json("state", this.shownState(room)));
+                ended = true;
+            }
+        }
+        if (ended)
+            this.autoLater();
+    }
+
+    autoLater() {
+        clearTimeout(this.autoTimer);
+        this.autoTimer = null;
+        let at = 0;
+        for (const s of this.state.values()) {
+            for (const t of [s.autoSlow, s.autoPause]) {
+                if (t && (!at || t < at))
+                    at = t;
+            }
+        }
+        if (at)
+            this.autoTimer = setTimeout(() => this.endAuto(), Math.max(0, at - Date.now()) + 50);
     }
 
     // A line kept in its room, oldest ones going past KEEP_LINES.
@@ -816,13 +962,24 @@ export class Chat {
         this.note(room, "A moderator cleared the chat.");
     }
 
+    // A moderator's slow mode or pause: stays as they set it, the room's own
+    // timer for it gone.
     setState(room, what, on) {
         const s = this.state.get(room);
-        if (s[what] === on)
+        const key = what === "slow" ? "autoSlow" : "autoPause";
+        const auto = s[key];
+        s[key] = 0;
+        if (s[what] === on) {
+            if (auto) {
+                this.store().put("chats:" + room, s);
+                this.autoLater();
+            }
             return;
+        }
         s[what] = on;
         this.store().put("chats:" + room, s);
-        this.tell(room, this.json("state", s));
+        this.autoLater();
+        this.tell(room, this.json("state", this.shownState(room)));
         this.note(room, what === "slow" ? (on ? "A moderator turned on slow mode: one line every 15 seconds." : "Slow mode is off.") :
                                           (on ? "A moderator paused the chat." : "The chat is open again."));
     }
@@ -894,6 +1051,7 @@ export class Chat {
         if (!this.on())
             return;
         const now = Date.now();
+        this.endAuto(now);
         for (const room of CHAT_ROOMS)
             this.trim(room, now);
         let changed = false;
