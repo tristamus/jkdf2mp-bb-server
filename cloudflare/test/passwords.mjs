@@ -314,10 +314,10 @@ await check("settings that aren't host, none or a time are taken as none, and lo
 
 await check("the lobby says pw on connect, after links and turn, and spect after it", async () => {
     let w = await new World(Lobby, {}).start();
-    assert.equal((await w.connect("old")).lobbyLine, "lobby links pw spect");
-    assert.equal((await w.connect("new")).lobbyLine, "lobby links pw spect");
+    assert.equal((await w.connect("old")).lobbyLine, "lobby links pw spect look");
+    assert.equal((await w.connect("new")).lobbyLine, "lobby links pw spect look");
     w = await new World(Lobby, { TURN_KEY_ID: "id", TURN_KEY_API_TOKEN: "token" }).start();
-    assert.equal((await w.connect("new")).lobbyLine, "lobby links turn pw spect");
+    assert.equal((await w.connect("new")).lobbyLine, "lobby links turn pw spect look");
 });
 
 await check("a game that sends passwords gets the password box exactly for rooms with a password, never a password", async () => {

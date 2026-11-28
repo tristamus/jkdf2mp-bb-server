@@ -744,6 +744,20 @@ calls to D1 (one to ask, two to take it), and each one shown is one, which reads
 - The count behind the 8 GB (`shot_total`) follows what the lobby adds and takes off. Rows deleted
   by hand need it set right (above), and bytes left in the bucket by a failed delete aren't in it.
 
+## Who's in a room
+
+A room window lists who's on in its game: Looking (not in a match) and Playing. A game counts
+from when it starts (`hello`), and so does a page whose player has a room window open: it says
+`look <game> [<name>]` (the name in base64 UTF-8, as with `hello`), and `look` once it's closed, and
+is counted in that game's `online` and, by its name, in `lobby`, as a game in no room is. It hears
+`looking <game> [<name>]` (the name as the lobby took it, cleaned as `hello`'s) or `looking off`
+right after the status that counts it so, which is how it knows which of the names is its own.
+A page without a name is counted, not named. It stops counting when it says `look`, closes, or goes
+quiet (as any connection). Only a page that said `watch` may send `look`; the lobby says `look` on
+its `lobby` line for pages to know it takes it. Antonio asked for it on 2026-11-28: people in a
+room should see themselves, and those who open a room should see who's there, as it happens.
+`node test/look.mjs` checks it.
+
 ## Watching a match
 
 The room windows on the page let visitors watch a match without joining it (spectating). A page

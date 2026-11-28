@@ -93,7 +93,7 @@ await check('a lobby with a TURN key says so on connect', () => {
   assert.equal(H.lines.length, 2);
   assert.deepEqual(ice(H.lines[0]), [STUN, null]);
   // "match" too where wrangler.toml binds the match record's database.
-  assert.match(H.lines[1], /^lobby links turn pw( match)?( spect)?$/);
+  assert.match(H.lines[1], /^lobby links turn pw( match)?( spect)?( feed)?( look)?$/);
 });
 await check('a game in no room gets no credentials, only the ice every game gets', async () => {
   const got = await say(H, 'turn');

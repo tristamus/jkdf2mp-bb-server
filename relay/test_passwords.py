@@ -305,10 +305,10 @@ for label, options, env, keeps in MODES:
 @check("the relay says pw on connect, after links and turn")
 def _():
     with Relay() as r:
-        assert r.connect("old").lobby_line == "lobby links pw spect"
-        assert r.connect("new").lobby_line == "lobby links pw spect"
+        assert r.connect("old").lobby_line == "lobby links pw spect look"
+        assert r.connect("new").lobby_line == "lobby links pw spect look"
     with Relay("--turn", "turn:turn.example.org:3478", "--turn-user", "u", "--turn-pass", "p") as r:
-        assert r.connect("new").lobby_line == "lobby links turn pw spect"
+        assert r.connect("new").lobby_line == "lobby links turn pw spect look"
 
 
 @check("a game that sends passwords gets the password box exactly for rooms with a password, never a password")

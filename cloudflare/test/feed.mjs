@@ -618,7 +618,7 @@ const feedLines = ws => ws.take().filter(l => l.startsWith("feed"));
 
 await check("the lobby says feed on connect only with a FEED binding", async () => {
     let w = await new World().start();
-    assert.match((await w.connect()).lobbyLine, /\bspect feed$/);
+    assert.match((await w.connect()).lobbyLine, /\bspect feed\b/);
     w = await new World({ FEED: undefined }).start();
     const ws = await w.connect();
     assert.doesNotMatch(ws.lobbyLine, /\bfeed\b/);

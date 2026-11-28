@@ -50,6 +50,16 @@
 // without it, and their join hears "error version newer", which tells their
 // player to reload the page. See relay.py for the lines.
 //
+// In a room: a page watching the lobby says when its player has one of the
+// rooms open (look <game> [<name>], the name in base64 UTF-8 as with hello),
+// and when not any more (look), and hears looking <game> [<name>] (the name
+// as the lobby took it) or looking off once the status it was just sent
+// counts it that way. Such a page counts as a player in the room's game, not
+// in a match: in online and, by its name, in lobby, as a game that said hello
+// does (Antonio, 2026-11-28: people in a room should see themselves, and
+// those who open it should see who's there). The lobby says look on connect
+// for pages to know it takes this.
+//
 // Watching a match (spectating): a page watching the lobby says which of its
 // rooms it's watching (spectate <room>, spectate 0 for none), and the status
 // gives each room whether it can be watched (spect: 1, or 0) and how many
@@ -532,8 +542,9 @@ function lobbyMessage(env) {
     // host's game may say whether its match can be watched (spectators), and
     // a page may ask for the kills of the match it watches (kills).
     // feed: a watched match's games send it to its feed (src/feed.js).
+    // look: a page may say its player has a room open (look).
     return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect" +
-        (env.FEED ? " feed" : "");
+        (env.FEED ? " feed" : "") + " look";
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -579,10 +590,12 @@ export class Lobby extends DurableObject {
         this.rooms = new Map();
         this.holdMs = Number(env.HOLD_MS) || HOLD_MS;
         this.noticeMs = Number(env.NOTICE_MS) || NOTICE_MS;
-        // ws -> {room, id, name, game, watch, spect, since, net, pw, ip}: the
-        // room id and player id, the player's name and game from hello (name
-        // null until then), whether it's a page watching the counts, the room
-        // whose match that page is watching (0 or none for none), when it
+        // ws -> {room, id, name, game, watch, spect, look, lookName, since,
+        // net, pw, ip}: the room id and player id, the player's name and game
+        // from hello (name null until then), whether it's a page watching the
+        // counts, the room whose match that page is watching (0 or none for
+        // none), the game whose room that page's player has open ("" or none
+        // for none) and the name it gave (null for none), when it
         // connected, the netcode it connected with, whether it sends
         // passwords with join, and its address (CF-Connecting-IP).
         this.conns = new Map();
@@ -1049,6 +1062,9 @@ export class Lobby extends DurableObject {
         } else if (op === "watch" && !args.length) {
             this.saveConn(ws, { ...c, watch: true });
             this.watch(ws);
+        } else if (op === "look" && c.watch && (!args.length || (args.length <= 2 && GAMES.includes(args[0]) &&
+                   (args.length === 1 || playerName(args[1]) !== null)))) {
+            this.look(ws, c, args[0] || "", args.length === 2 ? playerName(args[1]) : null);
         } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
             this.spectate(ws, c, Number(args[0]));
         } else if (op === "kills" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
@@ -1409,15 +1425,26 @@ export class Lobby extends DurableObject {
 
     // The landing page's live counts: who's on and the games they're in, in
     // all and by game (its rooms are each for one game). A player is a game
-    // that said hello or is in a room; watching pages aren't.
+    // that said hello or is in a room, or a page whose player has a room open
+    // (look); other watching pages aren't. lobby has the names of those not
+    // in a match, so a page in a room without a name is only counted.
     status() {
         const byName = (a, b) => a.localeCompare(b);
         const lobby = [];
         const byGame = Object.fromEntries(GAMES.map(g => [g, { online: 0, lobby: [] }]));
+        let online = 0;
         for (const c of this.conns.values()) {
-            if (!c.room && c.name != null) {
-                lobby.push(c.name);
-                byGame[c.game].lobby.push(c.name);
+            if (c.room)
+                continue;
+            const game = c.name != null ? c.game : c.watch && GAMES.includes(c.look) ? c.look : "";
+            if (!game)
+                continue;
+            const name = c.name != null ? c.name : c.lookName;
+            online++;
+            byGame[game].online++;
+            if (name) {
+                lobby.push(name);
+                byGame[game].lobby.push(name);
             }
         }
         lobby.sort(byName);
@@ -1426,7 +1453,6 @@ export class Lobby extends DurableObject {
         // of those watching from a game (roomWatchers).
         const watching = this.spectPages();
         const games = [];
-        let online = lobby.length;
         for (const room of [...this.rooms.values()].sort((a, b) => a.id - b.id)) {
             const info = readEntry(room.entry);
             if (!info)
@@ -1456,10 +1482,8 @@ export class Lobby extends DurableObject {
                 ...(room.feed ? { feed: 1 } : {}),
             });
         }
-        for (const g of Object.values(byGame)) {
-            g.online += g.lobby.length;
+        for (const g of Object.values(byGame))
             g.lobby = g.lobby.sort(byName).slice(0, MAX_STATUS_NAMES);
-        }
         // Imperial relay servers sending their match's feed (imperialFeed):
         // the page finds each one's card by its sid.
         const imp = [...this.imperial.values()].sort((a, b) => a.id - b.id).map(f => {
@@ -1530,6 +1554,19 @@ export class Lobby extends DurableObject {
         this.lastStatus = status;
         for (const w of this.watchers())
             this.send(w, line);
+    }
+
+    // look <game> [<name>]: this page's player has that game's room open,
+    // look for none. The page hears looking once the status it was just
+    // sent counts it that way: after statusChanged, which sends it any
+    // change (and the page has it already when nothing changed).
+    look(ws, c, game, name) {
+        name = game && name ? name : null;
+        if ((c.look || "") !== game || (c.lookName || null) !== name) {
+            this.saveConn(ws, { ...c, look: game, lookName: name });
+            this.statusChanged();
+        }
+        this.send(ws, game ? "looking " + game + (name ? " " + base64Utf8(name) : "") : "looking off");
     }
 
     // spectate <room>: the match this page watches, 0 for none. A room
