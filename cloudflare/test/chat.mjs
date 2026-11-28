@@ -22,7 +22,8 @@ const { FakeStorage, FakeCtx } = await import("./cfstub.mjs");
 const { Lobby } = await import("../src/lobby.js");
 const chat = await import("../src/chat.js");
 const { linkish, chatText, chatName, KEEP_LINES, KEEP_MS, BURST, REFILL_MS, SAME_MS, SLOW_MS, COOL_MS, FLOOD_REFUSED,
-        SHOWS_MAX, REPORTS_PER_HOUR } = chat;
+        SHOWS_MAX, REPORTS_PER_HOUR, LONG_MAX, LONG_MS, ROOM_MAX, AUTO_SLOW_MS, AUTO_PAUSE_MS, NAMES_MAX, OPS_MAX,
+        OPS_OFF_MS } = chat;
 
 const realLog = console.log;
 console.log = (...a) => {
@@ -251,7 +252,7 @@ await check("kept: the last 100 lines a room, none older than 48 hours, through 
     const w = await new World().start();
     const a = await w.in("Kyle_K");
     for (let i = 0; i < KEEP_LINES + 5; i++) {
-        later(REFILL_MS);
+        later(LONG_MS / LONG_MAX);
         await w.talk(a, "n" + i);
     }
     const w2 = await new World(w.env, w.storage).start();
@@ -587,6 +588,117 @@ await check("only a page watching the lobby, with a proper room and browser id",
     assert.deepEqual(chatOf(p.take()), [["no", "room"], ["no", "room"]]);
     await w.say(p, "chat say " + b64("not in a room"));
     assert.deepEqual(p.take(), []);
+});
+
+await check("a script keeping to the pace gets 30 lines in 5 minutes, no more", async () => {
+    const w = await new World().start();
+    const a = await w.in("Paced", { ip: "198.51.100.150" });
+    let out = 0, no;
+    for (let i = 0; i < LONG_MAX + 5; i++) {
+        later(REFILL_MS);
+        no = refused(await w.talk(a, "paced " + i));
+        if (!no.length)
+            out++;
+    }
+    assert.equal(out, LONG_MAX);
+    assert.deepEqual(no, ["fast"]);
+    later(LONG_MS);
+    assert.deepEqual(refused(await w.talk(a, "later on")), []);
+});
+
+await check("trying links counts toward being held back", async () => {
+    const w = await new World().start();
+    const a = await w.in("Linker", { ip: "198.51.100.151" });
+    let out;
+    for (let i = 0; i < FLOOD_REFUSED; i++)
+        out = chatOf(await w.talk(a, `jkcheats${i}.com`));
+    assert.deepEqual(out.filter(([op]) => op === "no").pop(), ["no", "fast", String(COOL_MS[0] / 1000)]);
+    assert.deepEqual(refused(await w.talk(a, "a plain line")), ["fast"]);
+});
+
+await check("a room flooded from many addresses turns on slow mode, then pauses, by itself", async () => {
+    const { w, mod } = await modWorld();
+    const reader = await w.in("Reader", { ip: "198.51.100.160" });
+    const addrs = [];
+    for (let i = 0; i < ROOM_MAX; i++)
+        addrs.push(await w.in("Flood" + i, { ip: "203.0.113." + (100 + i) }));
+    reader.take();
+    for (let i = 0; i < ROOM_MAX; i++)
+        await w.talk(addrs[i % 5], "flood " + i);
+    let got = chatOf(reader.take());
+    assert.deepEqual(got.filter(([op]) => op === "state").pop()[1], { slow: true, paused: false });
+    assert.ok(got.some(([op, v]) => op === "line" && v.kind === "note" && /slow mode is on for 5 minutes/.test(v.text)));
+    later(1000);
+    assert.deepEqual(refused(await w.talk(addrs[0], "more")), ["fast"], "one line every 15 s each now");
+    // Still flooding in slow mode, from 20 addresses: paused.
+    later(15 * 1000);
+    for (const a of addrs)
+        await w.talk(a, "again");
+    got = chatOf(reader.take());
+    assert.deepEqual(got.filter(([op]) => op === "state").pop()[1], { slow: true, paused: true });
+    later(15 * 1000);
+    assert.deepEqual(refused(await w.talk(addrs[1], "now?")), ["paused"]);
+    assert.deepEqual(refused(await w.talk(mod, "moderators still can")), []);
+    // Each runs out by itself: found by the next line, or the lobby's sweep.
+    later(AUTO_PAUSE_MS);
+    await w.talk(mod, "tick");
+    assert.deepEqual(chatOf(reader.take()).filter(([op]) => op === "state").pop()[1], { slow: true, paused: false });
+    later(AUTO_SLOW_MS);
+    await w.say(reader, `chat in nar-shaddaa ${reader.bid} ${b64("Reader")}`);   // heard lately, so not ended as quiet
+    await w.say(mod, `chat in nar-shaddaa ${mod.bid} ${b64("Rogue_Nine")}`);
+    await w.lobby.alarm();
+    got = chatOf(reader.take());
+    assert.deepEqual(got.filter(([op]) => op === "state").pop()[1], { slow: false, paused: false });
+    assert.ok(got.some(([op, v]) => op === "line" && v.kind === "note" && v.text === "Slow mode is off."));
+    // A moderator's slow mode stays when the room's own pause runs out.
+    await w.say(mod, "chat slow on");
+    later(SLOW_MS);
+    for (const a of addrs)
+        await w.talk(a, "and again");
+    later(AUTO_PAUSE_MS + AUTO_SLOW_MS);
+    await w.talk(mod, "tock");
+    reader.take();
+    const w2 = await new World(w.env, w.storage).start();
+    const q = await w2.in("Reader2", { ip: "198.51.100.161" });
+    const log = chatOf(q.take()).find(([op]) => op === "log")[1];
+    assert.deepEqual([log.slow, log.paused], [true, false]);
+});
+
+await check("one address: at most 4 names in a room; more pages there read without one", async () => {
+    const w = await new World().start();
+    const pages = [];
+    for (let i = 0; i < NAMES_MAX; i++)
+        pages.push(await w.in("Same" + i, { ip: "198.51.100.170" }));
+    const extra = await w.in("Same9", { ip: "198.51.100.170" });
+    const got = chatOf(extra.take());
+    assert.equal(got.find(([op]) => op === "log")[1].you.name, "");
+    assert.deepEqual(got.filter(([op]) => op === "no"), [["no", "crowd"]]);
+    const tab = await w.page("198.51.100.170");
+    tab.bid = pages[0].bid;
+    await w.in("Same0", { page: tab });
+    assert.equal(chatOf(tab.take()).find(([op]) => op === "log")[1].you.name, "Same0", "another tab of a name already there is fine");
+    const other = await w.in("Elsewhere", { ip: "198.51.100.171" });
+    assert.equal(chatOf(other.take()).find(([op]) => op === "log")[1].you.name, "Elsewhere");
+    const sith = await w.in("Same9", { ip: "198.51.100.170", room: "sith-asteroid" });
+    assert.equal(chatOf(sith.take()).find(([op]) => op === "log")[1].you.name, "Same9", "another room counts apart");
+});
+
+await check("a page sending chat messages nonstop isn't listened to for a minute (not a moderator's)", async () => {
+    const { w, mod } = await modWorld();
+    const a = await w.in("Hammer", { ip: "198.51.100.180" });
+    a.take();
+    for (let i = 0; i < OPS_MAX + 20; i++)
+        await w.say(a, "chat say " + b64(`go to jkcheats${i}.com`));
+    const got = chatOf(a.take()).filter(([op]) => op === "no");
+    assert.equal(got.length, OPS_MAX, "answers stop after " + OPS_MAX);
+    assert.deepEqual(got.at(-1), ["no", "fast", String(OPS_OFF_MS / 1000)]);
+    later(OPS_OFF_MS);
+    await w.say(a, "chat say " + b64("hello"));
+    assert.ok(chatOf(a.take()).some(([op]) => op === "no"), "answered again a minute on");
+    mod.take();
+    for (let i = 0; i < OPS_MAX + 5; i++)
+        await w.say(mod, "chat say " + b64("mod line " + i));
+    assert.equal(chatOf(mod.take()).filter(([op]) => op === "ok").length, OPS_MAX + 5);
 });
 
 Date.now = realNow;
