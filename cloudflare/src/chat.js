@@ -1,7 +1,7 @@
 // The room chat (Antonio, 2026-11-28): each of the site's three room windows
 // (Nar Shaddaa, Sith: Asteroid and the Free Demo Room) has a chat along its
 // bottom, as the Zone's game rooms had: "(Enter)> name", "(Exit)> name" and
-// "name> text" lines. On only where the CHAT var is "1" (beta, for now): the
+// "name> text" lines. On only where the CHAT var is "1" (beta and the site): the
 // lobby then says chat on connect, and a page watching it may use these
 // lines, the room by its key, a name and a text in base64 UTF-8:
 //

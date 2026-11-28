@@ -153,10 +153,11 @@ PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # MATCH_LINKS = "https://jediknight.zone"
 # The site reads the library beta's job fills; its own job stays off.
 LEVELS_FETCH = "0"
-# The room windows' chat (src/chat.js): "1" turns it on. Off on the site for
-# now (Antonio, 2026-11-28: beta only). Its moderators' keys are the
-# CHAT_MOD_KEY secret (comma separated for more than one).
-# CHAT = "1"
+# The room windows' chat (src/chat.js): "1" turns it on. On the site since
+# 2026-11-28 (Antonio: beta first, then live once beta checked out). Its
+# moderators' keys are the CHAT_MOD_KEY secret (comma separated for more than
+# one).
+CHAT = "1"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
