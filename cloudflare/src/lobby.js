@@ -78,6 +78,11 @@
 // var "1", only while a page watches the match, and for FEED_LINGER_MS after
 // the last one stops. The status says feed: 1 for a match whose feed is on.
 //
+// The room windows' chat (src/chat.js, Antonio 2026-11-28): with the CHAT
+// var "1", the lobby says chat on connect, and a page watching it may come
+// into a room's chat, say lines there, report them and, with a moderator's
+// key, moderate (chat <...>). Its lines are kept in storage for 48 hours.
+//
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
@@ -108,6 +113,7 @@ import { feedRoute, sayClean, WATCH_NAMES_MAX } from "./feed.js";
 import { imperialFeedRoute } from "./imperial-feed.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
+import { Chat } from "./chat.js";
 import { ladderRoute } from "./ladder-pages.js";
 import { levelsRoute, kickLevels } from "./levels.js";
 // The Level Library's job (src/levels.js), a Durable Object of its own.
@@ -543,8 +549,9 @@ function lobbyMessage(env) {
     // a page may ask for the kills of the match it watches (kills).
     // feed: a watched match's games send it to its feed (src/feed.js).
     // look: a page may say its player has a room open (look).
+    // chat: the room windows' chat (src/chat.js), where CHAT is "1".
     return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect" +
-        (env.FEED ? " feed" : "") + " look";
+        (env.FEED ? " feed" : "") + " look" + (String(env.CHAT || "") === "1" ? " chat" : "");
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -626,6 +633,8 @@ export class Lobby extends DurableObject {
         this.lastStatus = null;   // the status the watchers have
         this.stats = this.newStats(Date.now());
         this.ladder = new Ladder(this);
+        // The room chat (src/chat.js), on where CHAT is "1".
+        this.chat = new Chat(this);
         // Imperial relay servers' feeds (imperialFeed), by their sid:
         // {sid, id, token, delay, game, name, episode, map, pages, chain}.
         this.imperial = new Map();
@@ -737,6 +746,7 @@ export class Lobby extends DurableObject {
         if (this.nextExpiry())
             this.sweepLater(this.nextExpiry());
         await this.ladder.restore();
+        await this.chat.restore();
     }
 
     newRoom(id, entry, seats, pw) {
@@ -786,6 +796,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketClose(ws, code, reason, wasClean) {
+        this.chat.left(ws);
         this.drop(ws);
         this.forget(ws);
         this.statusChanged();
@@ -793,6 +804,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketError(ws, error) {
+        this.chat.left(ws);
         this.drop(ws);
         this.forget(ws);
         this.statusChanged();
@@ -811,6 +823,7 @@ export class Lobby extends DurableObject {
         this.alarmAt = null;
         this.sweep();
         this.ladder.sweep();
+        this.chat.sweep();
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
@@ -850,6 +863,7 @@ export class Lobby extends DurableObject {
             if (now - last < QUIET_MS)
                 continue;
             // Gone since it was last heard, not since now.
+            this.chat.left(ws);
             this.drop(ws, last);
             // Counted nowhere if the object wakes up before the socket is gone.
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
@@ -1065,6 +1079,8 @@ export class Lobby extends DurableObject {
         } else if (op === "look" && c.watch && (!args.length || (args.length <= 2 && GAMES.includes(args[0]) &&
                    (args.length === 1 || playerName(args[1]) !== null)))) {
             this.look(ws, c, args[0] || "", args.length === 2 ? playerName(args[1]) : null);
+        } else if (op === "chat" && args.length && c.watch && this.chat.on()) {
+            return this.chat.op(ws, c, args);
         } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
             this.spectate(ws, c, Number(args[0]));
         } else if (op === "kills" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {

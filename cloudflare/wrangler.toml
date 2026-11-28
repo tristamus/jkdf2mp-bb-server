@@ -153,6 +153,10 @@ PASSWORDS_FOR_OLD_GAMES_UNTIL = "2026-11-09T21:30:00Z"
 # MATCH_LINKS = "https://jediknight.zone"
 # The site reads the library beta's job fills; its own job stays off.
 LEVELS_FETCH = "0"
+# The room windows' chat (src/chat.js): "1" turns it on. Off on the site for
+# now (Antonio, 2026-11-28: beta only). Its moderators' keys are the
+# CHAT_MOD_KEY secret (comma separated for more than one).
+# CHAT = "1"
 
 # A test address with its own lobby: `npx wrangler deploy --env beta` makes a
 # separate Worker, jkdf2mp-beta, on beta.jediknight.zone. A netcode or lobby
@@ -220,6 +224,9 @@ MOVED_STATUS = "302"
 IMPERIAL_LIST = "lobby.jkjunkie.com"
 IMPERIAL_PINNED = "jk1 162.248.94.121:27960 Coruscant, mots 162.248.94.121:27961 Bespin"
 MATCH_LINKS = "https://beta.jediknight.zone"
+# The room windows' chat (src/chat.js), with its moderator key in the
+# CHAT_MOD_KEY secret (`npx wrangler secret put CHAT_MOD_KEY --env beta`).
+CHAT = "1"
 # "0" stops the Level Library's job; LEVELS_MAX_GB is how much it copies
 # before it stops (no cap when it isn't set).
 # LEVELS_FETCH = "0"
