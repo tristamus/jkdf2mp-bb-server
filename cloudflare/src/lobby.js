@@ -78,6 +78,11 @@
 // var "1", only while a page watches the match, and for FEED_LINGER_MS after
 // the last one stops. The status says feed: 1 for a match whose feed is on.
 //
+// The room windows' chat (src/chat.js, Antonio 2026-11-28): with the CHAT
+// var "1", the lobby says chat on connect, and a page watching it may come
+// into a room's chat, say lines there, report them and, with a moderator's
+// key, moderate (chat <...>). Its lines are kept in storage for 48 hours.
+//
 // When a game leaves a match, its page posts a summary of it to /summary:
 // counts only, kept in Workers Analytics Engine and the log (src/summary.js).
 //
@@ -108,6 +113,8 @@ import { feedRoute, sayClean, WATCH_NAMES_MAX } from "./feed.js";
 import { imperialFeedRoute } from "./imperial-feed.js";
 import { engineFile } from "./engine.js";
 import { Ladder } from "./ladder.js";
+import { Chat, linkish } from "./chat.js";
+import { addressKey } from "./address.js";
 import { ladderRoute } from "./ladder-pages.js";
 import { levelsRoute, kickLevels } from "./levels.js";
 // The Level Library's job (src/levels.js), a Durable Object of its own.
@@ -432,27 +439,9 @@ function sameMac(a, b) {
     return d === 0;
 }
 
-// The address wrong passwords are counted by: an IPv6 one by its first 64
-// bits, as a home line or a server usually has a whole /64 to pick from.
-// An IPv4 address, or one mapped into IPv6, as it is.
-function triesKey(ip) {
-    if (!ip.includes(":"))
-        return ip;
-    let text = ip.toLowerCase().replace(/%.*$/, "");
-    const v4 = text.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (v4)
-        text = text.slice(0, -v4[0].length) + ((v4[1] << 8) | v4[2]).toString(16) + ":" + ((v4[3] << 8) | v4[4]).toString(16);
-    const halves = text.split("::");
-    const head = halves[0] ? halves[0].split(":") : [];
-    const tail = halves[1] ? halves[1].split(":") : [];
-    const groups = halves.length === 2 ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail] : head;
-    if (halves.length > 2 || groups.length !== 8 || !groups.every(g => /^[0-9a-f]{1,4}$/.test(g)))
-        return ip;
-    const n = groups.map(g => parseInt(g, 16));
-    if (n.slice(0, 5).every(x => !x) && n[5] === 0xffff)
-        return [n[6] >> 8, n[6] & 0xff, n[7] >> 8, n[7] & 0xff].join(".");
-    return n.slice(0, 4).map(x => x.toString(16)).join(":") + "::/64";
-}
+// The address wrong passwords are counted by (src/address.js): an IPv6 one by
+// its first 64 bits.
+const triesKey = addressKey;
 
 // PASSWORDS_FOR_OLD_GAMES as the lobby takes it: "host" (or unset) or
 // "none". Anything else is taken as "none", which keeps passwords from older
@@ -543,8 +532,9 @@ function lobbyMessage(env) {
     // a page may ask for the kills of the match it watches (kills).
     // feed: a watched match's games send it to its feed (src/feed.js).
     // look: a page may say its player has a room open (look).
+    // chat: the room windows' chat (src/chat.js), where CHAT is "1".
     return (turnOn(env) ? "lobby links turn pw" : "lobby links pw") + (env.LADDER ? " match" : "") + " spect" +
-        (env.FEED ? " feed" : "") + " look";
+        (env.FEED ? " feed" : "") + " look" + (String(env.CHAT || "") === "1" ? " chat" : "");
 }
 
 // The iceServers list for a game from Cloudflare's answer: its STUN and TURN
@@ -626,6 +616,10 @@ export class Lobby extends DurableObject {
         this.lastStatus = null;   // the status the watchers have
         this.stats = this.newStats(Date.now());
         this.ladder = new Ladder(this);
+        // The room chat (src/chat.js), on where CHAT is "1".
+        this.chat = new Chat(this);
+        // Names the lists leave out, as web addresses (shownName).
+        this.linkNames = new Map();
         // Imperial relay servers' feeds (imperialFeed), by their sid:
         // {sid, id, token, delay, game, name, episode, map, pages, chain}.
         this.imperial = new Map();
@@ -737,6 +731,7 @@ export class Lobby extends DurableObject {
         if (this.nextExpiry())
             this.sweepLater(this.nextExpiry());
         await this.ladder.restore();
+        await this.chat.restore();
     }
 
     newRoom(id, entry, seats, pw) {
@@ -786,6 +781,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketClose(ws, code, reason, wasClean) {
+        this.chat.left(ws);
         this.drop(ws);
         this.forget(ws);
         this.statusChanged();
@@ -793,6 +789,7 @@ export class Lobby extends DurableObject {
     }
 
     async webSocketError(ws, error) {
+        this.chat.left(ws);
         this.drop(ws);
         this.forget(ws);
         this.statusChanged();
@@ -811,6 +808,7 @@ export class Lobby extends DurableObject {
         this.alarmAt = null;
         this.sweep();
         this.ladder.sweep();
+        this.chat.sweep();
         if (this.conns.size)
             this.sweepLater();
         if (this.nextExpiry())
@@ -850,6 +848,7 @@ export class Lobby extends DurableObject {
             if (now - last < QUIET_MS)
                 continue;
             // Gone since it was last heard, not since now.
+            this.chat.left(ws);
             this.drop(ws, last);
             // Counted nowhere if the object wakes up before the socket is gone.
             this.saveConn(ws, { room: 0, id: 0, name: null, game: "", watch: false, since: 0 });
@@ -1065,6 +1064,8 @@ export class Lobby extends DurableObject {
         } else if (op === "look" && c.watch && (!args.length || (args.length <= 2 && GAMES.includes(args[0]) &&
                    (args.length === 1 || playerName(args[1]) !== null)))) {
             this.look(ws, c, args[0] || "", args.length === 2 ? playerName(args[1]) : null);
+        } else if (op === "chat" && args.length && c.watch && this.chat.on()) {
+            return this.chat.op(ws, c, args);
         } else if (op === "spectate" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
             this.spectate(ws, c, Number(args[0]));
         } else if (op === "kills" && args.length === 1 && ID_RE.test(args[0]) && c.watch) {
@@ -1439,7 +1440,7 @@ export class Lobby extends DurableObject {
             const game = c.name != null ? c.game : c.watch && GAMES.includes(c.look) ? c.look : "";
             if (!game)
                 continue;
-            const name = c.name != null ? c.name : c.lookName;
+            const name = this.shownName(c.name != null ? c.name : c.lookName);
             online++;
             byGame[game].online++;
             if (name) {
@@ -1458,7 +1459,7 @@ export class Lobby extends DurableObject {
             if (!info)
                 continue;
             const host = room.host ? this.conn(room.host) : room.seats.get(1);
-            const names = this.seated(room).map(([id, ws, seat]) => (ws ? (id === 1 ? host : this.conn(ws)) : seat).name || "");
+            const names = this.seated(room).map(([id, ws, seat]) => this.shownName((ws ? (id === 1 ? host : this.conn(ws)) : seat).name || ""));
             const game = host.game || guessGame(info.episode);
             online += names.length;
             byGame[game].online += names.length;
@@ -1770,14 +1771,30 @@ export class Lobby extends DurableObject {
         return pages;
     }
 
+    // A player's name as the lists show it (the status, who's watching): ""
+    // for a web address however it's written (src/chat.js linkish), so a
+    // name can't put one in front of everyone.
+    shownName(name) {
+        if (!name)
+            return name;
+        let bad = this.linkNames.get(name);
+        if (bad === undefined) {
+            bad = linkish(name);
+            if (this.linkNames.size >= 4096)
+                this.linkNames.clear();
+            this.linkNames.set(name, bad);
+        }
+        return bad ? "" : name;
+    }
+
     roomWatchers(room, pages, spect) {
-        const names = spect && room.feed ? room.feed.names || [] : [];
+        const names = (spect && room.feed ? room.feed.names || [] : []).filter(x => this.shownName(x));
         const n = spect ? Math.max((pages.get(room.id) || 0) + ((room.feed && room.feed.pages) || 0), names.length) : 0;
         return { n, names };
     }
 
     impWatchers(f, pages) {
-        const names = f.names || [];
+        const names = (f.names || []).filter(x => this.shownName(x));
         return { n: Math.max((pages.get(f.id) || 0) + (f.pages || 0), names.length), names };
     }
 
