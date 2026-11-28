@@ -32,7 +32,9 @@
 //   chat ok                      its line went out
 //   chat no <why> [<n>]          it didn't: link, fast (n s), same, muted (n:
 //                                until when, ms), paused, name, taken, long,
-//                                empty, room; mod for a key it didn't take
+//                                empty, room; badname for a name it didn't
+//                                take (a web address, or "(Enter)..."); mod for
+//                                a key it didn't take
 //   chat reported <line id>
 //   chat mods <{mutes, reports}> a moderator's lists, whenever they change
 //
@@ -46,6 +48,8 @@
 // all three rooms. Addresses are only kept as a salted hash.
 
 import { TLDS, TLDS_IDN } from "./chat-tlds.js";
+import { LOOKALIKES } from "./chat-lookalikes.js";
+import { addressKey } from "./address.js";
 
 export const CHAT_ROOMS = ["nar-shaddaa", "sith-asteroid", "bespin-demo"];
 export const KEEP_LINES = 100;
@@ -77,6 +81,13 @@ export const EXIT_WAIT_MS = 10 * 1000;
 export const REPORTS_TO_MUTE = 3;
 const REPORTS_MS = 15 * 60 * 1000;
 export const REPORT_MUTE_S = 3600;
+// Reports from one address: at most REPORTS_PER_HOUR an hour count.
+export const REPORTS_PER_HOUR = 10;
+// Enter and Exit lines for one address: at most SHOWS_MAX in SHOW_AGAIN_MS
+// (someone changing names over and over), and none for one that's muted.
+export const SHOWS_MAX = 4;
+// Who's in a room's chat goes out at most every WHO_MS.
+const WHO_MS = 1000;
 const MUTE_SECS = [3600, 86400, 604800];
 // Wrong moderator keys from one address: MOD_TRIES in MOD_TRIES_MS.
 const MOD_TRIES = 5;
@@ -84,9 +95,16 @@ const MOD_TRIES_MS = 10 * 60 * 1000;
 const BID_RE = /^[0-9a-f]{32}$/;
 const B64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
 const LINE_ID_RE = /^[0-9]{1,16}$/;
-// Control and invisible characters (bidi overrides among them), as the lobby's
-// HIDDEN_RE, and line breaks, which are taken apart first.
-const HIDDEN_RE = /[\u0000-\u001f\u007f-\u009f\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g;
+// Invisible characters: controls, format characters (bidi overrides, tag
+// characters, joiners) and the rest of Unicode's default-ignorable ones
+// (Hangul fillers, ...), but the variation selectors that pick how an emoji
+// looks. Line breaks are taken apart first.
+const HIDDEN_RE = /(?![\ufe00-\ufe0f])[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/gu;
+// Blanks that show as spaces (the braille blank among them): as one space.
+const BLANK_RE = /[\s\u2800]+/g;
+// A second line that starts as the chat's own lines do: "name> ", "(Enter)> ",
+// "* " (the lobby's notes).
+const LIKE_A_LINE_RE = /^(?:[^>]{1,16}>|\*)/;
 
 function fromB64(b64, max) {
     if (!b64 || b64.length > max || !B64_RE.test(b64))
@@ -106,66 +124,98 @@ function toB64(text) {
     return btoa(bin);
 }
 
-// A name as the chat shows it: as the lobby cleans hello's.
+// At most two accents stacked on a letter, so a line or a name can't spill
+// over the others.
+function fewMarks(text) {
+    return text.normalize("NFD").replace(/(\p{M}{2})\p{M}+/gu, "$1").normalize("NFC");
+}
+
+// A name as the chat shows it: as the lobby cleans hello's, with no invisible
+// characters, blanks as one space and few accents; "" if nothing in it shows.
 export function chatName(text) {
     if (typeof text !== "string")
         return "";
-    return Array.from(text.normalize("NFC").replace(HIDDEN_RE, "").replace(/\s+/g, " ").trim())
+    const name = Array.from(fewMarks(text.normalize("NFC").replace(HIDDEN_RE, "").replace(BLANK_RE, " ").trim()))
         .slice(0, MAX_NAME).join("").trim();
+    return /[\p{L}\p{N}\p{P}\p{S}]/u.test(name) ? name : "";
 }
 
-// A line's text as it goes out: at most two lines, runs of spaces as one,
-// no invisible characters, and at most two accents stacked on a letter (so
-// a line can't spill over the others). "" for nothing left.
+// A name the chat doesn't take: a web address, or one that starts as the
+// chat's Enter and Exit lines do.
+export function badName(name) {
+    return /^\(\s*(?:enter|exit)\s*\)/i.test(name) || linkish(name);
+}
+
+// A line's text as it goes out: at most two lines, runs of blanks as one
+// space, no invisible characters and few accents. A second line that starts
+// as the chat's own lines do goes on the end of the first, so it can't pass
+// for someone else's line. "" for nothing left.
 export function chatText(text) {
     if (typeof text !== "string")
         return "";
     const lines = text.normalize("NFC").replace(/\r\n?/g, "\n").split("\n")
-        .map(l => l.replace(HIDDEN_RE, "").replace(/[ \t\u00a0\u3000]+/g, " ").trim())
+        .map(l => l.replace(HIDDEN_RE, "").replace(BLANK_RE, " ").trim())
         .filter(Boolean);
-    const two = lines.length > 2 ? [lines[0], lines.slice(1).join(" ")] : lines;
-    return two.join("\n").normalize("NFD").replace(/(\p{M}{2})\p{M}+/gu, "$1").normalize("NFC");
+    let two = lines.length > 2 ? [lines[0], lines.slice(1).join(" ")] : lines;
+    if (two.length === 2 && LIKE_A_LINE_RE.test(two[1]))
+        two = [two.join(" ")];
+    return fewMarks(two.join("\n"));
 }
 
-// Letters that look like Latin ones, as Latin.
-const LOOKALIKE = {
-    "а": "a", "в": "b", "е": "e", "ё": "e", "ѕ": "s", "і": "i", "ї": "i", "ј": "j", "к": "k", "м": "m", "н": "h",
-    "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x", "ԁ": "d", "ɡ": "g", "ӏ": "l", "ԛ": "q", "ԝ": "w",
-    "ο": "o", "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ρ": "p", "τ": "t", "υ": "u", "χ": "x", "ω": "w",
-    "β": "b", "η": "n", "μ": "u", "ℓ": "l", "ı": "i", "ȷ": "j", "ʀ": "r", "ꜱ": "s", "ᴅ": "d", "ᴇ": "e", "ᴏ": "o",
-};
-const LOOKALIKE_RE = new RegExp("[" + Object.keys(LOOKALIKE).join("") + "]", "g");
-// Dots and slashes that aren't, as those.
-const DOTS_RE = /[\u3002\uff61\u2024\u2027\u2219\u00b7\u2022\u22c5\u30fb\ufe12\ufe52\u0701\u0702\u2e33\u2e3c\ua4f8\u06d4]/g;
-const SLASHES_RE = /[\u2044\u2215\u29f8\uff0f\u2571\u27cb]/g;
+// Accents that draw a slash or a dot, as those (before accents are taken out).
+const MARK_SIGNS = { "\u0337": "/", "\u0338": "/", "\u20eb": "/", "\u302e": "." };
+const MARK_SIGNS_RE = /[\u0337\u0338\u20eb\u302e]/g;
 // Digits written for letters in a domain's ending ("c0m").
 const LEET = { "0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s" };
 // Endings people write with a space after the dot ("site. com") to get past
-// a filter, when the line goes on as an address would after it.
-const SPACED_ENDINGS = "com|net|org|gg|io|tv|ly|xyz|ru|cc|biz|info";
+// a filter, at the end of the line or before a path: not ones talk ends a
+// sentence with ("ok. gg", "good game. fun", "nice. me too").
+const SPACED_ENDINGS = "com|net|org|io|tv|ly|xyz|ru|cc|biz|info|uk|de|fr|br|pl|eu|ca|au|nl|su|ws|rf|zone";
 // The endings a loose reading counts (see readings).
-const COMMON_ENDINGS = new Set([...SPACED_ENDINGS.split("|"), "me", "co", "uk", "de", "us", "fr", "br", "pl", "eu",
-    "ca", "au", "nl", "es", "su", "ws", "gl", "link", "site", "online", "live", "app", "dev", "shop", "store", "club",
-    "fun", "top", "zone", "pro", "win", "click", "rf", "\u0440\u0444"]);
+const COMMON_ENDINGS = new Set([...SPACED_ENDINGS.split("|"), "gg", "me", "co", "us", "es", "gl", "link", "site",
+    "online", "live", "app", "dev", "shop", "store", "club", "fun", "top", "pro", "win", "click", "\u0440\u0444"]);
 
-// The ways a line is read for an address: as typed (lowercased, without
-// accents, with every kind of dot and slash as one), with lookalike letters as
-// Latin, with letters spaced out joined ("g o o g l e") and bracketed dots as
-// dots. Then, loosely, the word "dot" as a dot and spaces before a dot taken
-// out: ordinary talk reads that way too ("the red dot in the corner", "no dot
-// here"), so those count only for the endings links use most, or with a path.
+// The ways a line is read for an address. Strictly: as typed (lowercased,
+// without accents or invisible characters, every kind of dot and slash as
+// one), with lookalike letters as Latin ones (src/chat-lookalikes.js), with
+// letters spaced out joined ("g o o g l e") and bracketed dots as dots. Then
+// loosely: the word "dot" as a dot ("site dot com", "site-dot-com",
+// "siteDOTcom"), spaces before a dot taken out, single letters after a dot
+// joined ("site.c o m", "site.c.o.m"), a comma or colon before com, net or org
+// as a dot, "()" as an o, the two lines as one ("site.\ncom"). Ordinary talk
+// reads that way too ("the red dot in the corner", "no dot here"), so those
+// count only for the endings links use most, or with a path.
 function readings(text) {
-    const base = text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}+/gu, "")
-        .replace(DOTS_RE, ".").replace(SLASHES_RE, "/").replace(/\s+/g, " ");
-    const latin = base.replace(LOOKALIKE_RE, ch => LOOKALIKE[ch]);
-    const strict = [base, latin];
-    const loose = [];
-    for (const t of [base, latin]) {
+    const raw = text.replace(MARK_SIGNS_RE, ch => MARK_SIGNS[ch]);
+    const plain = t => t.normalize("NFKC").toLowerCase().replace(HIDDEN_RE, "").normalize("NFD").replace(/\p{M}+/gu, "")
+        .replace(/\\/g, "/").replace(BLANK_RE, " ");
+    // Dots, slashes and colons that aren't, as those; and lookalike letters
+    // and digits too.
+    const signs = t => Array.from(t, ch => { const to = LOOKALIKES.get(ch); return to && !/[a-z0-9]/.test(to) ? to : ch; }).join("");
+    const latin = t => Array.from(t, ch => LOOKALIKES.get(ch) || ch).join("");
+    const base = signs(plain(raw));
+    // Lookalikes before compatibility forms too: some turn into other
+    // letters there (a lunate sigma for a c into a final sigma).
+    const strict = [base, latin(base), latin(plain(latin(raw)))];
+    // A capital I or a bar for an l ("bit.Iy"); "DOT" in capitals between
+    // letters ("siteDOTcom").
+    const loose = [latin(signs(plain(raw.replace(/[I|\u01c0\u2223\uff5c\ufe31]/g, "l")))),
+                   latin(signs(plain(raw.replace(/(?<=[\p{L}\p{N}])DOT(?=[\p{L}\p{N}])/gu, "."))))];
+    if (raw.includes("\n")) {
+        const one = signs(plain(raw.replace(/\s*\n\s*/g, "")));
+        loose.push(one, latin(one));
+    }
+    for (const t of [base, latin(base)]) {
         const joined = joinSpaced(t);
         const brackets = joined.replace(/\s*[(\[{<]\s*(?:dot|d0t|\.)\s*[)\]}>]\s*/g, ".");
         strict.push(joined, brackets);
-        const words = brackets.replace(/(\S)\s+(?:dot|d0t)\s+(?=\S)/g, "$1.");
-        loose.push(words, words.replace(/\s+\.\s*/g, "."), brackets.replace(/\s+\.\s*/g, "."));
+        const words = brackets.replace(/(\S)\s+(?:dot|d0t)\s+(?=\S)/g, "$1.")
+            .replace(/[\s_~=+*|-]*[_~=+*|-](?:dot|d0t)[_~=+*|-][\s_~=+*|-]*/g, ".");
+        const tight = words.replace(/\s+\.\s*/g, ".");
+        const letters = tight.replace(/(?<=\.)\s*\p{L}(?:\s*[.\s_-]\s*\p{L}){1,5}(?![\p{L}\p{N}])/gu, x => x.replace(/[\s._-]/g, ""))
+            .replace(/(?<=[\p{L}\p{N}]{2})[,;:](?=(?:com|net|org)(?![\p{L}\p{N}]))/gu, ".")
+            .replace(/(?<=\p{L})(?:\(\)|\[\]|\{\}|<>)(?=\p{L})/gu, "o");
+        loose.push(words, tight, letters, brackets.replace(/\s+\.\s*/g, "."));
     }
     const s = new Set(strict);
     return [...[...s].map(t => [t, false]), ...[...new Set(loose)].filter(t => !s.has(t)).map(t => [t, true])];
@@ -208,6 +258,10 @@ const SCHEME_RE = /(?:h\s*[t+]\s*[t+]\s*p\s*s?|hxxps?|ftp|file|data|javascript)\
 const WWW_RE = /(?:^|[^\p{L}\p{N}])w\s*w\s*w\s*\.\s*[\p{L}\p{N}]/u;
 const IP_RE = /(?:^|[^0-9.])[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?![0-9])/;
 const SPACED_RE = new RegExp("[\\p{L}\\p{N}-]{2,}\\.\\s+(?:" + SPACED_ENDINGS + ")(?=$|[/:?#.])", "u");
+// "site. gg/abc": a space after the dot, any common ending, and a path.
+const SPACED_PATH_RE = new RegExp("[\\p{L}\\p{N}-]{2,}\\.\\s+(?:" + [...COMMON_ENDINGS].join("|") + ")\\s*\\/\\s*[\\p{L}\\p{N}]", "u");
+// An IPv6 address: groups of hex with "::" in them, or all eight.
+const IP6_RE = /(?:^|[^\p{L}\p{N}:])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?|[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){7})(?![\p{L}\p{N}:])/gu;
 // "discord gg/abc", "bit ly/abc", "youtu be/abc": an ending with a space
 // before it and a path after.
 const SPACE_PATH_RE = /[\p{L}\p{N}-]{2,}\s+(?:com|net|org|gg|io|ly|be|co|tv)\s*\/\s*[\p{L}\p{N}]/u;
@@ -217,8 +271,12 @@ const INVITE_RE = /discord(?:app)?\s*(?:\.|\s)\s*(?:gg|com\s*\/\s*invite)\b|\bds
 export function linkish(text) {
     for (const [t, loose] of readings(text)) {
         if (SCHEME_RE.test(t) || WWW_RE.test(t) || IP_RE.test(t) || EMAIL_RE.test(t) || SPACED_RE.test(t) ||
-            SPACE_PATH_RE.test(t) || INVITE_RE.test(t))
+            SPACED_PATH_RE.test(t) || SPACE_PATH_RE.test(t) || INVITE_RE.test(t))
             return true;
+        for (const m of t.matchAll(IP6_RE)) {
+            if (/[0-9]/.test(m[0]) && m[0].replace(/[^0-9a-f]/g, "").length >= 4)
+                return true;
+        }
         for (const m of t.matchAll(DOMAIN_RE)) {
             if (!isEnding(m[1]))
                 continue;
@@ -279,7 +337,11 @@ export class Chat {
         this.shownAt = new Map();   // "room\nname" -> {enter, exit}: when each last showed
         this.exits = new Map();     // "room\nname" -> timer of an Exit waiting
         this.modTries = new Map();  // address -> [at]
+        this.shows = new Map();     // address -> [at] of its Enter and Exit lines
+        this.reportsBy = new Map(); // address -> [at] of its reports
+        this.whoAt = new Map();     // room -> {at, timer}: when who last went out, one waiting
         this.exitWait = Number(this.env.CHAT_EXIT_WAIT_MS) || EXIT_WAIT_MS;   // shorter in tests
+        this.whoMs = this.env.CHAT_WHO_MS !== undefined ? Number(this.env.CHAT_WHO_MS) : WHO_MS;
     }
 
     on() {
@@ -370,8 +432,23 @@ export class Chat {
         return { names: [...names].sort((a, b) => a.localeCompare(b)).slice(0, 64), n };
     }
 
+    // At most every whoMs: one more after the last, when it's time.
     sayWho(room) {
-        this.tell(room, this.json("who", this.who(room)));
+        const w = this.whoAt.get(room) || { at: 0, timer: null };
+        this.whoAt.set(room, w);
+        if (w.timer)
+            return;
+        const wait = w.at + this.whoMs - Date.now();
+        if (wait <= 0) {
+            w.at = Date.now();
+            this.tell(room, this.json("who", this.who(room)));
+            return;
+        }
+        w.timer = setTimeout(() => {
+            w.timer = null;
+            w.at = Date.now();
+            this.tell(room, this.json("who", this.who(room)));
+        }, wait);
     }
 
     muteOf(who, now = Date.now()) {
@@ -436,7 +513,12 @@ export class Chat {
         }
         let name = args.length === 3 ? chatName(fromB64(args[2], MAX_NAME_B64)) : "";
         const room = args[0], b = args[1];
-        const h = c.chat && c.chat.h ? c.chat.h : await this.addressHash(c.ip || b);
+        const h = c.chat && c.chat.h ? c.chat.h : await this.addressHash(c.ip ? addressKey(c.ip) : b);
+        // A web address for a name, or one that reads as an Enter line: in
+        // without one.
+        const bad = !!name && badName(name);
+        if (bad)
+            name = "";
         // Someone else in the room has the name: in without one.
         let taken = false;
         if (name) {
@@ -459,10 +541,12 @@ export class Chat {
         }
         if (taken)
             this.lobby.send(ws, "chat no taken");
+        if (bad)
+            this.lobby.send(ws, "chat no badname");
         if (name && (!sameRoom || (was.name || "").toLowerCase() !== name.toLowerCase()))
-            this.came(room, name);
+            this.came(room, name, m);
         if (sameRoom && was.name && was.name.toLowerCase() !== (name || "").toLowerCase())
-            this.went(room, was.name, ws);
+            this.went(room, was.name, ws, was);
         this.sayWho(room);
     }
 
@@ -476,13 +560,13 @@ export class Chat {
         delete rest.chat;
         this.lobby.saveConn(ws, rest);
         if (m.name)
-            this.went(m.room, m.name, ws);
+            this.went(m.room, m.name, ws, m);
         this.sayWho(m.room);
     }
 
     // (Enter)> name, unless it's a page coming back before its Exit showed,
     // or it showed in the last SHOW_AGAIN_MS.
-    came(room, name) {
+    came(room, name, who) {
         const key = room + "\n" + name.toLowerCase();
         const waiting = this.exits.get(key);
         if (waiting) {
@@ -492,7 +576,7 @@ export class Chat {
         }
         const s = this.shownAt.get(key) || { enter: 0, exit: 0 };
         const now = Date.now();
-        if (now - s.enter < SHOW_AGAIN_MS)
+        if (now - s.enter < SHOW_AGAIN_MS || !this.mayShow(who, now))
             return;
         s.enter = now;
         this.shownAt.set(key, s);
@@ -501,7 +585,7 @@ export class Chat {
 
     // (Exit)> name, EXIT_WAIT_MS later, unless the name is still in the room
     // on another page, or comes back meanwhile.
-    went(room, name, ws) {
+    went(room, name, ws, who) {
         const lower = name.toLowerCase();
         if (this.members(room).some(([w, x]) => w !== ws && x.name && x.name.toLowerCase() === lower))
             return;
@@ -514,12 +598,25 @@ export class Chat {
                 return;
             const s = this.shownAt.get(key) || { enter: 0, exit: 0 };
             const now = Date.now();
-            if (now - s.exit < SHOW_AGAIN_MS)
+            if (now - s.exit < SHOW_AGAIN_MS || !this.mayShow(who, now))
                 return;
             s.exit = now;
             this.shownAt.set(key, s);
             this.tell(room, this.json("line", { id: this.newId(), at: now, kind: "exit", name }));
         }, this.exitWait));
+    }
+
+    // Whether an Enter or Exit line may show for someone: not if they're
+    // muted, nor past SHOWS_MAX from their address in SHOW_AGAIN_MS. Counts it.
+    mayShow(who, now) {
+        if (!who.mod && this.muteOf(who, now))
+            return false;
+        const shows = (this.shows.get(who.h) || []).filter(t => now - t < SHOW_AGAIN_MS);
+        this.shows.set(who.h, shows);
+        if (!who.mod && shows.length >= SHOWS_MAX)
+            return false;
+        shows.push(now);
+        return true;
     }
 
     async addressHash(address) {
@@ -632,10 +729,15 @@ export class Chat {
         if (!found || found.room !== m.room || !found.l.name || found.l.kind || found.l.mod || !m.name || found.l.h === m.h)
             return;
         const l = found.l, now = Date.now();
-        if ([...this.reports.values()].some(r => r.line.id === id && r.rh === m.h)) {
+        // Once each, and at most REPORTS_PER_HOUR an hour from an address
+        // (an IPv6 one by its /64). The page hears the same either way.
+        const mine = (this.reportsBy.get(m.h) || []).filter(t => now - t < 3600 * 1000);
+        this.reportsBy.set(m.h, mine);
+        if ([...this.reports.values()].some(r => r.line.id === id && r.rh === m.h) || mine.length >= REPORTS_PER_HOUR) {
             this.lobby.send(ws, "chat reported " + id);
             return;
         }
+        mine.push(now);
         const r = { id: this.newId(), at: now, room: m.room, line: { id, name: l.name, text: l.text }, by: m.name, rh: m.h,
                     an: l.name.toLowerCase(), ab: l.b, ah: l.h };
         this.reports.set(r.id, r);
@@ -812,6 +914,18 @@ export class Chat {
         for (const [h, b] of this.buckets) {
             if (now - b.at > COOL_AGAIN_MS && b.cool < now)
                 this.buckets.delete(h);
+        }
+        // And what only matters for a while: when Enter and Exit last showed,
+        // reports and wrong keys by address.
+        for (const [k, x] of this.shownAt) {
+            if (now - Math.max(x.enter, x.exit) >= SHOW_AGAIN_MS)
+                this.shownAt.delete(k);
+        }
+        for (const [map, ms] of [[this.shows, SHOW_AGAIN_MS], [this.reportsBy, 3600 * 1000], [this.modTries, MOD_TRIES_MS]]) {
+            for (const [k, list] of map) {
+                if (!list.some(t => now - t < ms))
+                    map.delete(k);
+            }
         }
         if (changed) {
             this.tellYou();

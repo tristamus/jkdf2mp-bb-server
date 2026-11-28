@@ -21,7 +21,8 @@ export async function resolve(specifier, context, next) {
 const { FakeStorage, FakeCtx } = await import("./cfstub.mjs");
 const { Lobby } = await import("../src/lobby.js");
 const chat = await import("../src/chat.js");
-const { linkish, chatText, KEEP_LINES, KEEP_MS, BURST, REFILL_MS, SAME_MS, SLOW_MS, COOL_MS, FLOOD_REFUSED } = chat;
+const { linkish, chatText, chatName, KEEP_LINES, KEEP_MS, BURST, REFILL_MS, SAME_MS, SLOW_MS, COOL_MS, FLOOD_REFUSED,
+        SHOWS_MAX, REPORTS_PER_HOUR } = chat;
 
 const realLog = console.log;
 console.log = (...a) => {
@@ -59,7 +60,7 @@ const later = ms => { shift += ms; };
 
 class World {
     constructor(env = {}, storage = new FakeStorage()) {
-        this.env = { SITE: "", MOVED_FROM: "", CHAT: "1", CHAT_MOD_KEY: KEY, CHAT_EXIT_WAIT_MS: "20", ...env };
+        this.env = { SITE: "", MOVED_FROM: "", CHAT: "1", CHAT_MOD_KEY: KEY, CHAT_EXIT_WAIT_MS: "20", CHAT_WHO_MS: "0", ...env };
         this.storage = storage;
     }
     async start(sockets = []) {
@@ -422,6 +423,155 @@ await check("reports: once each, to the moderators; three people in 15 minutes m
     mods = chatOf(mod.take()).filter(([op]) => op === "mods").pop()[1];
     assert.equal(mods.reports.length, 2);
     assert.equal(mods.mutes.length, 2);
+});
+
+// What people tried to get past the chat (Antonio, 2026-11-28: "try to break
+// the guardrails and safety of the chat").
+await check("disguised addresses are turned down: invisible characters, lookalikes, odd dots, two lines", () => {
+    const yes = [
+        // Invisible characters between letters: tag characters, Hangul
+        // fillers, the Mongolian vowel separator, Arabic letter mark,
+        // shorthand format controls, musical formatting, interlinear marks.
+        "jediknight.z\u{E0061}one", "jediknight.\u{E0020}zone", "jediknight.\u3164zone", "jediknight.\u115fzone",
+        "jediknight.\uffa0zone", "jediknight\u061c.zone", "jediknight.\u180ezone", "jediknight.\u{1BCA0}zone",
+        "jediknight.\u{1D173}zone", "jediknight.\ufff9zone", "jediknight.\u17b4zone",
+        // Lookalike letters in the ending (Greek, Coptic, Cherokee, small
+        // capitals, Indic zeros and signs, a capital I or bar for an l).
+        "google.\u03f2om", "google.c\u03c3m", "google.\u1d04\u1d0f\u1d0d", "jkcheats.\u13dfom", "jkcheats.c\u0966m",
+        "jkcheats.z\u0c02ne", "bit.Iy/abc", "bit.|y/abc", "jkcheats.\u{1D408}o", "google.c\u25cbm",
+        // Dots and slashes that aren't.
+        "jkcheats\u25e6com", "jkcheats\u2e31com", "jkcheats\u2023com", "jkcheats\u2299com", "jkcheats\u0589com",
+        "jkcheats\u1362com", "jkcheats\u00b0com", "discord gg\u0338abc", "discord.gg\u2298abc", "http:\\\\jkcheats",
+        // Spelled out or spaced.
+        "google -dot- com", "google_dot_com", "googleDOTcom", "jkcheats.c o m", "jkcheats.c.o.m", "jkcheats.c-o-m",
+        "jkcheats,com", "jkcheats;com", "jkcheats:com", "jkcheats.c()m", "jkcheats.c[]m", "cheats. gg/abc",
+        "jediknight. zone", "jediknight.\nzone", "jediknight.zo\nne", "jediknight.\u2800zone",
+        // An IPv6 address.
+        "2001:db8::1", "join fe80::1ff:fe23:4567:890a",
+    ];
+    for (const t of yes)
+        assert.equal(linkish(chatText(t)), true, "turned down: " + JSON.stringify(t));
+    const no = [
+        "ok. gg", "GG. GG", "fun round. gg", "good game. fun", "nice. me too", "in the zone. live", "lol. gg all",
+        "who wants to duel?\nsabers only", "e.g. this", "U.S. servers", "M.O.T.S", "the red dot in the corner",
+        "12:30 tonight", "at 10:30:45", "2v2? ok:)", "lol,gg", "pi is 3.14", "\u2299_\u2299", "Hi. It's me",
+    ];
+    for (const t of no)
+        assert.equal(linkish(chatText(t)), false, "goes through: " + JSON.stringify(t));
+});
+
+await check("a second line that reads as someone else's line goes on the end of the first", () => {
+    assert.equal(chatText("hi\nKyle_K> I quit, bye"), "hi Kyle_K> I quit, bye");
+    assert.equal(chatText("hi\nDark Jedi> lol"), "hi Dark Jedi> lol");
+    assert.equal(chatText("hi\n(Enter)> Kyle_K"), "hi (Enter)> Kyle_K");
+    assert.equal(chatText("hi\n* Kyle_K was muted for 7 days by a moderator."), "hi * Kyle_K was muted for 7 days by a moderator.");
+    assert.equal(chatText("who wants to duel?\nsabers only"), "who wants to duel?\nsabers only");
+});
+
+await check("names: no web address or Enter line for one, nothing invisible, few accents", async () => {
+    assert.equal(chatName("\u3164\u3164"), "", "Hangul fillers only: no name");
+    assert.equal(chatName("\u2800"), "", "a braille blank: no name");
+    assert.equal(chatName("a\u{E0061}b"), "ab");
+    assert.equal(chatName("Z" + "\u0301".repeat(14)).normalize("NFD"), "Z\u0301\u0301");
+    const w = await new World().start();
+    const there = await w.in("Kyle_K");
+    there.take();
+    for (const name of ["jkcheats.com", "jkcheats dot gg", "(Enter)> Bob", "( exit )"]) {
+        const p = await w.in(name);
+        const out = chatOf(p.take());
+        assert.equal(out.find(([op]) => op === "log")[1].you.name, "", "in without a name: " + name);
+        assert.deepEqual(refused(p.take().concat([])).concat(out.filter(([op]) => op === "no").map(([, why]) => why)), ["badname"]);
+        await w.close(p);
+    }
+    await sleep(60);
+    const seen = chatOf(there.take()).filter(([op, v]) => op === "line" || (op === "who" && v.names.length > 1));
+    assert.deepEqual(seen, [], "the room saw none of them");
+});
+
+await check("changing names over and over shows at most a few Enter and Exit lines; a muted name none", async () => {
+    const w = await new World().start();
+    const there = await w.in("Kyle_K", { ip: "198.51.100.60" });
+    there.take();
+    const p = await w.in("Name0", { ip: "198.51.100.61" });
+    for (let i = 1; i < 30; i++)
+        await w.in("Name" + i, { page: p });
+    await sleep(80);
+    const shown = chatOf(there.take()).filter(([op, v]) => op === "line" && v.kind);
+    assert.ok(shown.length <= SHOWS_MAX, shown.length + " Enter and Exit lines");
+    later(2 * 60 * 1000 + 1);
+    // A muted name: in and out with no line.
+    const { w: w2, mod } = await modWorld();
+    const bad = await w2.in("Spammer", { ip: "198.51.100.62" });
+    const id = chatOf(await w2.talk(bad, "buy stuff")).find(([op, v]) => op === "line" && !v.kind)[1].id;
+    await w2.say(mod, `chat mute 3600 ${id}`);
+    mod.take();
+    await w2.close(bad);
+    const again = await w2.in("Spammer2", { ip: "198.51.100.62" });
+    await w2.close(again);
+    await sleep(80);
+    assert.deepEqual(chatOf(mod.take()).filter(([op, v]) => op === "line" && v.kind), [], "no Enter or Exit for a muted address");
+});
+
+await check("an IPv6 address counts by its /64: limits, mutes and reports", async () => {
+    const { w, mod } = await modWorld();
+    const a = await w.in("V6a", { ip: "2001:db8:1:2::a" });
+    const b = await w.in("V6b", { ip: "2001:db8:1:2:ffff::b" });
+    for (let i = 0; i < BURST; i++)
+        await w.talk(i % 2 ? a : b, "line " + i);
+    assert.deepEqual(refused(await w.talk(b, "more")), ["fast"], "one bucket for the /64");
+    const c = await w.in("V6c", { ip: "2001:db8:1:3::c" });
+    assert.deepEqual(refused(await w.talk(c, "next door")), [], "another /64 isn't held up");
+    // Three reporters from one /64 are one.
+    later(60 * 1000);
+    const victim = await w.in("Victim", { ip: "198.51.100.70" });
+    const id = chatOf(await w.talk(victim, "hello")).find(([op, v]) => op === "line" && !v.kind)[1].id;
+    for (let i = 0; i < 3; i++) {
+        const r = await w.in("Rep" + i, { ip: `2001:db8:9:9::${i + 1}` });
+        await w.say(r, `chat report ${id}`);
+    }
+    const mods = chatOf(mod.take()).filter(([op]) => op === "mods").pop()[1];
+    assert.equal(mods.reports.length, 1, "one report from the /64");
+    assert.equal(mods.mutes.length, 0, "and no mute");
+});
+
+await check("reports: at most 10 an hour from an address count", async () => {
+    const { w, mod } = await modWorld();
+    const ids = [];
+    for (let i = 0; i < REPORTS_PER_HOUR + 3; i++) {
+        const t = await w.in("Talker" + i, { ip: "198.51.100." + (100 + i) });
+        ids.push(chatOf(await w.talk(t, "line " + i)).find(([op, v]) => op === "line" && !v.kind)[1].id);
+    }
+    const r = await w.in("Reporter", { ip: "198.51.100.200" });
+    for (const id of ids)
+        await w.say(r, `chat report ${id}`);
+    assert.equal(chatOf(r.take()).filter(([op]) => op === "reported").length, ids.length, "the page hears each");
+    const mods = chatOf(mod.take()).filter(([op]) => op === "mods").pop()[1];
+    assert.equal(mods.reports.length, REPORTS_PER_HOUR);
+});
+
+await check("who's in the room goes out at most once a second", async () => {
+    const w = await new World({ CHAT_WHO_MS: "300" }).start();
+    const there = await w.in("Kyle_K", { ip: "198.51.100.80" });
+    there.take();
+    for (let i = 0; i < 20; i++)
+        await w.in("Crowd" + i, { ip: "198.51.100." + (120 + i) });
+    const now = chatOf(there.take()).filter(([op]) => op === "who").length;
+    assert.ok(now <= 1, now + " right away");
+    await sleep(400);
+    const then = chatOf(there.take()).filter(([op]) => op === "who");
+    assert.equal(then.length, 1, "one more when it's time");
+    assert.equal(then[0][1].n, 21);
+});
+
+await check("the lists leave out a name that's a web address (Looking, games, watching)", async () => {
+    const w = await new World().start();
+    const p = await w.page();
+    await w.say(p, "look jk1 " + b64("jkcheats.com"));
+    const q = await w.page();
+    await w.say(q, "look jk1 " + b64("Kyle_K"));
+    const s = JSON.parse(Buffer.from(q.take().filter(l => l.startsWith("status ")).pop().slice(7), "base64").toString());
+    assert.deepEqual(s.byGame.jk1.lobby, ["Kyle_K"]);
+    assert.equal(s.byGame.jk1.online, 2, "still counted");
 });
 
 await check("only a page watching the lobby, with a proper room and browser id", async () => {
