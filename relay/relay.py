@@ -80,7 +80,12 @@ game has a password, and net the netcode the game's host speaks. byGame splits
 the counts and the lobby by the game players run, for the page's rooms. The
 relay reads a game's details from its entry (a jkMultiEntry, then the mod tail
 from mods.js), and never sends its password, only whether it has one. A player
-is a connection that said hello or is in a room; watching pages don't count.
+is a connection that said hello or is in a room, or a watching page whose
+player has a room open: it says look <game> [<name>] (base64 UTF-8, as with
+hello), or look for none, and hears looking <game> [<name>] (as taken) or
+looking off after the status that counts it so. It's counted in that game's
+online and, by its name, in lobby. lobby says look for pages to know this.
+Other watching pages don't count.
 A watching page says which room's match it watches with spectate <room>
 (spectate 0 for none), and each game in status says whether it can be watched
 ("spect": 1 or 0) and, once anyone does, how many pages watch it
@@ -207,6 +212,8 @@ class Conn:
         self.game = ""
         self.watch = False
         self.spect = 0  # the room whose match this watching page watches
+        self.look = ""  # the game whose room this watching page's player has open (look)
+        self.look_name = None  # and the name it gave
         self.closed = False
 
     def send_frame(self, opcode, payload):
@@ -405,6 +412,17 @@ class Relay:
             elif op == "watch" and not args:
                 conn.watch = True
                 self._watch(conn, outbox)
+            elif op == "look" and conn.watch and (not args or (len(args) <= 2 and args[0] in GAMES and
+                                                             (len(args) == 1 or player_name(args[1]) is not None))):
+                game = args[0] if args else ""
+                name = (player_name(args[1]) or None) if game and len(args) == 2 else None
+                if (conn.look, conn.look_name) != (game, name):
+                    conn.look, conn.look_name = game, name
+                    self._status_changed(outbox)
+                # After the status that counts it so, as status() in cloudflare/src/lobby.js.
+                ack = "looking " + game + (" " + base64.b64encode(name.encode("utf-8")).decode() if name else "") \
+                    if game else "looking off"
+                outbox.append((conn, OP_TEXT, ack.encode()))
             elif op == "spectate" and len(args) == 1 and args[0].isdigit() and len(args[0]) <= 9 and conn.watch:
                 room_id = int(args[0]) if int(args[0]) in self.rooms else 0
                 if conn.spect != room_id:
@@ -533,16 +551,19 @@ class Relay:
 
     # The landing page's live counts. Same as status() in cloudflare/src/lobby.js.
     def _status(self):
-        waiting = [c for c in self.conns if not c.room and c.name is not None]
-        lobby = sorted((c.name for c in waiting), key=sort_key)
-        by_game = {g: dict(online=0, lobby=sorted((c.name for c in waiting if c.game == g), key=sort_key))
+        # Games that said hello and aren't in a room, and pages whose player has a room open (look): (game, name).
+        waiting = [(c.game, c.name) if c.name is not None else (c.look, c.look_name) for c in self.conns
+                   if not c.room and (c.name is not None or (c.watch and c.look in GAMES))]
+        lobby = sorted((n for g, n in waiting if n), key=sort_key)
+        by_game = {g: dict(online=sum(1 for w, n in waiting if w == g),
+                           lobby=sorted((n for w, n in waiting if w == g and n), key=sort_key))
                    for g in GAMES}
         watching = {}
         for c in self.conns:
             if c.watch and c.spect:
                 watching[c.spect] = watching.get(c.spect, 0) + 1
         games = []
-        online = len(lobby)
+        online = len(waiting)
         for room in sorted(self.rooms.values(), key=lambda r: r.id):
             info = read_entry(room.entry)
             if not info:
@@ -561,7 +582,6 @@ class Relay:
                 g["watching"] = watching[room.id]
             games.append(g)
         for g in by_game.values():
-            g["online"] += len(g["lobby"])
             g["lobby"] = g["lobby"][:MAX_STATUS_NAMES]
         data = json.dumps(dict(online=online, lobby=lobby[:MAX_STATUS_NAMES], byGame=by_game,
                                games=games[:MAX_STATUS_GAMES]),
@@ -852,7 +872,7 @@ class IceConfig:
         return line + " %d" % self.ttl if with_ttl else line
 
     def lobby_message(self):
-        return "lobby links turn pw spect" if self.turn else "lobby links pw spect"
+        return "lobby links turn pw spect look" if self.turn else "lobby links pw spect look"
 
 
 def log(text):
@@ -966,7 +986,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.relay.connect(conn)
         if self.ice and self.ice.enabled():
             conn.send_text(self.ice.message())
-        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links pw spect")
+        conn.send_text(self.ice.lobby_message() if self.ice else "lobby links pw spect look")
         try:
             self.websocket_loop(conn)
         finally:
