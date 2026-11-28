@@ -161,7 +161,7 @@ S <- peer-lost 2
 S -> list
 S <- list <room4> 1 00000000000000000000000000000000630000000100000074005f005300690074006800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d5f4d5000000000000000000000000000000000000000000000000000006d322e6a6b6c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b4d44020200abababababababababababababababab <room5> 3 5ea7
 P2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-P2 <- lobby links pw match
+P2 <- lobby links pw match spect feed look chat
 P2 -> rejoin <room5> 2 <wrong key>
 P2 <- error no-seat
 P2 -> rejoin <room5> 3 <P's key>
@@ -176,7 +176,7 @@ P2 <- bin from=1 to=2 body=host to P2
 P2 -> bin
 S <- bin from=2 to=1 body=P2 to host
 Q2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-Q2 <- lobby links pw match
+Q2 <- lobby links pw match spect feed look chat
 Q2 -> rejoin <room5> 3 <Q's key>
 Q closed 4001
 Q2 <- rejoined <room5> 3
@@ -193,7 +193,7 @@ X <- list <room4> 1 00000000000000000000000000000000630000000100000074005f005300
 X -> join <room5>
 X <- error no-room
 S2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-S2 <- lobby links pw match
+S2 <- lobby links pw match spect feed look chat
 S2 -> rehost <room5> <S's key> 5ea8
 P2 <- host-back
 Q2 <- host-back
@@ -258,16 +258,16 @@ U closed 1000
 R -> bin to id 2, whose seat is held, for longer than NOTICE_MS
 R -> leave
 W2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-W2 <- lobby links pw match
+W2 <- lobby links pw match spect feed look chat
 W2 -> watch
 N1 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-N1 <- lobby links pw match
+N1 <- lobby links pw match spect feed look chat
 N1 -> host <t_Net1 entry>, connected with net=1
 N1 <- hosted <room8>
 N1 <- seat <room8> 1 <key>
 W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room8> "t_Net1" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""] net=1]
 N0 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-N0 <- lobby links pw match
+N0 <- lobby links pw match spect feed look chat
 N0 -> host <t_Net0 entry>, connected with net=0
 N0 <- hosted <room9>
 N0 <- seat <room9> 1 <key>
@@ -295,14 +295,14 @@ Z <- lobby links pw match spect feed look chat
 Z -> list
 Z <- list <room9> 2 00000000000000000000000000000000040000000100000074005f004e00650074003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 Z2 <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-Z2 <- lobby links pw match
+Z2 <- lobby links pw match spect feed look chat
 Z2 -> join <room8>
 Z2 <- error version newer
 N1 closes
 N1 closed 1000
 Y <- host-lost
 N1b <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-N1b <- lobby links pw match
+N1b <- lobby links pw match spect feed look chat
 N1b -> rehost <room8> <N1's key>
 N1b <- rehosted <room8>
 Y <- host-back
@@ -319,19 +319,19 @@ W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<r
 N1b -> leave
 W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[]
 PH <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-PH <- lobby links pw match
+PH <- lobby links pw match spect feed look chat
 PH -> host <t_Locked entry with a password>, connected with pw=1
 PH <- hosted <room10>
 PH <- seat <room10> 1 <key>
 W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room10> "t_Locked" jk1 01narshadda.jkl JK1MP mod="" locked 1/4 [""]]
 PO <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-PO <- lobby links pw match
+PO <- lobby links pw match spect feed look chat
 PO -> host <t_Open entry with no password but the password box>, connected with pw=1
 PO <- hosted <room11>
 PO <- seat <room11> 1 <key>
 W2 <- status ok lobby jk1=["t_Bee","t_Host"] mots=["t_Äccent long n"] games=[<room10> "t_Locked" jk1 01narshadda.jkl JK1MP mod="" locked 1/4 [""], <room11> "t_Open" jk1 01narshadda.jkl JK1MP mod="" open 1/4 [""]]
 PJ <- ice [{"urls":["stun:stun.cloudflare.com:3478"]}]
-PJ <- lobby links pw match
+PJ <- lobby links pw match spect feed look chat
 PJ -> list jk1
 PJ <- list <room10> 1 00000000000000000000000000000000040000000100000074005f004c006f0063006b00650064000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000 <room11> 1 00000000000000000000000000000000040000000100000074005f004f00700065006e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004a4b314d5000000000000000000000000000000000000000000000000000000030316e61727368616464612e6a6b6c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 X -> list jk1
